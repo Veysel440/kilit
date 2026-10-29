@@ -14,7 +14,10 @@ repository = "https://github.com/Veysel440/kilit"
 # No TLS, and the pure-Rust zlib backend instead of the C one: the whole
 # dependency tree stays Rust.
 mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt"] }
+toml = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

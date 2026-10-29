@@ -1,42 +1,102 @@
-//! Prints observations as plain-text tables.
+//! Prints the lab's results as plain-text tables.
 
-use crate::probe::{FIXTURE_ROWS, Observation, Outcome};
-use crate::scenario::Scenario;
+use crate::fixture::ORDERS_ROWS;
+use crate::matrix::Server;
+use crate::probe::{Measurement, Outcome};
+use crate::scenario::Variant;
+use crate::verdict::{Verdict, Writes};
 
-pub fn print_server(version: &str, address: &str) {
-    println!("== MySQL {version} at {address}");
-}
+/// One line per scenario: what the server does when nothing is forced.
+pub fn print_summary(server: &Server, address: &str, measurements: &[Measurement]) {
+    let width = measurements
+        .iter()
+        .map(|measurement| measurement.scenario.id.len())
+        .max()
+        .unwrap_or(0)
+        .max("scenario".len());
 
-pub fn print_scenario(scenario: &Scenario, observations: &[Observation]) {
+    println!("== {} {} at {address}", server.product, server.version);
     println!();
-    println!("{}: {}", scenario.id, scenario.title);
     println!(
-        "ALTER TABLE orders {}  ({FIXTURE_ROWS} rows)",
-        scenario.operation
+        "  {:<width$}  {:<9}  {:<8}  {:>11}  writes",
+        "scenario", "algorithm", "rebuilds", "copied rows"
     );
-    println!();
-    println!(
-        "  {:<30} {:<10} {:>11}  {:<7}  row versions",
-        "variant", "result", "copied rows", "rebuilt"
-    );
-    for observation in observations {
-        let variant = observation.variant.to_string();
-        match &observation.outcome {
-            Outcome::Accepted {
+
+    let mut inconsistent = false;
+    for measurement in measurements {
+        let id = &measurement.scenario.id;
+        match &measurement.verdict {
+            Verdict::Runs {
+                algorithm,
+                rebuilds_table,
                 copied_rows,
-                rebuilt,
-                row_versions: (before, after),
+                writes,
+                consistent,
             } => {
+                let algorithm = algorithm.map_or_else(|| "?".to_owned(), |a| a.to_string());
+                let rebuilds = if *rebuilds_table { "yes" } else { "no" };
                 let copied = copied_rows.map_or_else(|| "?".to_owned(), |rows| rows.to_string());
-                let rebuilt = if *rebuilt { "yes" } else { "no" };
+                let writes = match writes {
+                    Writes::Allowed => "allowed",
+                    Writes::Blocked => "blocked",
+                    Writes::Unknown => "unknown",
+                };
+                let flag = if *consistent { "" } else { "  (!)" };
+                inconsistent |= !consistent;
                 println!(
-                    "  {variant:<30} {:<10} {copied:>11}  {rebuilt:<7}  {before} -> {after}",
-                    "accepted"
+                    "  {id:<width$}  {algorithm:<9}  {rebuilds:<8}  {copied:>11}  {writes}{flag}"
                 );
             }
-            Outcome::Rejected { code, message } => {
-                let result = format!("error {code}");
-                println!("  {variant:<30} {result:<10} {message}");
+            Verdict::Fails { code, message } => {
+                println!("  {id:<width$}  fails with error {code}: {message}");
+            }
+        }
+    }
+    if inconsistent {
+        println!();
+        println!("  (!) the server-default run differs from the forced run of that algorithm;");
+        println!("      run with --details and look closer");
+    }
+}
+
+/// Every variant of every scenario.
+pub fn print_details(measurements: &[Measurement]) {
+    for measurement in measurements {
+        let scenario = measurement.scenario;
+        println!();
+        println!("{}: {}", scenario.id, scenario.title);
+        for statement in &scenario.session {
+            println!("{statement};");
+        }
+        println!(
+            "{}  ({ORDERS_ROWS} rows)",
+            scenario.statement(Variant::SERVER_DEFAULT)
+        );
+        println!();
+        println!(
+            "  {:<30} {:<10} {:>11}  {:<7}  row versions",
+            "variant", "result", "copied rows", "rebuilt"
+        );
+        for observation in &measurement.observations {
+            let variant = observation.variant.to_string();
+            match &observation.outcome {
+                Outcome::Accepted {
+                    copied_rows,
+                    rebuilt,
+                    row_versions: (before, after),
+                } => {
+                    let copied =
+                        copied_rows.map_or_else(|| "?".to_owned(), |rows| rows.to_string());
+                    let rebuilt = if *rebuilt { "yes" } else { "no" };
+                    println!(
+                        "  {variant:<30} {:<10} {copied:>11}  {rebuilt:<7}  {before} -> {after}",
+                        "accepted"
+                    );
+                }
+                Outcome::Rejected { code, message } => {
+                    let result = format!("error {code}");
+                    println!("  {variant:<30} {result:<10} {message}");
+                }
             }
         }
     }

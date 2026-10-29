@@ -1,0 +1,2 @@
+title = "Make a column NOT NULL when no row is NULL"
+operation = "MODIFY COLUMN email VARCHAR(255) NOT NULL"

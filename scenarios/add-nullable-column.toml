@@ -1,0 +1,2 @@
+title = "Add a nullable column at the end of the table"
+operation = "ADD COLUMN coupon VARCHAR(255) NULL"

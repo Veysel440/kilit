@@ -1,20 +1,24 @@
-//! kilit-lab runs schema-change scenarios against real MySQL servers and
-//! prints what each server actually did.
+//! kilit-lab runs schema-change scenarios against real MySQL servers,
+//! prints what each server did and saves the results under `matrix/`.
 //!
 //! Start the servers with `docker compose up -d --wait`, then run
 //! `cargo run -p kilit-lab`, or pass your own `mysql://` URLs.
 
+mod fixture;
+mod matrix;
 mod probe;
 mod report;
 mod scenario;
+mod verdict;
 
+use std::path::Path;
 use std::process::ExitCode;
 
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts, OptsBuilder};
 
-use crate::probe::Observation;
-use crate::scenario::{SCENARIOS, Variant};
+use crate::matrix::Server;
+use crate::scenario::Scenario;
 
 /// The lab's errors: the server or the network failed us, not a measurement.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -26,30 +30,56 @@ const DEFAULT_TARGETS: [&str; 2] = [
 ];
 
 const USAGE: &str = "\
-usage: kilit-lab [mysql://user:password@host:port ...]
+usage: kilit-lab [--details] [mysql://user:password@host:port ...]
 
-Runs every scenario against each server and prints what the server did.
-Without arguments it uses the servers from compose.yaml.
+Runs every scenario in scenarios/ against each server, prints a summary
+and writes the results to matrix/<product>-<version>.json.
+Without URLs it uses the servers from compose.yaml.
+
+  --details   also print every variant of every scenario
 
 Warning: the lab drops and recreates a database named `kilit_lab`.
 Only point it at throwaway servers.";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
-        println!("{USAGE}");
-        return ExitCode::SUCCESS;
+    let mut details = false;
+    let mut targets = Vec::new();
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return ExitCode::SUCCESS;
+            }
+            "--details" => details = true,
+            option if option.starts_with('-') => {
+                eprintln!("error: unknown option {option}\n\n{USAGE}");
+                return ExitCode::FAILURE;
+            }
+            _ => targets.push(arg),
+        }
     }
-    let targets = if args.is_empty() {
-        DEFAULT_TARGETS.map(String::from).to_vec()
-    } else {
-        args
+    if targets.is_empty() {
+        targets = DEFAULT_TARGETS.map(String::from).to_vec();
+    }
+
+    // The workspace root, so the lab finds its folders from any directory.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/kilit-lab lives two levels below the workspace root");
+
+    let scenarios = match scenario::load_all(&root.join("scenarios")) {
+        Ok(scenarios) => scenarios,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::FAILURE;
+        }
     };
 
     let mut failed = false;
     for url in &targets {
-        if let Err(err) = run_target(url).await {
+        if let Err(err) = run_target(url, &scenarios, root, details).await {
             eprintln!("error: {err}");
             failed = true;
         }
@@ -61,8 +91,8 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Runs every scenario, in every variant, on one server.
-async fn run_target(url: &str) -> Result<()> {
+/// Measures every scenario on one server, prints the results and saves them.
+async fn run_target(url: &str, scenarios: &[Scenario], root: &Path, details: bool) -> Result<()> {
     let opts = Opts::from_url(url)?;
     // Printed instead of the URL, which contains the password.
     let address = format!("{}:{}", opts.ip_or_hostname(), opts.tcp_port());
@@ -85,18 +115,28 @@ async fn run_target(url: &str) -> Result<()> {
         .query_first("SELECT VERSION()")
         .await?
         .unwrap_or_default();
-    report::print_server(&version, &address);
-
-    for scenario in SCENARIOS {
-        let mut observations: Vec<Observation> = Vec::with_capacity(Variant::ALL.len());
-        for variant in Variant::ALL {
-            observations.push(probe::run(&mut conn, scenario, variant).await?);
-        }
-        report::print_scenario(scenario, &observations);
+    let server = Server::from_version(&version);
+    if server.product != "mysql" {
+        return Err(format!("{address}: {version} is not supported yet, only MySQL is").into());
     }
-    println!();
 
-    probe::clean_up(&mut conn).await?;
+    let mut measurements = Vec::with_capacity(scenarios.len());
+    for scenario in scenarios {
+        measurements.push(probe::measure(&mut conn, scenario).await?);
+    }
+    fixture::drop(&mut conn).await?;
     conn.disconnect().await?;
+
+    report::print_summary(&server, &address, &measurements);
+    if details {
+        report::print_details(&measurements);
+    }
+    let path = matrix::write(&root.join("matrix"), &server, &measurements)?;
+    println!();
+    println!(
+        "  saved {}",
+        path.strip_prefix(root).unwrap_or(&path).display()
+    );
+    println!();
     Ok(())
 }

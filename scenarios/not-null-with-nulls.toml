@@ -1,0 +1,2 @@
+title = "Make a column NOT NULL when some rows are NULL"
+operation = "MODIFY COLUMN note VARCHAR(50) NOT NULL"

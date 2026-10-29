@@ -1,0 +1,2 @@
+title = "Widen a VARCHAR(50) column to VARCHAR(100)"
+operation = "MODIFY COLUMN note VARCHAR(100) NULL"

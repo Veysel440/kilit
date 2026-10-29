@@ -1,0 +1,2 @@
+title = "Add a unique index on a column without duplicates"
+operation = "ADD UNIQUE INDEX uq_orders_email (email)"

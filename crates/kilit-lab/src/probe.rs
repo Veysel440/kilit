@@ -1,24 +1,32 @@
-//! Runs one scenario variant on a server and reads what the server did.
+//! Runs a scenario's variants on a server and reads what the server did.
 
 use mysql_async::Conn;
 use mysql_async::prelude::Queryable;
+use serde::Serialize;
 
 use crate::Result;
+use crate::fixture::{self, DATABASE};
 use crate::scenario::{Scenario, Variant};
+use crate::verdict::{self, Verdict};
 
-/// Rows in the `orders` table before each run.
-///
-/// The fixture generates them with a recursive CTE, and MySQL stops those
-/// after 1000 levels by default (`cte_max_recursion_depth`), so stay at or
-/// below 1000.
-pub const FIXTURE_ROWS: u32 = 1000;
+/// Everything the lab learned about one scenario on one server.
+pub struct Measurement<'a> {
+    pub scenario: &'a Scenario,
+    /// One per variant, in `Variant::ALL` order.
+    pub observations: Vec<Observation>,
+    pub verdict: Verdict,
+}
 
 /// What happened when one variant ran.
+#[derive(Debug, Serialize)]
 pub struct Observation {
     pub variant: Variant,
+    #[serde(flatten)]
     pub outcome: Outcome,
 }
 
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
 pub enum Outcome {
     /// The server ran the statement.
     Accepted {
@@ -43,18 +51,34 @@ struct TableState {
     row_versions: u64,
 }
 
-/// Recreates the fixture, runs the scenario's ALTER in the given variant and
-/// records what the server did.
-pub async fn run(conn: &mut Conn, scenario: &Scenario, variant: Variant) -> Result<Observation> {
-    reset_fixture(conn).await?;
-    let before = table_state(conn).await?;
+/// Runs every variant of a scenario and decides the verdict.
+pub async fn measure<'a>(conn: &mut Conn, scenario: &'a Scenario) -> Result<Measurement<'a>> {
+    let mut observations = Vec::with_capacity(Variant::ALL.len());
+    for variant in Variant::ALL {
+        observations.push(run(conn, scenario, variant).await?);
+    }
+    let verdict = verdict::decide(&observations);
+    Ok(Measurement {
+        scenario,
+        observations,
+        verdict,
+    })
+}
 
-    let statement = format!(
-        "ALTER TABLE orders {}{}",
-        scenario.operation,
-        variant.clause()
-    );
-    let outcome = match conn.query_drop(statement).await {
+/// Runs one variant on fresh tables and records what the server did.
+async fn run(conn: &mut Conn, scenario: &Scenario, variant: Variant) -> Result<Observation> {
+    // Settings such as foreign_key_checks belong to the session. Start every
+    // run from the server's defaults, so no scenario leaks into the next one.
+    if !conn.reset().await? {
+        return Err("the server cannot reset a session (COM_RESET_CONNECTION)".into());
+    }
+    fixture::reset(conn).await?;
+    for statement in &scenario.session {
+        conn.query_drop(statement.as_str()).await?;
+    }
+
+    let before = table_state(conn).await?;
+    let outcome = match conn.query_drop(scenario.statement(variant)).await {
         Ok(()) => {
             // Read the server's reply first: the next query replaces it.
             let copied_rows = copied_rows(&conn.info());
@@ -67,53 +91,22 @@ pub async fn run(conn: &mut Conn, scenario: &Scenario, variant: Variant) -> Resu
         }
         Err(mysql_async::Error::Server(err)) => Outcome::Rejected {
             code: err.code,
-            message: err.message,
+            message: stable_message(err.code, err.message),
         },
         Err(err) => return Err(err.into()),
     };
     Ok(Observation { variant, outcome })
 }
 
-/// Removes the lab's database.
-pub async fn clean_up(conn: &mut Conn) -> Result<()> {
-    conn.query_drop("DROP DATABASE IF EXISTS kilit_lab").await?;
-    Ok(())
-}
-
-/// Builds a fresh `kilit_lab.orders` table, so every run starts the same way.
-async fn reset_fixture(conn: &mut Conn) -> Result<()> {
-    conn.query_drop("DROP DATABASE IF EXISTS kilit_lab").await?;
-    conn.query_drop("CREATE DATABASE kilit_lab").await?;
-    conn.query_drop("USE kilit_lab").await?;
-    conn.query_drop(
-        "CREATE TABLE orders (
-             id      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-             user_id BIGINT UNSIGNED NOT NULL,
-             amount  INT NOT NULL,
-             note    VARCHAR(50) NULL
-         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
-    )
-    .await?;
-    conn.query_drop(format!(
-        "INSERT INTO orders (user_id, amount, note)
-         WITH RECURSIVE seq (n) AS (
-             SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < {FIXTURE_ROWS}
-         )
-         SELECT 1 + n % 100, n, IF(n % 10 = 0, NULL, CONCAT('note ', n)) FROM seq"
-    ))
-    .await?;
-    Ok(())
-}
-
 async fn table_state(conn: &mut Conn) -> Result<TableState> {
     let row: Option<(u64, u64)> = conn
-        .query_first(
+        .query_first(format!(
             "SELECT TABLE_ID, TOTAL_ROW_VERSIONS
              FROM information_schema.INNODB_TABLES
-             WHERE NAME = 'kilit_lab/orders'",
-        )
+             WHERE NAME = '{DATABASE}/orders'"
+        ))
         .await?;
-    let (id, row_versions) = row.ok_or("kilit_lab/orders is missing from INNODB_TABLES")?;
+    let (id, row_versions) = row.ok_or("the orders table is missing from INNODB_TABLES")?;
     Ok(TableState { id, row_versions })
 }
 
@@ -126,9 +119,42 @@ fn copied_rows(info: &str) -> Option<u64> {
         .ok()
 }
 
+/// Hides the parts of an error message that change from run to run, so a
+/// result file only changes when the server's behavior does.
+///
+/// InnoDB builds an index with several threads, so which duplicate value it
+/// meets first, and quotes in a duplicate-entry error, differs between runs.
+fn stable_message(code: u16, message: String) -> String {
+    const DUPLICATE_ENTRY: u16 = 1062;
+    if code == DUPLICATE_ENTRY
+        && let Some(rest) = message.strip_prefix("Duplicate entry '")
+        && let Some(end) = rest.find("' for key ")
+    {
+        return format!("Duplicate entry '<value>{}", &rest[end..]);
+    }
+    message
+}
+
 #[cfg(test)]
 mod tests {
-    use super::copied_rows;
+    use super::{copied_rows, stable_message};
+
+    #[test]
+    fn duplicate_values_are_hidden() {
+        assert_eq!(
+            stable_message(
+                1062,
+                "Duplicate entry '8' for key 'orders.uq_orders_user'".to_owned()
+            ),
+            "Duplicate entry '<value>' for key 'orders.uq_orders_user'"
+        );
+    }
+
+    #[test]
+    fn other_messages_stay_as_they_are() {
+        let message = "Invalid use of NULL value".to_owned();
+        assert_eq!(stable_message(1138, message.clone()), message);
+    }
 
     #[test]
     fn reads_records_from_the_server_reply() {

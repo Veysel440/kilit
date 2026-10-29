@@ -1,0 +1,2 @@
+title = "Add a secondary index"
+operation = "ADD INDEX idx_orders_amount (amount)"

@@ -1,0 +1,2 @@
+title = "Change a column type from INT to BIGINT"
+operation = "MODIFY COLUMN amount BIGINT NOT NULL"

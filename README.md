@@ -9,27 +9,43 @@ guesses.
 
 ## The lab
 
-`kilit-lab` runs each scenario against real MySQL servers in several ways
-(server default, `ALGORITHM=INSTANT|INPLACE|COPY`, `LOCK=NONE`) and records
-what the server did:
+`kilit-lab` runs each scenario in [`scenarios/`](scenarios/) against real
+MySQL servers in six ways (server default, `ALGORITHM=INSTANT|INPLACE|COPY`,
+`LOCK=NONE`) and records what the server did:
 
 - whether it accepted the statement, and the error code if it did not
 - how many rows it copied (`Records: N` in the server's reply)
 - whether InnoDB rebuilt the table (the table's internal id changed)
 - InnoDB's counter of instant column changes (`TOTAL_ROW_VERSIONS`)
 
+From those six runs it derives a verdict: which algorithm the server picks
+when a migration forces nothing (the cheapest one it accepts, checked against
+the default run), whether the table is rebuilt or copied, and whether writes
+can continue while the change runs.
+
+The results are saved to [`matrix/`](matrix/), one JSON file per server
+version. They contain no timestamps or table ids, so running the lab again
+only changes a file when a server behaves differently.
+
 ### Run it
 
 You need Rust 1.88 or newer and Docker with Compose.
 
 ```sh
-docker compose up -d --wait   # MySQL 8.0.46 on port 3380, 8.4.13 on port 3384
-cargo run -p kilit-lab
-docker compose down           # remove the servers when you are done
+docker compose up -d --wait        # MySQL 8.0.46 on port 3380, 8.4.13 on port 3384
+cargo run -p kilit-lab             # summary per server, results in matrix/
+cargo run -p kilit-lab -- --details   # also every variant of every scenario
+docker compose down                # remove the servers when you are done
 ```
 
 The lab drops and recreates a database named `kilit_lab`. Only point it at
 throwaway servers.
+
+### Add a scenario
+
+Add a `.toml` file to `scenarios/` (the format is described in
+[`scenarios/README.md`](scenarios/README.md)), run `cargo test` to check that
+it loads, then run the lab.
 
 ## License
 

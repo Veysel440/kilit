@@ -1,44 +1,108 @@
-//! What the lab runs: scenarios, and the variants each one is tried with.
+//! What the lab runs: scenarios read from `scenarios/*.toml`, and the
+//! variants each one is tried with.
 
 use std::fmt;
+use std::fs;
+use std::path::Path;
 
-/// One schema change to measure.
-///
-/// For now scenarios are written in code. Later they will be read from files
-/// under `scenarios/`, so that adding one needs no Rust change.
+use serde::{Deserialize, Serialize};
+
+use crate::Result;
+
+/// One schema change to measure, read from `scenarios/<id>.toml`.
 pub struct Scenario {
-    /// Stable name, used in reports (and later in result files).
-    pub id: &'static str,
-    pub title: &'static str,
+    /// The file name without `.toml`, e.g. `add-index`. Two files in one
+    /// directory cannot share a name, so ids are unique by construction.
+    pub id: String,
+    pub title: String,
+    /// Statements run in the same session right before the ALTER,
+    /// e.g. `SET foreign_key_checks = 0`.
+    pub session: Vec<String>,
     /// Everything that follows `ALTER TABLE orders`.
-    pub operation: &'static str,
+    pub operation: String,
 }
 
-pub const SCENARIOS: &[Scenario] = &[
-    Scenario {
-        id: "add-nullable-column",
-        title: "Add a nullable column at the end of the table",
-        operation: "ADD COLUMN coupon VARCHAR(255) NULL",
-    },
-    Scenario {
-        id: "int-to-bigint",
-        title: "Change a column type from INT to BIGINT",
-        operation: "MODIFY COLUMN amount BIGINT NOT NULL",
-    },
-    Scenario {
-        id: "varchar-50-to-60",
-        title: "Widen a VARCHAR(50) column to VARCHAR(60)",
-        operation: "MODIFY COLUMN note VARCHAR(60) NULL",
-    },
-    Scenario {
-        id: "varchar-50-to-100",
-        title: "Widen a VARCHAR(50) column to VARCHAR(100)",
-        operation: "MODIFY COLUMN note VARCHAR(100) NULL",
-    },
-];
+/// The contents of a scenario file. Unknown keys are an error, so a typo
+/// such as `operaton` cannot silently drop a field.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScenarioFile {
+    title: String,
+    #[serde(default)]
+    session: Vec<String>,
+    operation: String,
+}
+
+impl Scenario {
+    /// The ALTER statement for one variant.
+    pub fn statement(&self, variant: Variant) -> String {
+        format!("ALTER TABLE orders {}{}", self.operation, variant.clause())
+    }
+}
+
+/// Reads every `*.toml` file in `dir`, sorted by id.
+pub fn load_all(dir: &Path) -> Result<Vec<Scenario>> {
+    let entries = fs::read_dir(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+    let mut scenarios = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "toml")
+        {
+            let scenario = load(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+            scenarios.push(scenario);
+        }
+    }
+    if scenarios.is_empty() {
+        return Err(format!("no scenario files in {}", dir.display()).into());
+    }
+    scenarios.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(scenarios)
+}
+
+fn load(path: &Path) -> Result<Scenario> {
+    let id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or("the file name is not valid UTF-8")?;
+    parse(id, &fs::read_to_string(path)?)
+}
+
+fn parse(id: &str, text: &str) -> Result<Scenario> {
+    check_id(id)?;
+    let file: ScenarioFile = toml::from_str(text)?;
+    Ok(Scenario {
+        id: id.to_owned(),
+        title: file.title,
+        session: file.session,
+        operation: file.operation,
+    })
+}
+
+/// Ids appear in reports and result files: lowercase letters, digits and
+/// single hyphens, like `add-unique-index`.
+fn check_id(id: &str) -> Result<()> {
+    let valid = !id.is_empty()
+        && !id.starts_with('-')
+        && !id.ends_with('-')
+        && !id.contains("--")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{id}` is not a valid scenario id: use lowercase letters, digits and single hyphens"
+        )
+        .into())
+    }
+}
 
 /// An algorithm forced with `ALGORITHM=...`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum Algorithm {
     /// Change only the table's metadata; rows are not touched.
     Instant,
@@ -59,7 +123,7 @@ impl fmt::Display for Algorithm {
 }
 
 /// One way of running a scenario's ALTER statement.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Variant {
     /// `None` lets the server choose, which is what Laravel and most tools do.
     pub algorithm: Option<Algorithm>,
@@ -68,32 +132,37 @@ pub struct Variant {
 }
 
 impl Variant {
+    /// Nothing forced: what a migration normally sends.
+    pub const SERVER_DEFAULT: Variant = Variant {
+        algorithm: None,
+        lock_none: false,
+    };
+
+    /// Only `LOCK=NONE`: can the server do this while the table stays writable?
+    pub const LOCK_NONE: Variant = Variant {
+        algorithm: None,
+        lock_none: true,
+    };
+
+    /// Only `ALGORITHM=...`.
+    pub const fn forced(algorithm: Algorithm) -> Variant {
+        Variant {
+            algorithm: Some(algorithm),
+            lock_none: false,
+        }
+    }
+
     /// Every variant the lab tries, in report order.
     pub const ALL: [Variant; 6] = [
-        Variant {
-            algorithm: None,
-            lock_none: false,
-        },
-        Variant {
-            algorithm: Some(Algorithm::Instant),
-            lock_none: false,
-        },
-        Variant {
-            algorithm: Some(Algorithm::Inplace),
-            lock_none: false,
-        },
+        Variant::SERVER_DEFAULT,
+        Variant::forced(Algorithm::Instant),
+        Variant::forced(Algorithm::Inplace),
         Variant {
             algorithm: Some(Algorithm::Inplace),
             lock_none: true,
         },
-        Variant {
-            algorithm: Some(Algorithm::Copy),
-            lock_none: false,
-        },
-        Variant {
-            algorithm: None,
-            lock_none: true,
-        },
+        Variant::forced(Algorithm::Copy),
+        Variant::LOCK_NONE,
     ];
 
     /// The options this variant adds, e.g. `["ALGORITHM=INPLACE", "LOCK=NONE"]`.
@@ -134,12 +203,8 @@ mod tests {
 
     #[test]
     fn server_default_adds_nothing() {
-        let variant = Variant {
-            algorithm: None,
-            lock_none: false,
-        };
-        assert_eq!(variant.clause(), "");
-        assert_eq!(variant.to_string(), "(server default)");
+        assert_eq!(Variant::SERVER_DEFAULT.clause(), "");
+        assert_eq!(Variant::SERVER_DEFAULT.to_string(), "(server default)");
     }
 
     #[test]
@@ -154,11 +219,7 @@ mod tests {
 
     #[test]
     fn lock_can_be_asked_without_an_algorithm() {
-        let variant = Variant {
-            algorithm: None,
-            lock_none: true,
-        };
-        assert_eq!(variant.clause(), ", LOCK=NONE");
+        assert_eq!(Variant::LOCK_NONE.clause(), ", LOCK=NONE");
     }
 
     #[test]
@@ -171,11 +232,60 @@ mod tests {
     }
 
     #[test]
-    fn scenario_ids_are_unique() {
-        for (i, a) in SCENARIOS.iter().enumerate() {
-            for b in &SCENARIOS[i + 1..] {
-                assert_ne!(a.id, b.id, "scenario id {} is used twice", a.id);
-            }
+    fn statement_appends_the_variant() {
+        let scenario = parse(
+            "add-index",
+            r#"title = "t"
+operation = "ADD INDEX i (amount)""#,
+        )
+        .unwrap();
+        assert_eq!(
+            scenario.statement(Variant::forced(Algorithm::Copy)),
+            "ALTER TABLE orders ADD INDEX i (amount), ALGORITHM=COPY"
+        );
+    }
+
+    #[test]
+    fn session_is_optional() {
+        let scenario = parse("x", "title = \"t\"\noperation = \"ADD INDEX i (amount)\"").unwrap();
+        assert!(scenario.session.is_empty());
+
+        let scenario = parse(
+            "x",
+            "title = \"t\"\nsession = [\"SET foreign_key_checks = 0\"]\noperation = \"o\"",
+        )
+        .unwrap();
+        assert_eq!(scenario.session, ["SET foreign_key_checks = 0"]);
+    }
+
+    #[test]
+    fn unknown_keys_are_rejected() {
+        let typo = parse("x", "title = \"t\"\noperaton = \"ADD INDEX i (amount)\"");
+        assert!(typo.is_err());
+    }
+
+    #[test]
+    fn ids_are_lowercase_words_joined_by_hyphens() {
+        for good in ["add-index", "varchar-50-to-60", "x"] {
+            assert!(check_id(good).is_ok(), "{good} should be valid");
         }
+        for bad in [
+            "",
+            "Add-Index",
+            "add_index",
+            "-add",
+            "add-",
+            "add--index",
+            "add index",
+        ] {
+            assert!(check_id(bad).is_err(), "{bad:?} should be invalid");
+        }
+    }
+
+    #[test]
+    fn every_scenario_file_in_the_repository_loads() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenarios");
+        let scenarios = load_all(&dir).unwrap();
+        assert!(scenarios.len() >= 5);
     }
 }
