@@ -519,6 +519,100 @@
       ]
     },
     {
+      "id": "drop-column",
+      "title": "Drop a column",
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN note",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
       "id": "int-to-bigint",
       "title": "Change a column type from INT to BIGINT",
       "session": [],
