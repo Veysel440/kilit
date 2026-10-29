@@ -1,0 +1,17 @@
+[package]
+name = "kilit-lab"
+description = "Runs MySQL schema-change scenarios against real servers and records what each server did"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+mysql_async.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

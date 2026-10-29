@@ -1,0 +1,20 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Veysel Tulu"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Veysel440/kilit"
+
+[workspace.dependencies]
+# No TLS, and the pure-Rust zlib backend instead of the C one: the whole
+# dependency tree stays Rust.
+mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust"] }
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

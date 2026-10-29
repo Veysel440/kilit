@@ -1,0 +1,39 @@
+# MySQL servers for the kilit lab.
+#
+#   docker compose up -d --wait   start them and wait until they accept connections
+#   docker compose down           remove them (the lab keeps no data worth saving)
+#
+# Ports are bound to 127.0.0.1 only. The root password is for this throwaway
+# lab; never reuse it anywhere else.
+#
+# Versions are pinned on purpose: lab results are only comparable when we know
+# exactly which server produced them.
+
+name: kilit-lab
+
+services:
+  mysql80:
+    image: mysql:8.0.46
+    environment:
+      MYSQL_ROOT_PASSWORD: kilit
+    ports:
+      - "127.0.0.1:3380:3306"
+    healthcheck:
+      # -h 127.0.0.1 forces TCP, so the check only passes once the real server
+      # is up (the image's first-start setup server does not listen on TCP).
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pkilit", "--silent"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+
+  mysql84:
+    image: mysql:8.4.13
+    environment:
+      MYSQL_ROOT_PASSWORD: kilit
+    ports:
+      - "127.0.0.1:3384:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pkilit", "--silent"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
