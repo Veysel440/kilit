@@ -25,6 +25,16 @@ pub const SCENARIOS: &[Scenario] = &[
         title: "Change a column type from INT to BIGINT",
         operation: "MODIFY COLUMN amount BIGINT NOT NULL",
     },
+    Scenario {
+        id: "varchar-50-to-60",
+        title: "Widen a VARCHAR(50) column to VARCHAR(60)",
+        operation: "MODIFY COLUMN note VARCHAR(60) NULL",
+    },
+    Scenario {
+        id: "varchar-50-to-100",
+        title: "Widen a VARCHAR(50) column to VARCHAR(100)",
+        operation: "MODIFY COLUMN note VARCHAR(100) NULL",
+    },
 ];
 
 /// An algorithm forced with `ALGORITHM=...`.
@@ -156,6 +166,15 @@ mod tests {
         for (i, a) in Variant::ALL.iter().enumerate() {
             for b in &Variant::ALL[i + 1..] {
                 assert_ne!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn scenario_ids_are_unique() {
+        for (i, a) in SCENARIOS.iter().enumerate() {
+            for b in &SCENARIOS[i + 1..] {
+                assert_ne!(a.id, b.id, "scenario id {} is used twice", a.id);
             }
         }
     }
