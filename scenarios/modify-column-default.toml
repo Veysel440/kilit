@@ -1,0 +1,2 @@
+title = "Give a column a default with MODIFY"
+operation = "MODIFY COLUMN amount INT NOT NULL DEFAULT 0"

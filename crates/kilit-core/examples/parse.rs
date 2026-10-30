@@ -40,7 +40,31 @@ fn main() -> ExitCode {
                     println!("    {operation}");
                 }
             }
-            StatementKind::CreateTable { table } => println!("  create table {table}"),
+            StatementKind::CreateTable {
+                table,
+                if_not_exists,
+            } => {
+                let condition = if if_not_exists { " if not exists" } else { "" };
+                println!("  create table{condition} {}", table.name);
+                for column in &table.columns {
+                    println!("    column {column}");
+                }
+                if !table.primary_key.is_empty() {
+                    println!("    primary key ({})", table.primary_key.join(", "));
+                }
+                for index in &table.indexes {
+                    println!("    {index}");
+                }
+                for key in &table.foreign_keys {
+                    println!("    {key}");
+                }
+                if let Some(charset) = &table.charset {
+                    println!("    default character set {charset}");
+                }
+                if let Some(collation) = &table.collation {
+                    println!("    default collation {collation}");
+                }
+            }
             StatementKind::DropTable { tables } => println!("  drop table {}", tables.join(", ")),
             StatementKind::RenameTable { renames } => {
                 for rename in renames {
@@ -53,7 +77,10 @@ fn main() -> ExitCode {
                 }
             }
             StatementKind::Other => println!("  not analyzed"),
-            StatementKind::Unparsed { error } => println!("  NOT READ: {error}"),
+            StatementKind::Unparsed { error, table } => match table {
+                Some(table) => println!("  NOT READ, on {table}: {error}"),
+                None => println!("  NOT READ: {error}"),
+            },
         }
         println!();
     }

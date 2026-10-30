@@ -1,0 +1,2 @@
+title = "Make a NOT NULL column nullable"
+operation = "MODIFY COLUMN amount INT NULL"

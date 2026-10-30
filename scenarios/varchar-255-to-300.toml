@@ -1,0 +1,2 @@
+title = "Widen a VARCHAR(255) column to VARCHAR(300), past 255 bytes before and after"
+operation = "MODIFY COLUMN email VARCHAR(300) NULL"

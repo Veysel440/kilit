@@ -1,0 +1,2 @@
+title = "Change a column from INT to SMALLINT when every value fits"
+operation = "MODIFY COLUMN amount SMALLINT NOT NULL"

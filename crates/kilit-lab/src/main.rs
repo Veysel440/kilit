@@ -4,6 +4,7 @@
 //! Start the servers with `docker compose up -d --wait`, then run
 //! `cargo run -p kilit-lab`, or pass your own `mysql://` URLs.
 
+mod facts;
 mod fixture;
 mod matrix;
 mod probe;
@@ -119,6 +120,9 @@ async fn run_target(url: &str, scenarios: &[Scenario], root: &Path, details: boo
     if server.product != "mysql" {
         return Err(format!("{address}: {version} is not supported yet, only MySQL is").into());
     }
+    facts::check_charsets(&mut conn)
+        .await
+        .map_err(|err| format!("{address}: {err}"))?;
 
     let mut measurements = Vec::with_capacity(scenarios.len());
     for scenario in scenarios {

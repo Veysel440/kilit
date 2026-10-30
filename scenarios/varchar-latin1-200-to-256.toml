@@ -1,0 +1,3 @@
+title = "Widen a latin1 VARCHAR(200) column to VARCHAR(256), past 255 bytes"
+setup = ["ALTER TABLE orders ADD COLUMN code VARCHAR(200) CHARACTER SET latin1 NULL"]
+operation = "MODIFY COLUMN code VARCHAR(256) CHARACTER SET latin1 NULL"

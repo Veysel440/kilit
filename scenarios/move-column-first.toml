@@ -1,0 +1,2 @@
+title = "Move a column with MODIFY ... FIRST"
+operation = "MODIFY COLUMN note VARCHAR(50) NULL FIRST"

@@ -1,0 +1,2 @@
+title = "Rename a column with CHANGE, keeping its definition"
+operation = "CHANGE COLUMN note memo VARCHAR(50) NULL"

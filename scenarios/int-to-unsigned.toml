@@ -1,0 +1,2 @@
+title = "Change a column from INT to INT UNSIGNED"
+operation = "MODIFY COLUMN amount INT UNSIGNED NOT NULL"

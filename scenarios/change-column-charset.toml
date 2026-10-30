@@ -1,0 +1,2 @@
+title = "Change a column's character set explicitly"
+operation = "MODIFY COLUMN note VARCHAR(50) CHARACTER SET latin1 NULL"

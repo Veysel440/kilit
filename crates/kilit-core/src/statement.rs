@@ -24,7 +24,11 @@ pub enum StatementKind {
     /// runs as an `ALTER TABLE`.
     Alter(Alter),
     /// `CREATE TABLE`: a new table, with no rows yet.
-    CreateTable { table: String },
+    CreateTable {
+        table: Table,
+        /// `IF NOT EXISTS`: nothing happens when the table already exists.
+        if_not_exists: bool,
+    },
     /// `DROP TABLE`: the tables are gone, with all their rows.
     DropTable { tables: Vec<String> },
     /// `RENAME TABLE a TO b, c TO d`
@@ -36,7 +40,30 @@ pub enum StatementKind {
     /// `SET` that does not touch the session (`SET GLOBAL`, `SET @x`).
     Other,
     /// A statement kilit could not read. It must never be treated as safe.
-    Unparsed { error: String },
+    Unparsed {
+        error: String,
+        /// The table named after the word `TABLE`, if any: the statement
+        /// may have changed it, so kilit stops trusting what it knew about it.
+        table: Option<String>,
+    },
+}
+
+/// A table's definition, as a `CREATE TABLE` statement gives it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Table {
+    /// Without quotes; `shop.orders` if the database is named.
+    pub name: String,
+    /// In the table's order.
+    pub columns: Vec<Column>,
+    /// The primary key's columns; empty when the table has none.
+    pub primary_key: Vec<String>,
+    /// Plain, unique, FULLTEXT and spatial indexes.
+    pub indexes: Vec<Index>,
+    pub foreign_keys: Vec<ForeignKey>,
+    /// `DEFAULT CHARSET=...`: what a column gets when it names none.
+    pub charset: Option<String>,
+    /// `COLLATE=...`
+    pub collation: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,8 +164,7 @@ pub enum Position {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Column {
     pub name: String,
-    /// The data type as the parser prints it: `VARCHAR(255)`, `BIGINT UNSIGNED`.
-    pub data_type: String,
+    pub data_type: DataType,
     /// `NULL` gives `Some(true)`, `NOT NULL` gives `Some(false)`. With
     /// neither, MySQL makes the column nullable, unless it is in a primary key.
     pub nullable: Option<bool>,
@@ -158,6 +184,48 @@ pub struct Column {
     /// them, e.g. an inline `UNIQUE`. Rules must treat a column with any of
     /// them as unknown, never as safe.
     pub other_options: Vec<String>,
+}
+
+/// A column's data type, with the details kilit's rules look at.
+///
+/// Types no rule looks into are kept as the parser prints them, so two
+/// columns of the same type still compare equal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DataType {
+    /// `TINYINT` to `BIGINT`. A display width such as `INT(11)` changes
+    /// nothing in MySQL 8, so it is not kept; `BOOLEAN` is `TINYINT`.
+    Integer { size: IntegerSize, unsigned: bool },
+    /// `VARCHAR(length)`, the length counted in characters.
+    VarChar { length: u64 },
+    /// Any other type that stores text in a character set: `CHAR(36)`,
+    /// `TEXT`, `ENUM('a','b')`. As the parser prints it.
+    Text(String),
+    /// Any other type, as the parser prints it: `DECIMAL(8,2)`, `JSON`.
+    Other(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntegerSize {
+    Tiny,
+    Small,
+    Medium,
+    Int,
+    Big,
+}
+
+impl DataType {
+    /// Whether values of this type are text in a character set, so that a
+    /// character set and a collation apply.
+    pub fn is_text(&self) -> bool {
+        matches!(self, DataType::VarChar { .. } | DataType::Text(_))
+    }
+}
+
+/// An empty `Other`, so that `Column` can derive `Default`.
+impl Default for DataType {
+    fn default() -> Self {
+        DataType::Other(String::new())
+    }
 }
 
 /// A generated column's expression.
@@ -238,6 +306,29 @@ impl fmt::Display for Algorithm {
             Algorithm::Inplace => "INPLACE",
             Algorithm::Copy => "COPY",
         })
+    }
+}
+
+/// In MySQL's spelling: `INT UNSIGNED`, `VARCHAR(50)`.
+impl fmt::Display for DataType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DataType::Integer { size, unsigned } => {
+                f.write_str(match size {
+                    IntegerSize::Tiny => "TINYINT",
+                    IntegerSize::Small => "SMALLINT",
+                    IntegerSize::Medium => "MEDIUMINT",
+                    IntegerSize::Int => "INT",
+                    IntegerSize::Big => "BIGINT",
+                })?;
+                if *unsigned {
+                    f.write_str(" UNSIGNED")?;
+                }
+                Ok(())
+            }
+            DataType::VarChar { length } => write!(f, "VARCHAR({length})"),
+            DataType::Text(name) | DataType::Other(name) => f.write_str(name),
+        }
     }
 }
 
@@ -400,7 +491,7 @@ mod tests {
     fn coupon() -> Column {
         Column {
             name: "coupon".into(),
-            data_type: "VARCHAR(255)".into(),
+            data_type: DataType::VarChar { length: 255 },
             nullable: Some(true),
             ..Column::default()
         }
@@ -429,7 +520,7 @@ mod tests {
     fn columns_print_in_mysql_order() {
         let column = Column {
             name: "status".into(),
-            data_type: "VARCHAR(20)".into(),
+            data_type: DataType::VarChar { length: 20 },
             charset: Some("utf8mb4".into()),
             nullable: Some(false),
             default: Some("'pending'".into()),
@@ -464,5 +555,17 @@ mod tests {
             serde_json::to_string(&Algorithm::Inplace).unwrap(),
             r#""INPLACE""#
         );
+    }
+
+    #[test]
+    fn data_types_print_in_mysql_spelling() {
+        let unsigned_int = DataType::Integer {
+            size: IntegerSize::Int,
+            unsigned: true,
+        };
+        assert_eq!(unsigned_int.to_string(), "INT UNSIGNED");
+        assert_eq!(DataType::VarChar { length: 50 }.to_string(), "VARCHAR(50)");
+        assert!(DataType::Text("CHAR(36)".into()).is_text());
+        assert!(!unsigned_int.is_text());
     }
 }

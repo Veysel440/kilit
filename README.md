@@ -17,8 +17,9 @@
 kilit reads a schema migration and tells you, statement by statement, what
 MySQL will do with it: change only the table's metadata, work on the table in
 place, or copy every row into a new table, and whether writes keep flowing
-while it runs. Every answer comes from measurements on real MySQL servers, not
-from guesses.
+while it runs. Give it your schema as well and it follows your tables through
+the migration, so it can judge `->change()` too. Every answer comes from
+measurements on real MySQL servers, not from guesses.
 
 *kilit* is Turkish for *lock*.
 
@@ -44,36 +45,53 @@ records what they did, and kilit answers from those records.
 
 ## Example
 
+With the schema that `php artisan schema:dump` writes for a small Laravel
+app, and a migration on its `orders` table:
+
 ```text
 $ cargo run -p kilit-core --example check
 checked against mysql-8.4.13, as measured by kilit-lab
+tables from mysql-schema.sql: migrations, orders, shops, users
 
-line 4: alter table `orders` add `coupon` varchar(255) null after `amount`
-  INSTANT, no rebuild, writes continue
-  measured as add-column (7 lab scenarios)
-  - if the table has a FULLTEXT index: COPY, copies every row, writes wait (add-column-with-fulltext)
-  - if the table has had 64 instant column changes since it was last rebuilt: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)
-
-line 7: alter table `orders` add constraint `orders_user_id_foreign` foreign key (`user_id`) references `users` (`id`) on delete cascade
+line 9: alter table `orders` modify `amount` bigint not null
   COPY, copies every row, writes wait
-  measured as add-foreign-key (1 lab scenario)
-  - assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it
-  - if a row points to a parent row that does not exist: fails with error 1452 (add-foreign-key-orphans)
+  measured as change-integer-type (3 lab scenarios)
+  - changes the type from INT to BIGINT
+  - if a value does not fit the new type (in strict SQL mode, the default): fails with error 1264 (int-to-tinyint-out-of-range)
 
-line 8: alter table `orders` add fulltext `orders_note_fulltext`(`note`)
+line 16: alter table `orders` modify `status` varchar(30) not null
+  UNKNOWN: 2 changes in one statement. kilit has measured them one at a time, and MySQL picks one algorithm for the whole statement, which can be heavier than each change alone:
+    - changes VARCHAR(20) to VARCHAR(30), 80 to 120 bytes in utf8mb4
+    - drops the default 'new'
+
+line 19: alter table `orders` modify `user_id` int unsigned not null
+  fails with error 3780
+  measured as change-integer-type (1 lab scenario)
+  - changes the type from BIGINT UNSIGNED to INT UNSIGNED
+  - user_id is in the foreign key orders_user_id_foreign; assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it
+
+line 25: alter table `orders` add fulltext `orders_note_fulltext`(`note`)
   INPLACE, rebuilds the table, writes wait
   measured as add-fulltext-index (1 lab scenario)
 
-line 10: alter table `orders` drop `legacy_code`, drop `legacy_flag`
-  UNKNOWN: 2 changes in one statement. kilit has measured single changes only, and MySQL picks one algorithm for the whole statement, which can be heavier than each change alone.
+line 28: alter table `orders` add `channel` varchar(255) null
+  COPY, copies every row, writes wait
+  measured as add-column (1 lab scenario)
+  - orders has the FULLTEXT index orders_note_fulltext
 ```
+
+Line 16 is `$table->string('status', 30)->change()`. Since Laravel 11,
+`->change()` replaces the whole column definition, so a modifier the call does
+not repeat, here `->default('new')`, is dropped. Line 28 adds a column the way
+line 6 did, and that one was instant; the FULLTEXT index added on line 25
+turns it into a table copy.
 
 Every statement gets one of three answers:
 
 - **A measured verdict:** the algorithm MySQL picks, whether it rebuilds or
   copies the table, and whether writes continue, with the lab scenarios behind
-  it. Notes list measured situations that change the answer and that kilit
-  cannot see from the statement alone, such as the rows already in the table.
+  it. Notes say what kilit worked out, and list measured situations that
+  change the answer but that no schema shows, such as the rows in the table.
 - **Unknown,** with the reason. kilit never reports a change it has not
   measured as safe.
 - **Not checked,** for statements that are not schema changes, such as
@@ -84,6 +102,8 @@ Every statement gets one of three answers:
 
 Measured with kilit-lab on MySQL 8.0.46 and 8.4.13, on a table of 1,000 rows.
 Both versions behave the same in every scenario.
+
+### Columns, indexes and foreign keys
 
 | Change | MySQL does | Writes |
 | --- | --- | --- |
@@ -103,20 +123,47 @@ Both versions behave the same in every scenario.
 | ↳ when a row points to a missing parent | fails, error 1452 | – |
 | ↳ with the checks off²<br>`Schema::disableForeignKeyConstraints()` | INPLACE | continue |
 | Drop a foreign key<br>`$table->dropForeign(['user_id'])` | INPLACE | continue |
-| Change INT to BIGINT<br>`$table->bigInteger('amount')->change()` | COPY, copies every row | **wait** |
-| Lengthen a VARCHAR within 255 bytes³<br>`$table->string('note', 60)->nullable()->change()` | INPLACE | continue |
-| Lengthen a VARCHAR past 255 bytes³<br>`$table->string('note', 100)->nullable()->change()` | COPY, copies every row | **wait** |
-| Make a column NOT NULL<br>`$table->string('email')->nullable(false)->change()` | INPLACE, rebuilds the table | continue |
-| ↳ when a row holds NULL | fails, error 1138 | – |
 
 ¹ Seven ways of adding a column were measured, and all are INSTANT: nullable,
 `NOT NULL` with and without a default, `AFTER`, `FIRST`, with a character set,
 collation and comment, and a `TIMESTAMP` defaulting to `CURRENT_TIMESTAMP`.\
 ² Even when a row points to a missing parent: the foreign key is added, and the
-row stays as it is, unchecked.\
-³ The column is `utf8mb4`, where a character takes up to 4 bytes: `VARCHAR(50)`
-is 200 bytes, `VARCHAR(60)` is 240 and `VARCHAR(100)` is 400. Past 255 bytes,
-MySQL stores each value's length in 2 bytes instead of 1.
+row stays as it is, unchecked.
+
+### Changing a column with `->change()`
+
+Laravel turns `->change()` into `MODIFY`, which replaces the column's whole
+definition. kilit compares it with the column's current definition, from your
+schema, and answers for what actually changes.
+
+| Change | MySQL does | Writes |
+| --- | --- | --- |
+| Change between integer types³<br>`$table->bigInteger('amount')->change()` | COPY, copies every row | **wait** |
+| ↳ when the column is in a foreign key | fails, error 3780 | – |
+| ↳ when a value does not fit the new type | fails, error 1264 | – |
+| Lengthen a VARCHAR within 255 bytes⁴<br>`$table->string('note', 63)->nullable()->change()` | INPLACE | continue |
+| Lengthen a VARCHAR past 255 bytes⁴<br>`$table->string('note', 64)->nullable()->change()` | COPY, copies every row | **wait** |
+| Shorten a VARCHAR<br>`$table->string('note', 40)->nullable()->change()` | COPY, copies every row | **wait** |
+| ↳ when a value is longer than the new length | fails, error 1265 | – |
+| Change the character set⁵<br>`$table->string('note', 50)->charset('latin1')->nullable()->change()` | COPY, copies every row | **wait** |
+| Change the collation<br>`$table->string('note', 50)->collation('utf8mb4_bin')->nullable()->change()` | INPLACE | continue |
+| ↳ when the column is in an index | COPY, copies every row | **wait** |
+| Make a column nullable<br>`$table->integer('amount')->nullable()->change()` | INPLACE, rebuilds the table | continue |
+| Make a column NOT NULL<br>`$table->string('email')->nullable(false)->change()` | INPLACE, rebuilds the table | continue |
+| ↳ when a row holds NULL | fails, error 1138 | – |
+| Give, change or drop a default<br>`$table->integer('amount')->default(0)->change()` | INSTANT | continue |
+| Move a column<br>`$table->string('note', 50)->nullable()->after('user_id')->change()` | INPLACE, rebuilds the table | continue |
+| Rename a column with `CHANGE`<br>`$table->renameColumn()` before MySQL 8.0.3 | INSTANT | continue |
+| Keep the same definition<br>`->change()` with nothing new | INSTANT | continue |
+
+³ `INT` to `BIGINT`, to `SMALLINT` and to `INT UNSIGNED`.\
+⁴ In `utf8mb4` a character takes up to 4 bytes, so `VARCHAR(63)` is 252 bytes
+and `VARCHAR(64)` is 256; in `latin1`, one byte each. Past 255 bytes, MySQL
+stores each value's length in 2 bytes instead of 1. Both edges were measured
+in both character sets.\
+⁵ Including a `MODIFY` that names no character set on a column whose set
+differs from the table's: the column takes the table's, and MySQL copies the
+table to convert it.
 
 INSTANT changes only the table's metadata. INPLACE works on the existing
 table; where it rebuilds the table, it rewrites every row, which takes time on
@@ -136,17 +183,20 @@ database: the lab's results are compiled into kilit.
 git clone https://github.com/Veysel440/kilit.git
 cd kilit
 
-# the sample migration in crates/kilit-core/examples/sample.sql
+# the sample migration, on the sample tables in crates/kilit-core/examples/
 cargo run -p kilit-core --example check
 
-# your own SQL, against MySQL 8.4.13 (the default) or 8.0.46
-cargo run -p kilit-core --example check -- path/to/migration.sql
-cargo run -p kilit-core --example check -- path/to/migration.sql mysql-8.0.46
+# your own migration and schema, against MySQL 8.4.13 (the default) or 8.0.46
+cargo run -p kilit-core --example check -- --schema path/to/mysql-schema.sql path/to/migration.sql
+cargo run -p kilit-core --example check -- --schema path/to/mysql-schema.sql path/to/migration.sql mysql-8.0.46
 ```
 
-kilit reads plain SQL for now. In a Laravel project, `php artisan migrate
---pretend` prints the statements your migrations will run; save them to a
-file. Reading that output directly is on the [roadmap](#roadmap).
+In a Laravel project, `php artisan schema:dump` writes the schema to
+`database/schema/mysql-schema.sql`, and `php artisan migrate --pretend` prints
+the statements your migrations will run; save those to a file. kilit reads
+plain SQL for now; reading the `--pretend` output directly is on the
+[roadmap](#roadmap). Without `--schema`, kilit still answers everything that
+does not depend on the table, and says so where it does.
 
 ### Running the lab
 
@@ -195,14 +245,24 @@ own types. Nothing is dropped silently: an operation it reads but does not model
 becomes `Other`, and a statement it cannot read becomes `Unparsed` without
 stopping the statements after it.
 
+**The schema** comes from `CREATE TABLE` statements, such as a schema dump.
+kilit follows every statement of the migration through it: columns, indexes and
+foreign keys are added, changed, renamed and dropped, so each statement is
+judged against the tables as they are at that point. When a statement changes a
+table in a way kilit cannot follow, such as one it cannot read, kilit stops
+trusting what it knew about that table instead of guessing.
+
 **The checker** places each change in a *case*: a kind of change, together with
-the lab scenarios that measured it. The scenarios of a case must agree on every
-server, or kilit refuses to answer. A case can also have *exceptions*: the same
-change measured in a situation where the answer differs, such as a table with a
-FULLTEXT index or rows that break a new constraint. kilit cannot see the table
-or its rows yet, so it reports exceptions as notes. A statement that forces
-`ALGORITHM=...` or `LOCK=NONE` is answered from the lab's run of exactly that
-variant.
+the lab scenarios that measured it. For a `MODIFY` or `CHANGE`, kilit compares
+the new definition with the column's current one, character set and collation
+included, and the one thing that changes decides the case. The scenarios of a
+case must agree on every server, or kilit refuses to answer. A case can also
+have *exceptions*: the same change measured in a situation where the answer
+differs. When the situation shows in the schema, such as a FULLTEXT index on the
+table or a foreign key on the column, it decides the answer; when it does not,
+such as rows that break a new constraint, it becomes a note. A statement that
+forces `ALGORITHM=...` or `LOCK=NONE` is answered from the lab's run of exactly
+that variant.
 
 ## Design principles
 
@@ -214,7 +274,9 @@ variant.
   measured, or several changes in one statement are reported as unknown, with
   the reason.
 - **Reproducible.** Running the lab again changes a result file only when a
-  server behaves differently.
+  server behaves differently. The lab also checks the few facts kilit uses
+  without a scenario of their own, such as how many bytes a character takes
+  in each character set.
 - **Pure Rust.** No C or assembly is compiled anywhere in the dependency tree,
   and `unsafe` code is forbidden in the workspace.
 - **No I/O in the core.** `kilit-core` takes text and returns data. The lab's
@@ -224,10 +286,13 @@ variant.
 
 kilit is young, and it says so when it does not know. Today:
 
-- `MODIFY` and `CHANGE` are reported as unknown, because kilit does not read
-  the table's current definition yet. It lists what the lab measured instead.
-- A statement with several changes is reported as unknown; the lab has
-  measured single changes only.
+- `MODIFY` and `CHANGE` need the table's current definition: without a
+  schema, kilit lists what the lab measured instead of answering.
+- A statement with several changes, including a `MODIFY` that changes several
+  things about a column, is reported as unknown; the lab has measured single
+  changes only.
+- Type changes other than between integer types, such as `VARCHAR` to `TEXT`,
+  are not measured yet.
 - Only MySQL 8.0.46 and 8.4.13 are measured. MariaDB is not supported.
 - sqlparser 0.63 cannot read `CONVERT TO CHARACTER SET`, `ENGINE=...`,
   `RENAME INDEX`, `ALGORITHM=NOCOPY` or `OPTIMIZE TABLE` yet, so kilit reports
@@ -244,7 +309,7 @@ kilit is young, and it says so when it does not know. Today:
 - [x] A reader for MySQL migrations, including the SQL Laravel generates
 - [x] Measured answers for column, index and foreign key changes, following
   session settings such as `foreign_key_checks`
-- [ ] Schema awareness: answers for `MODIFY` and `CHANGE` from the column's
+- [x] Schema awareness: answers for `MODIFY` and `CHANGE` from the column's
   current definition, and definite answers for tables with a FULLTEXT index
 - [ ] A `kilit check` command: Laravel's `migrate --pretend` output as input,
   JSON output, and exit codes for CI
@@ -257,7 +322,7 @@ kilit is young, and it says so when it does not know. Today:
 ```text
 crates/kilit-core/   reads migrations and checks them; no I/O
 crates/kilit-lab/    measures schema changes on real MySQL servers
-scenarios/           one TOML file per measured change
+scenarios/           one TOML file per measured change, and the lab's tables
 matrix/              the lab's results, one JSON file per server version
 compose.yaml         the MySQL servers the lab runs against
 ```

@@ -1,0 +1,2 @@
+title = "Move a column with MODIFY ... AFTER"
+operation = "MODIFY COLUMN note VARCHAR(50) NULL AFTER user_id"

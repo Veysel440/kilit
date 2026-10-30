@@ -6,19 +6,19 @@
 
 use sqlparser::ast::{
     self, AlterColumnOperation, AlterTableAlgorithm, AlterTableLock, AlterTableOperation,
-    ColumnOption, ContextModifier, Expr, GeneratedExpressionMode, Ident, IndexColumn,
-    MySQLColumnPosition, ObjectName, ObjectNamePart, ObjectType, ReferentialAction,
-    RenameTableNameKind, TableConstraint,
+    CharacterLength, ColumnOption, ContextModifier, CreateTableOptions, Expr, ForeignKeyConstraint,
+    GeneratedExpressionMode, Ident, IndexColumn, MySQLColumnPosition, ObjectName, ObjectNamePart,
+    ObjectType, ReferentialAction, RenameTableNameKind, SqlOption, TableConstraint, Value,
 };
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
-use sqlparser::tokenizer::Token;
+use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::split::split;
 use crate::statement::{
-    Algorithm, Alter, Column, ForeignKey, ForeignKeyAction, Generated, Index, IndexKind, Lock,
-    Operation, Position, Rename, Statement, StatementKind, Variable,
+    Algorithm, Alter, Column, DataType, ForeignKey, ForeignKeyAction, Generated, Index, IndexKind,
+    IntegerSize, Lock, Operation, Position, Rename, Statement, StatementKind, Table, Variable,
 };
 
 /// Reads every statement in `sql`, in order.
@@ -43,12 +43,33 @@ fn read(sql: &str) -> StatementKind {
             Ok([statement]) => convert(statement),
             Err(statements) => StatementKind::Unparsed {
                 error: format!("expected one statement, found {}", statements.len()),
+                table: table_named_in(sql),
             },
         },
         Err(err) => StatementKind::Unparsed {
             error: parser_message(err),
+            table: table_named_in(sql),
         },
     }
+}
+
+/// The table a statement names after the word `TABLE`, such as `orders` in
+/// `ALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4`, found from the
+/// words alone for a statement the parser cannot read.
+fn table_named_in(sql: &str) -> Option<String> {
+    let tokens = Tokenizer::new(&MySqlDialect {}, sql).tokenize().ok()?;
+    let mut words = tokens
+        .into_iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)));
+    words.find(|token| matches!(token, Token::Word(word) if word.keyword == Keyword::TABLE))?;
+    let Token::Word(first) = words.next()? else {
+        return None;
+    };
+    // `shop.orders`
+    if let (Some(Token::Period), Some(Token::Word(table))) = (words.next(), words.next()) {
+        return Some(format!("{}.{}", first.value, table.value));
+    }
+    Some(first.value)
 }
 
 fn parser_message(err: ParserError) -> String {
@@ -114,9 +135,7 @@ fn convert(statement: ast::Statement) -> StatementKind {
         } => StatementKind::DropTable {
             tables: names.iter().map(object_name).collect(),
         },
-        ast::Statement::CreateTable(table) => StatementKind::CreateTable {
-            table: object_name(&table.name),
-        },
+        ast::Statement::CreateTable(create) => create_table(create),
         ast::Statement::RenameTable(renames) => StatementKind::RenameTable {
             renames: renames
                 .iter()
@@ -128,6 +147,102 @@ fn convert(statement: ast::Statement) -> StatementKind {
         },
         ast::Statement::Set(set) => set_statement(set),
         _ => StatementKind::Other,
+    }
+}
+
+/// `CREATE TABLE` with its columns, keys and default character set.
+fn create_table(create: ast::CreateTable) -> StatementKind {
+    let name = object_name(&create.name);
+    if create.like.is_some() || create.query.is_some() || create.clone.is_some() {
+        return StatementKind::Unparsed {
+            error: "the table takes its columns from elsewhere (LIKE or AS SELECT), \
+                    which kilit does not follow yet"
+                .to_owned(),
+            table: Some(name),
+        };
+    }
+    let mut table = Table {
+        name,
+        ..Table::default()
+    };
+    for column_def in create.columns {
+        let column_name = column_def.name.value.clone();
+        let mut options = Vec::new();
+        for option in column_def.options {
+            match option.option {
+                // Keys written on a column belong to the table, as MySQL
+                // keeps them. An inline unique index is named after its column.
+                ColumnOption::PrimaryKey(_) => table.primary_key = vec![column_name.clone()],
+                ColumnOption::Unique(_) => table.indexes.push(Index {
+                    name: Some(column_name.clone()),
+                    kind: IndexKind::Unique,
+                    columns: vec![column_name.clone()],
+                }),
+                // MySQL ignores an inline REFERENCES, and keeps a CHECK as a
+                // table constraint that a later MODIFY leaves alone.
+                ColumnOption::ForeignKey(_) | ColumnOption::Check(_) => {}
+                other => options.push(other),
+            }
+        }
+        table
+            .columns
+            .push(column(column_def.name, &column_def.data_type, options));
+    }
+    for constraint in create.constraints {
+        match constraint {
+            TableConstraint::PrimaryKey(key) => {
+                table.primary_key = key.columns.iter().map(index_column).collect();
+            }
+            TableConstraint::ForeignKey(key) => table.foreign_keys.push(foreign_key(key)),
+            other => {
+                if let Operation::AddIndex(index) = added_constraint(other) {
+                    table.indexes.push(index);
+                }
+            }
+        }
+    }
+    (table.charset, table.collation) = table_charset(&create.table_options);
+    StatementKind::CreateTable {
+        table,
+        if_not_exists: create.if_not_exists,
+    }
+}
+
+/// The table's `DEFAULT CHARSET` and `COLLATE`, in any of their spellings:
+/// mysqldump writes `DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+/// Laravel `default character set utf8mb4 collate 'utf8mb4_unicode_ci'`.
+fn table_charset(options: &CreateTableOptions) -> (Option<String>, Option<String>) {
+    let (CreateTableOptions::Plain(options)
+    | CreateTableOptions::With(options)
+    | CreateTableOptions::Options(options)
+    | CreateTableOptions::TableProperties(options)) = options
+    else {
+        return (None, None);
+    };
+    let (mut charset, mut collation) = (None, None);
+    for option in options {
+        let SqlOption::KeyValue { key, value } = option else {
+            continue;
+        };
+        let key = key.value.to_ascii_uppercase();
+        match key.strip_prefix("DEFAULT ").unwrap_or(&key) {
+            "CHARSET" | "CHARACTER SET" => charset = Some(option_value(value)),
+            "COLLATE" => collation = Some(option_value(value)),
+            _ => {}
+        }
+    }
+    (charset, collation)
+}
+
+/// `utf8mb4`, whether written as a name or as a string.
+fn option_value(value: &Expr) -> String {
+    match value {
+        Expr::Identifier(ident) => ident.value.clone(),
+        Expr::Value(value) => match &value.value {
+            Value::SingleQuotedString(text) | Value::DoubleQuotedString(text) => text.clone(),
+            other => other.to_string(),
+        },
+        other => other.to_string(),
     }
 }
 
@@ -244,21 +359,25 @@ fn added_constraint(constraint: TableConstraint) -> Operation {
         TableConstraint::PrimaryKey(key) => Operation::AddPrimaryKey {
             columns: key.columns.iter().map(index_column).collect(),
         },
-        TableConstraint::ForeignKey(key) => Operation::AddForeignKey(ForeignKey {
-            name: key.name.map(|name| name.value),
-            columns: key.columns.into_iter().map(|column| column.value).collect(),
-            referenced_table: object_name(&key.foreign_table),
-            referenced_columns: key
-                .referred_columns
-                .into_iter()
-                .map(|column| column.value)
-                .collect(),
-            on_delete: key.on_delete.map(foreign_key_action),
-            on_update: key.on_update.map(foreign_key_action),
-        }),
+        TableConstraint::ForeignKey(key) => Operation::AddForeignKey(foreign_key(key)),
         other => Operation::Other {
             sql: format!("ADD {other}"),
         },
+    }
+}
+
+fn foreign_key(key: ForeignKeyConstraint) -> ForeignKey {
+    ForeignKey {
+        name: key.name.map(|name| name.value),
+        columns: key.columns.into_iter().map(|column| column.value).collect(),
+        referenced_table: object_name(&key.foreign_table),
+        referenced_columns: key
+            .referred_columns
+            .into_iter()
+            .map(|column| column.value)
+            .collect(),
+        on_delete: key.on_delete.map(foreign_key_action),
+        on_update: key.on_update.map(foreign_key_action),
     }
 }
 
@@ -269,7 +388,7 @@ fn column(
 ) -> Column {
     let mut column = Column {
         name: name.value,
-        data_type: data_type.to_string(),
+        data_type: kilit_type(data_type),
         ..Column::default()
     };
     for option in options {
@@ -298,6 +417,40 @@ fn column(
         }
     }
     column
+}
+
+/// Integers and VARCHAR in detail, other text types and the rest as the
+/// parser prints them.
+fn kilit_type(data_type: &ast::DataType) -> DataType {
+    use ast::DataType as Parsed;
+    let integer = |size, unsigned| DataType::Integer { size, unsigned };
+    match data_type {
+        // MySQL's BOOLEAN is TINYINT(1).
+        Parsed::TinyInt(_) | Parsed::Bool | Parsed::Boolean => integer(IntegerSize::Tiny, false),
+        Parsed::TinyIntUnsigned(_) => integer(IntegerSize::Tiny, true),
+        Parsed::SmallInt(_) => integer(IntegerSize::Small, false),
+        Parsed::SmallIntUnsigned(_) => integer(IntegerSize::Small, true),
+        Parsed::MediumInt(_) => integer(IntegerSize::Medium, false),
+        Parsed::MediumIntUnsigned(_) => integer(IntegerSize::Medium, true),
+        Parsed::Int(_) | Parsed::Integer(_) => integer(IntegerSize::Int, false),
+        Parsed::IntUnsigned(_) | Parsed::IntegerUnsigned(_) => integer(IntegerSize::Int, true),
+        Parsed::BigInt(_) => integer(IntegerSize::Big, false),
+        Parsed::BigIntUnsigned(_) => integer(IntegerSize::Big, true),
+        Parsed::Varchar(Some(CharacterLength::IntegerLength { length, .. }))
+        | Parsed::CharacterVarying(Some(CharacterLength::IntegerLength { length, .. }))
+        | Parsed::CharVarying(Some(CharacterLength::IntegerLength { length, .. })) => {
+            DataType::VarChar { length: *length }
+        }
+        Parsed::Char(_)
+        | Parsed::Character(_)
+        | Parsed::Text
+        | Parsed::TinyText
+        | Parsed::MediumText
+        | Parsed::LongText
+        | Parsed::Enum(..)
+        | Parsed::Set(_) => DataType::Text(data_type.to_string()),
+        other => DataType::Other(other.to_string()),
+    }
 }
 
 /// MySQL's `AUTO_INCREMENT` reaches us as a dialect-specific keyword.
@@ -482,7 +635,7 @@ mod tests {
             column,
             Column {
                 name: "c".into(),
-                data_type: "VARCHAR(50)".into(),
+                data_type: DataType::VarChar { length: 50 },
                 nullable: Some(false),
                 default: Some("'x'".into()),
                 charset: Some("utf8mb4".into()),
@@ -506,7 +659,7 @@ mod tests {
     fn reads_auto_increment_and_on_update() {
         let id = added_column("ALTER TABLE t ADD id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT");
         assert!(id.auto_increment);
-        assert_eq!(id.data_type, "BIGINT UNSIGNED");
+        assert_eq!(id.data_type.to_string(), "BIGINT UNSIGNED");
 
         let updated = added_column(
             "ALTER TABLE t ADD updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP \
@@ -689,12 +842,10 @@ mod tests {
 
     #[test]
     fn reads_table_statements() {
-        assert_eq!(
+        assert!(matches!(
             kind("CREATE TABLE shops (id BIGINT)"),
-            StatementKind::CreateTable {
-                table: "shops".into()
-            }
-        );
+            StatementKind::CreateTable { ref table, if_not_exists: false } if table.name == "shops"
+        ));
         assert_eq!(
             kind("DROP TABLE IF EXISTS a, b"),
             StatementKind::DropTable {
@@ -815,7 +966,11 @@ mod tests {
             "OPTIMIZE TABLE t",
         ] {
             assert!(
-                matches!(kind(sql), StatementKind::Unparsed { ref error } if !error.is_empty()),
+                matches!(
+                    kind(sql),
+                    StatementKind::Unparsed { ref error, ref table }
+                        if !error.is_empty() && table.as_deref() == Some("t")
+                ),
                 "{sql}"
             );
         }
@@ -831,7 +986,8 @@ mod tests {
         assert_eq!(
             kind(&nested),
             StatementKind::Unparsed {
-                error: "the statement is nested too deeply".into()
+                error: "the statement is nested too deeply".into(),
+                table: Some("t".into()),
             }
         );
     }
@@ -874,5 +1030,155 @@ SET FOREIGN_KEY_CHECKS=1;
             statements[3].sql,
             "INSERT INTO settings VALUES ('separator', ';')"
         );
+    }
+
+    #[test]
+    fn reads_data_types() {
+        for (written, read) in [
+            ("INT", "INT"),
+            ("INTEGER", "INT"),
+            ("int(11)", "INT"),
+            ("INT(10) UNSIGNED", "INT UNSIGNED"),
+            ("bigint unsigned", "BIGINT UNSIGNED"),
+            ("tinyint(1)", "TINYINT"),
+            ("BOOLEAN", "TINYINT"),
+            ("varchar(50)", "VARCHAR(50)"),
+            ("CHARACTER VARYING(20)", "VARCHAR(20)"),
+        ] {
+            let column = added_column(&format!("ALTER TABLE t ADD c {written}"));
+            assert_eq!(column.data_type.to_string(), read, "{written}");
+        }
+        for (written, text) in [
+            ("char(36)", true),
+            ("TEXT", true),
+            ("enum('a','b')", true),
+            ("decimal(8,2)", false),
+            ("json", false),
+            ("varbinary(16)", false),
+        ] {
+            let column = added_column(&format!("ALTER TABLE t ADD c {written}"));
+            assert_eq!(column.data_type.is_text(), text, "{written}");
+        }
+    }
+
+    fn created(sql: &str) -> Table {
+        match kind(sql) {
+            StatementKind::CreateTable { table, .. } => table,
+            other => panic!("{sql}: expected CREATE TABLE, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reads_a_table_from_a_schema_dump() {
+        // As mysqldump writes it, and so `php artisan schema:dump`.
+        let table = created(
+            "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `status` varchar(20) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'new',
+  `note` varchar(50) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `orders_user_id_foreign` (`user_id`),
+  FULLTEXT KEY `orders_note_fulltext` (`note`),
+  CONSTRAINT `orders_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+        );
+        assert_eq!(table.name, "orders");
+        let names: Vec<&str> = table.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["id", "user_id", "status", "note"]);
+        assert_eq!(
+            table.columns[2],
+            Column {
+                name: "status".into(),
+                data_type: DataType::VarChar { length: 20 },
+                nullable: Some(false),
+                default: Some("'new'".into()),
+                collation: Some("utf8mb4_unicode_ci".into()),
+                ..Column::default()
+            }
+        );
+        assert_eq!(table.columns[3].default.as_deref(), Some("NULL"));
+        assert_eq!(table.primary_key, ["id"]);
+        assert_eq!(
+            table.indexes,
+            [
+                Index {
+                    name: Some("orders_user_id_foreign".into()),
+                    kind: IndexKind::Plain,
+                    columns: vec!["user_id".into()],
+                },
+                Index {
+                    name: Some("orders_note_fulltext".into()),
+                    kind: IndexKind::Fulltext,
+                    columns: vec!["note".into()],
+                },
+            ]
+        );
+        assert_eq!(table.foreign_keys.len(), 1);
+        assert_eq!(table.foreign_keys[0].referenced_table, "users");
+        assert_eq!(table.charset.as_deref(), Some("utf8mb4"));
+        assert_eq!(table.collation.as_deref(), Some("utf8mb4_unicode_ci"));
+    }
+
+    #[test]
+    fn keys_written_on_a_column_belong_to_the_table() {
+        let table = created(
+            "CREATE TABLE IF NOT EXISTS shops (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, \
+             code VARCHAR(10) NOT NULL UNIQUE) DEFAULT CHARACTER SET latin1",
+        );
+        assert_eq!(table.primary_key, ["id"]);
+        assert_eq!(
+            table.indexes,
+            [Index {
+                name: Some("code".into()),
+                kind: IndexKind::Unique,
+                columns: vec!["code".into()],
+            }]
+        );
+        assert!(table.columns.iter().all(|c| c.other_options.is_empty()));
+        assert_eq!(table.charset.as_deref(), Some("latin1"));
+        assert!(matches!(
+            kind("CREATE TABLE IF NOT EXISTS shops (id INT)"),
+            StatementKind::CreateTable {
+                if_not_exists: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_table_copied_from_elsewhere_is_unparsed() {
+        for sql in [
+            "CREATE TABLE new_orders LIKE orders",
+            "CREATE TABLE new_orders AS SELECT * FROM orders",
+        ] {
+            assert!(
+                matches!(
+                    kind(sql),
+                    StatementKind::Unparsed { table: Some(ref table), .. } if table == "new_orders"
+                ),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_statements_name_their_table() {
+        for (sql, table) in [
+            (
+                "ALTER TABLE `shop`.`orders` CONVERT TO CHARACTER SET utf8mb4",
+                Some("shop.orders"),
+            ),
+            ("ALTER TABLE orders DEFAULT CHARSET=latin1", Some("orders")),
+            ("FOO BAR", None),
+        ] {
+            assert!(
+                matches!(
+                    kind(sql),
+                    StatementKind::Unparsed { table: ref found, .. } if found.as_deref() == table
+                ),
+                "{sql}"
+            );
+        }
     }
 }

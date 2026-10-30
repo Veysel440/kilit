@@ -1,0 +1,2 @@
+title = "Change a column's collation, keeping its character set"
+operation = "MODIFY COLUMN note VARCHAR(50) COLLATE utf8mb4_bin NULL"

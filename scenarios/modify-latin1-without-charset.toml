@@ -1,0 +1,3 @@
+title = "MODIFY a latin1 column without naming a character set, so it takes the table's utf8mb4"
+setup = ["ALTER TABLE orders ADD COLUMN code VARCHAR(200) CHARACTER SET latin1 NULL"]
+operation = "MODIFY COLUMN code VARCHAR(200) NULL"

@@ -1,0 +1,2 @@
+title = "MODIFY a column without changing anything"
+operation = "MODIFY COLUMN note VARCHAR(50) NULL"

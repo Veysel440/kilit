@@ -1,0 +1,2 @@
+title = "Shorten a VARCHAR(50) column to VARCHAR(40) when every value fits"
+operation = "MODIFY COLUMN note VARCHAR(40) NULL"

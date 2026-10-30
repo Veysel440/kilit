@@ -1,0 +1,3 @@
+title = "MODIFY a column without its default, which drops the default"
+setup = ["ALTER TABLE orders ALTER COLUMN amount SET DEFAULT 0"]
+operation = "MODIFY COLUMN amount INT NOT NULL"

@@ -1,0 +1,3 @@
+title = "MODIFY ... AFTER a column it already follows"
+# note already comes right after email.
+operation = "MODIFY COLUMN note VARCHAR(50) NULL AFTER email"

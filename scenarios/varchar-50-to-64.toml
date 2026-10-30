@@ -1,0 +1,3 @@
+title = "Widen a VARCHAR(50) column to VARCHAR(64), the shortest that goes past 255 bytes"
+# utf8mb4 takes up to 4 bytes per character: 64 * 4 = 256 bytes.
+operation = "MODIFY COLUMN note VARCHAR(64) NULL"

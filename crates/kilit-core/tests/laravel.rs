@@ -6,8 +6,8 @@
 //! Blueprint call that produces the SQL.
 
 use kilit_core::{
-    Algorithm, Alter, Column, ForeignKey, ForeignKeyAction, Index, IndexKind, Lock, Operation,
-    Position, Rename, StatementKind, Variable,
+    Algorithm, Alter, Column, DataType, ForeignKey, ForeignKeyAction, Index, IndexKind,
+    IntegerSize, Lock, Operation, Position, Rename, StatementKind, Variable,
 };
 
 /// The only statement in `sql`, which must be an ALTER TABLE on `orders`.
@@ -41,7 +41,7 @@ fn string_nullable() {
         [Operation::AddColumn {
             column: Column {
                 name: "coupon".into(),
-                data_type: "VARCHAR(255)".into(),
+                data_type: DataType::VarChar { length: 255 },
                 nullable: Some(true),
                 ..Column::default()
             },
@@ -58,7 +58,10 @@ fn integer_after() {
         [Operation::AddColumn {
             column: Column {
                 name: "qty".into(),
-                data_type: "INT".into(),
+                data_type: DataType::Integer {
+                    size: IntegerSize::Int,
+                    unsigned: false,
+                },
                 nullable: Some(false),
                 ..Column::default()
             },
@@ -76,7 +79,7 @@ fn foreign_id_with_default_and_comment() {
     let [Operation::AddColumn { column, .. }] = &operations[..] else {
         panic!("{operations:?}");
     };
-    assert_eq!(column.data_type, "BIGINT UNSIGNED");
+    assert_eq!(column.data_type.to_string(), "BIGINT UNSIGNED");
     assert_eq!(column.default.as_deref(), Some("'1'"));
     assert_eq!(column.comment.as_deref(), Some("owner"));
 }
@@ -101,7 +104,10 @@ fn change_type() {
         [Operation::ModifyColumn {
             column: Column {
                 name: "amount".into(),
-                data_type: "BIGINT".into(),
+                data_type: DataType::Integer {
+                    size: IntegerSize::Big,
+                    unsigned: false,
+                },
                 nullable: Some(false),
                 ..Column::default()
             },
@@ -274,16 +280,27 @@ fn tables() {
             tables: vec!["orders".into()],
         }
     );
-    // Schema::create('shops', ...);
+    // Schema::create('shops', function ($table) { $table->id(); $table->string('name'); });
+    let StatementKind::CreateTable {
+        table,
+        if_not_exists: false,
+    } = kind(
+        "create table `shops` (`id` bigint unsigned not null auto_increment primary key, \
+         `name` varchar(255) not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'",
+    )
+    else {
+        panic!("expected CREATE TABLE");
+    };
+    assert_eq!(table.name, "shops");
+    assert_eq!(table.primary_key, ["id"]);
+    let id = &table.columns[0];
+    assert!(id.auto_increment && id.other_options.is_empty());
     assert_eq!(
-        kind(
-            "create table `shops` (`id` bigint unsigned not null auto_increment primary key, \
-             `name` varchar(255) not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'"
-        ),
-        StatementKind::CreateTable {
-            table: "shops".into(),
-        }
+        table.columns[1].data_type,
+        DataType::VarChar { length: 255 }
     );
+    assert_eq!(table.charset.as_deref(), Some("utf8mb4"));
+    assert_eq!(table.collation.as_deref(), Some("utf8mb4_unicode_ci"));
 }
 
 #[test]

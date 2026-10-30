@@ -1,0 +1,3 @@
+title = "Change a column from INT to TINYINT when a value does not fit"
+# amount goes up to 1000; TINYINT stops at 127.
+operation = "MODIFY COLUMN amount TINYINT NOT NULL"

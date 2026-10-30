@@ -1,0 +1,3 @@
+title = "Shorten a VARCHAR(50) column to VARCHAR(5) when a value is longer"
+# Notes look like `note 123`.
+operation = "MODIFY COLUMN note VARCHAR(5) NULL"

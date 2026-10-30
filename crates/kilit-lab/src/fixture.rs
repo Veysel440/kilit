@@ -17,6 +17,10 @@ pub const ORDERS_ROWS: u32 = 1000;
 /// Rows in `users`; every `orders.user_id` points at one of them.
 const USERS_ROWS: u32 = 100;
 
+/// The tables' definitions. kilit-core's tests read the same file, so they
+/// judge every scenario on exactly the tables the lab measured it on.
+const TABLES: &str = include_str!("../../../scenarios/tables.sql");
+
 /// Builds fresh `users` and `orders` tables, so every run starts the same way.
 ///
 /// What scenarios can rely on (also listed in `scenarios/README.md`):
@@ -29,23 +33,9 @@ pub async fn reset(conn: &mut Conn) -> Result<()> {
     conn.query_drop(format!("CREATE DATABASE {DATABASE}"))
         .await?;
     conn.query_drop(format!("USE {DATABASE}")).await?;
-    conn.query_drop(
-        "CREATE TABLE users (
-             id   BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-             name VARCHAR(100) NOT NULL
-         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
-    )
-    .await?;
-    conn.query_drop(
-        "CREATE TABLE orders (
-             id      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-             user_id BIGINT UNSIGNED NOT NULL,
-             amount  INT NOT NULL,
-             email   VARCHAR(255) NULL,
-             note    VARCHAR(50) NULL
-         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
-    )
-    .await?;
+    for statement in kilit_core::parse(TABLES) {
+        conn.query_drop(statement.sql).await?;
+    }
     conn.query_drop(format!(
         "INSERT INTO users (name)
          WITH RECURSIVE seq (n) AS (
@@ -72,4 +62,23 @@ pub async fn drop(conn: &mut Conn) -> Result<()> {
     conn.query_drop(format!("DROP DATABASE IF EXISTS {DATABASE}"))
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use kilit_core::{Schema, TableState};
+
+    use super::*;
+
+    #[test]
+    fn the_tables_file_creates_users_and_orders() {
+        let schema = Schema::from_sql(TABLES);
+        let names: Vec<&str> = schema.tables().map(|table| table.name.as_str()).collect();
+        assert_eq!(names, ["orders", "users"]);
+        let TableState::Known(orders) = schema.table("orders") else {
+            panic!("orders is not known");
+        };
+        assert_eq!(orders.primary_key, ["id"]);
+        assert_eq!(orders.charset.as_deref(), Some("utf8mb4"));
+    }
 }
