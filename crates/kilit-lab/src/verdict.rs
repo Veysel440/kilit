@@ -8,10 +8,11 @@
 //! default run must leave exactly the same traces as the forced run of
 //! that algorithm, or the verdict is marked inconsistent.
 
+use kilit_core::Algorithm;
 use serde::Serialize;
 
 use crate::probe::{Observation, Outcome};
-use crate::scenario::{Algorithm, Variant};
+use crate::scenario::Variant;
 
 /// The order in which MySQL tries algorithms when none is forced.
 const CHEAPEST_FIRST: [Algorithm; 3] = [Algorithm::Instant, Algorithm::Inplace, Algorithm::Copy];

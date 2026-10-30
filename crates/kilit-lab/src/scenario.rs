@@ -5,6 +5,7 @@ use std::fmt;
 use std::fs;
 use std::path::Path;
 
+use kilit_core::Algorithm;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
@@ -97,28 +98,6 @@ fn check_id(id: &str) -> Result<()> {
             "`{id}` is not a valid scenario id: use lowercase letters, digits and single hyphens"
         )
         .into())
-    }
-}
-
-/// An algorithm forced with `ALGORITHM=...`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum Algorithm {
-    /// Change only the table's metadata; rows are not touched.
-    Instant,
-    /// Work on the existing table; may still rebuild it, usually without blocking writes.
-    Inplace,
-    /// Create a new table and copy every row into it; writes wait meanwhile.
-    Copy,
-}
-
-impl fmt::Display for Algorithm {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Algorithm::Instant => "INSTANT",
-            Algorithm::Inplace => "INPLACE",
-            Algorithm::Copy => "COPY",
-        })
     }
 }
 
@@ -287,5 +266,57 @@ operation = "ADD INDEX i (amount)""#,
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenarios");
         let scenarios = load_all(&dir).unwrap();
         assert!(scenarios.len() >= 5);
+    }
+
+    /// kilit can only use a measurement if it can read the statement that
+    /// was measured: every statement the lab sends must come back from
+    /// kilit-core as exactly what the lab meant.
+    #[test]
+    fn kilit_core_reads_every_statement_the_lab_runs() {
+        use kilit_core::{Lock, Operation, Statement, StatementKind};
+
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenarios");
+        for scenario in load_all(&dir).unwrap() {
+            for sql in &scenario.session {
+                let statements = kilit_core::parse(sql);
+                assert!(
+                    matches!(
+                        statements.as_slice(),
+                        [Statement {
+                            kind: StatementKind::Set { .. },
+                            ..
+                        }]
+                    ),
+                    "{}: {statements:?}",
+                    scenario.id
+                );
+            }
+
+            for variant in Variant::ALL {
+                let sql = scenario.statement(variant);
+                let statements = kilit_core::parse(&sql);
+                let [
+                    Statement {
+                        kind: StatementKind::Alter(alter),
+                        ..
+                    },
+                ] = statements.as_slice()
+                else {
+                    panic!("{}: not one ALTER TABLE: {statements:?}", scenario.id);
+                };
+                assert_eq!(alter.table, "orders", "{sql}");
+                assert_eq!(alter.algorithm, variant.algorithm, "{sql}");
+                assert_eq!(alter.lock, variant.lock_none.then_some(Lock::None), "{sql}");
+                assert!(!alter.operations.is_empty(), "{sql}");
+                for operation in &alter.operations {
+                    // An `Other` operation prints as "not understood: ...".
+                    assert!(
+                        !matches!(operation, Operation::Other { .. }),
+                        "{}: {operation}",
+                        scenario.id
+                    );
+                }
+            }
+        }
     }
 }

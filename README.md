@@ -5,7 +5,14 @@ migration: change it instantly, rebuild the table, or copy every row while
 writes wait. Its answers will come from measurements on real servers, not from
 guesses.
 
-> **Status:** early development. Only the measurement lab exists so far.
+> **Status:** early development. The measurement lab and the SQL reader
+> exist; kilit cannot check a migration yet.
+
+The workspace has two crates:
+
+- [`kilit-lab`](crates/kilit-lab/) measures what real servers do.
+- [`kilit-core`](crates/kilit-core/) reads migrations. It does no I/O: it
+  takes text and returns data.
 
 ## The lab
 
@@ -46,6 +53,34 @@ throwaway servers.
 Add a `.toml` file to `scenarios/` (the format is described in
 [`scenarios/README.md`](scenarios/README.md)), run `cargo test` to check that
 it loads, then run the lab.
+
+`cargo test` also checks that `kilit-core` reads every statement the lab
+runs, with the same algorithm and lock. A measurement kilit cannot read back
+would be useless.
+
+## The SQL reader
+
+`kilit-core` splits SQL text into statements (a semicolon inside a string or
+a comment does not end one), reads each with
+[sqlparser](https://crates.io/crates/sqlparser)'s MySQL dialect and turns it
+into kilit's own types: `ALTER TABLE` operations such as `AddColumn`,
+`ModifyColumn`, `AddIndex` and `AddForeignKey`, plus `SET` of session
+variables like `foreign_key_checks`.
+
+Nothing is dropped silently. An operation it reads but does not model yet
+becomes `Other`; a statement it cannot read becomes `Unparsed`, and the
+statements after it are still read. Neither will ever be reported as safe.
+
+See what it reads from a file:
+
+```sh
+cargo run -p kilit-core --example parse                         # a sample migration
+cargo run -p kilit-core --example parse -- path/to/migration.sql
+```
+
+Known gaps: sqlparser 0.63 cannot read `CONVERT TO CHARACTER SET`,
+`ENGINE=...`, `RENAME INDEX`, MariaDB's `ALGORITHM=NOCOPY` or `OPTIMIZE TABLE`
+yet, so they come out as `Unparsed`.
 
 ## License
 

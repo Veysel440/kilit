@@ -11,11 +11,15 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/Veysel440/kilit"
 
 [workspace.dependencies]
+kilit-core = { path = "crates/kilit-core" }
 # No TLS, and the pure-Rust zlib backend instead of the C one: the whole
 # dependency tree stays Rust.
 mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The default "recursive-protection" feature pulls in a crate that compiles
+# assembly. Without it sqlparser still stops at 50 levels of nesting.
+sqlparser = { version = "0.63", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 toml = "1"
 
