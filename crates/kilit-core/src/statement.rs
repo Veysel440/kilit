@@ -90,6 +90,11 @@ pub enum Operation {
         column: Column,
         position: Option<Position>,
     },
+    /// `RENAME COLUMN a TO b`: only the name changes.
+    RenameColumn {
+        from: String,
+        to: String,
+    },
     AddIndex(Index),
     DropIndex {
         name: String,
@@ -262,6 +267,7 @@ impl fmt::Display for Operation {
                 write!(f, "change column {old_name} to {column}")?;
                 write_position(f, position.as_ref())
             }
+            Operation::RenameColumn { from, to } => write!(f, "rename column {from} to {to}"),
             Operation::AddIndex(index) => write!(f, "add {index}"),
             Operation::DropIndex { name } => write!(f, "drop index {name}"),
             Operation::AddPrimaryKey { columns } => {

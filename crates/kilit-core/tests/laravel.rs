@@ -315,11 +315,11 @@ fn rename_index_is_not_readable_yet() {
 #[test]
 fn rename_column() {
     // $table->renameColumn('note', 'memo');
-    //
-    // Exercise: kilit does not understand RENAME COLUMN yet. Teach it, then
-    // replace this expectation with the operation you added.
-    assert!(matches!(
-        &operations("alter table `orders` rename column `note` to `memo`")[..],
-        [Operation::Other { .. }]
-    ));
+    assert_eq!(
+        operations("alter table `orders` rename column `note` to `memo`"),
+        [Operation::RenameColumn {
+            from: "note".into(),
+            to: "memo".into(),
+        }]
+    );
 }

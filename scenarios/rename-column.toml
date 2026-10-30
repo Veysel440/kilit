@@ -1,0 +1,2 @@
+title = "Rename a column"
+operation = "RENAME COLUMN note TO memo"

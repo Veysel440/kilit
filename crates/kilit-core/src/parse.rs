@@ -184,6 +184,13 @@ fn operation_of(operation: AlterTableOperation) -> Operation {
             column: column(new_name, &data_type, options),
             position: column_position.map(position),
         },
+        AlterTableOperation::RenameColumn {
+            old_column_name,
+            new_column_name,
+        } => Operation::RenameColumn {
+            from: old_column_name.value,
+            to: new_column_name.value,
+        },
         AlterTableOperation::AddConstraint { constraint, .. } => added_constraint(constraint),
         AlterTableOperation::DropIndex { name } => Operation::DropIndex { name: name.value },
         AlterTableOperation::DropForeignKey { name, .. } => {
