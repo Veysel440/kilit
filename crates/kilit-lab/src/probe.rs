@@ -1,13 +1,13 @@
 //! Runs a scenario's variants on a server and reads what the server did.
 
+use kilit_core::{Observation, Outcome, Variant, Verdict};
 use mysql_async::Conn;
 use mysql_async::prelude::Queryable;
-use serde::Serialize;
 
 use crate::Result;
 use crate::fixture::{self, DATABASE};
-use crate::scenario::{Scenario, Variant};
-use crate::verdict::{self, Verdict};
+use crate::scenario::Scenario;
+use crate::verdict;
 
 /// Everything the lab learned about one scenario on one server.
 pub struct Measurement<'a> {
@@ -15,34 +15,6 @@ pub struct Measurement<'a> {
     /// One per variant, in `Variant::ALL` order.
     pub observations: Vec<Observation>,
     pub verdict: Verdict,
-}
-
-/// What happened when one variant ran.
-#[derive(Debug, Serialize)]
-pub struct Observation {
-    pub variant: Variant,
-    #[serde(flatten)]
-    pub outcome: Outcome,
-}
-
-#[derive(Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "result", rename_all = "snake_case")]
-pub enum Outcome {
-    /// The server ran the statement.
-    Accepted {
-        /// Rows copied into a new table, from the `Records: N` part of the
-        /// server's reply. Only the COPY algorithm reports copied rows; an
-        /// INPLACE rebuild rewrites the table but reports 0.
-        copied_rows: Option<u64>,
-        /// The table got a new internal id: InnoDB rebuilt it from scratch.
-        rebuilt: bool,
-        /// InnoDB's counter of instant ADD/DROP COLUMN changes, before and
-        /// after. MySQL 8.0 and 8.4 allow 64, then rebuild the table on their own.
-        row_versions: (u64, u64),
-    },
-    /// The server refused the statement, e.g. because the forced algorithm
-    /// is not possible for this change. That is a result, not a lab failure.
-    Rejected { code: u16, message: String },
 }
 
 /// The table as InnoDB sees it.
@@ -73,6 +45,11 @@ async fn run(conn: &mut Conn, scenario: &Scenario, variant: Variant) -> Result<O
         return Err("the server cannot reset a session (COM_RESET_CONNECTION)".into());
     }
     fixture::reset(conn).await?;
+    for statement in &scenario.setup {
+        conn.query_drop(statement.as_str())
+            .await
+            .map_err(|err| format!("{}: setup `{statement}` failed: {err}", scenario.id))?;
+    }
     for statement in &scenario.session {
         conn.query_drop(statement.as_str()).await?;
     }
@@ -122,8 +99,10 @@ fn copied_rows(info: &str) -> Option<u64> {
 /// Hides the parts of an error message that change from run to run, so a
 /// result file only changes when the server's behavior does.
 ///
-/// InnoDB builds an index with several threads, so which duplicate value it
-/// meets first, and quotes in a duplicate-entry error, differs between runs.
+/// - InnoDB builds an index with several threads, so which duplicate value
+///   it meets first, and quotes in a duplicate-entry error, differs between runs.
+/// - A table being copied gets a temporary name such as `#sql-1_72`, and
+///   errors raised during the copy quote it.
 fn stable_message(code: u16, message: String) -> String {
     const DUPLICATE_ENTRY: u16 = 1062;
     if code == DUPLICATE_ENTRY
@@ -132,7 +111,25 @@ fn stable_message(code: u16, message: String) -> String {
     {
         return format!("Duplicate entry '<value>{}", &rest[end..]);
     }
-    message
+    hide_temporary_names(&message)
+}
+
+/// `` `#sql-1_72` `` becomes `` `#sql-<temporary>` ``.
+fn hide_temporary_names(message: &str) -> String {
+    const PREFIX: &str = "`#sql-";
+    let mut result = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(start) = rest.find(PREFIX) {
+        let name = start + PREFIX.len();
+        let Some(length) = rest[name..].find('`') else {
+            break;
+        };
+        result.push_str(&rest[..name]);
+        result.push_str("<temporary>");
+        rest = &rest[name + length..];
+    }
+    result.push_str(rest);
+    result
 }
 
 #[cfg(test)]
@@ -147,6 +144,17 @@ mod tests {
                 "Duplicate entry '8' for key 'orders.uq_orders_user'".to_owned()
             ),
             "Duplicate entry '<value>' for key 'orders.uq_orders_user'"
+        );
+    }
+
+    #[test]
+    fn temporary_table_names_are_hidden() {
+        let message = "Cannot add or update a child row: a foreign key constraint fails \
+                       (`kilit_lab`.`#sql-1_72`, CONSTRAINT `fk` FOREIGN KEY (`user_id`))";
+        assert_eq!(
+            stable_message(1452, message.to_owned()),
+            "Cannot add or update a child row: a foreign key constraint fails \
+             (`kilit_lab`.`#sql-<temporary>`, CONSTRAINT `fk` FOREIGN KEY (`user_id`))"
         );
     }
 

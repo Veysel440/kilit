@@ -19,11 +19,17 @@
 //! );
 //! ```
 
+mod check;
+mod knowledge;
 mod parse;
+mod results;
 mod split;
 mod statement;
 
+pub use check::{CASES, Case, Exception, Finding, Prediction, check};
+pub use knowledge::{Knowledge, ScenarioResult, ServerResults};
 pub use parse::parse;
+pub use results::{Observation, Outcome, Server, Variant, Verdict, Writes};
 pub use statement::{
     Algorithm, Alter, Column, ForeignKey, ForeignKeyAction, Generated, Index, IndexKind, Lock,
     Operation, Position, Rename, Statement, StatementKind, Variable,

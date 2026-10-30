@@ -1,0 +1,4 @@
+title = "Add a foreign key with foreign_key_checks off when a row points to a missing parent"
+setup = ["INSERT INTO orders (user_id, amount) VALUES (9999, 1)"]
+session = ["SET foreign_key_checks = 0"]
+operation = "ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)"

@@ -1,0 +1,2 @@
+title = "Add a NOT NULL column with a default"
+operation = "ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'new'"

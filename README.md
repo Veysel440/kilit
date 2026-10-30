@@ -5,14 +5,31 @@ migration: change it instantly, rebuild the table, or copy every row while
 writes wait. Its answers will come from measurements on real servers, not from
 guesses.
 
-> **Status:** early development. The measurement lab and the SQL reader
-> exist; kilit cannot check a migration yet.
+> **Status:** early development. The measurement lab, the SQL reader and a
+> first checker exist; there is no command-line tool yet.
 
 The workspace has two crates:
 
 - [`kilit-lab`](crates/kilit-lab/) measures what real servers do.
-- [`kilit-core`](crates/kilit-core/) reads migrations. It does no I/O: it
-  takes text and returns data.
+- [`kilit-core`](crates/kilit-core/) reads migrations and checks them
+  against the lab's results. It does no I/O: it takes text and returns data.
+
+## What the lab found
+
+Measured on MySQL 8.0.46 and 8.4.13 (the results are the same on both):
+
+| Change | Laravel | What MySQL does |
+| ------ | ------- | --------------- |
+| Add a column | `$table->string('coupon')->nullable()`, `->after()`, `->default()` | INSTANT, no rebuild, writes continue |
+| Add a column to a table with a FULLTEXT index | the same | COPY, copies every row, writes wait |
+| Add a foreign key | `->constrained()` | COPY, copies every row, writes wait |
+| Add a foreign key with the checks off | inside `Schema::disableForeignKeyConstraints()` | INPLACE, no rebuild, writes continue |
+| Add a FULLTEXT index | `$table->fullText('note')` | INPLACE, rebuilds the table, writes wait |
+| Add an index or a unique index | `$table->index('amount')`, `->unique()` | INPLACE, no rebuild, writes continue |
+| Change a type, INT to BIGINT | `$table->bigInteger('amount')->change()` | COPY, copies every row, writes wait |
+
+Every line comes from a scenario in [`scenarios/`](scenarios/) and its
+results in [`matrix/`](matrix/). Tests check that kilit says exactly this.
 
 ## The lab
 
@@ -32,7 +49,9 @@ can continue while the change runs.
 
 The results are saved to [`matrix/`](matrix/), one JSON file per server
 version. They contain no timestamps or table ids, so running the lab again
-only changes a file when a server behaves differently.
+only changes a file when a server behaves differently. Before saving, the lab
+compares its results with the saved file and reports which scenarios are new
+or changed.
 
 ### Run it
 
@@ -50,13 +69,12 @@ throwaway servers.
 
 ### Add a scenario
 
-Add a `.toml` file to `scenarios/` (the format is described in
-[`scenarios/README.md`](scenarios/README.md)), run `cargo test` to check that
-it loads, then run the lab.
+Add a `.toml` file to `scenarios/`; the format and the steps are in
+[`scenarios/README.md`](scenarios/README.md).
 
-`cargo test` also checks that `kilit-core` reads every statement the lab
-runs, with the same algorithm and lock. A measurement kilit cannot read back
-would be useless.
+`cargo test` checks that `kilit-core` reads every statement the lab runs,
+with the same algorithm and lock, and that every measured scenario is used
+by kilit. A measurement kilit cannot read back, or never uses, helps no one.
 
 ## The SQL reader
 
@@ -81,6 +99,32 @@ cargo run -p kilit-core --example parse -- path/to/migration.sql
 Known gaps: sqlparser 0.63 cannot read `CONVERT TO CHARACTER SET`,
 `ENGINE=...`, `RENAME INDEX`, MariaDB's `ALGORITHM=NOCOPY` or `OPTIMIZE TABLE`
 yet, so they come out as `Unparsed`.
+
+## Checking a migration
+
+kilit places each change in a *case*: a kind of change, such as `add-column`,
+together with the lab scenarios that measured it. The lab results are built
+into kilit-core when it is compiled, so checking needs no database.
+
+- **Measured:** kilit gives the server's answer for the target version, and
+  names the scenarios behind it. The scenarios of a case must agree, or kilit
+  refuses to answer.
+- **Notes:** the same change measured on a table or on data where the answer
+  is different, such as a table with a FULLTEXT index or a foreign key with
+  rows that point to a missing parent. kilit cannot see the table or the data
+  yet, so it lists these instead of guessing.
+- **Unknown:** changes the lab has not measured, several changes in one
+  statement, `MODIFY` (it needs the column's current definition) and
+  statements kilit could not read. kilit says why, and never calls them safe.
+
+`SET foreign_key_checks = 0` and similar session settings are followed from
+statement to statement. A statement that forces `ALGORITHM=...` or
+`LOCK=NONE` is answered from the lab's run of exactly that variant.
+
+```sh
+cargo run -p kilit-core --example check                                   # a sample migration
+cargo run -p kilit-core --example check -- path/to/migration.sql mysql-8.0.46
+```
 
 ## License
 

@@ -1,0 +1,2 @@
+title = "Add a timestamp column that defaults to the current time"
+operation = "ADD COLUMN seen_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"

@@ -14,10 +14,10 @@ mod verdict;
 use std::path::Path;
 use std::process::ExitCode;
 
+use kilit_core::Server;
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts, OptsBuilder};
 
-use crate::matrix::Server;
 use crate::scenario::Scenario;
 
 /// The lab's errors: the server or the network failed us, not a measurement.
@@ -131,12 +131,21 @@ async fn run_target(url: &str, scenarios: &[Scenario], root: &Path, details: boo
     if details {
         report::print_details(&measurements);
     }
-    let path = matrix::write(&root.join("matrix"), &server, &measurements)?;
+    let (path, changes) = matrix::write(&root.join("matrix"), &server, &measurements)?;
+    let path = path.strip_prefix(root).unwrap_or(&path).display();
     println!();
-    println!(
-        "  saved {}",
-        path.strip_prefix(root).unwrap_or(&path).display()
-    );
+    match changes {
+        Some(changes) => {
+            println!("  saved {path}: {changes}");
+            if !changes.changed.is_empty() {
+                // The same scenario, a different result: the server behaves
+                // differently, or the scenario itself was edited.
+                println!("  changed: {}", changes.changed.join(", "));
+                println!("  look closer with `git diff {path}`");
+            }
+        }
+        None => println!("  saved {path}"),
+    }
     println!();
     Ok(())
 }

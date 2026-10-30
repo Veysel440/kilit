@@ -355,8 +355,9 @@ fn foreign_key_action(action: ReferentialAction) -> ForeignKeyAction {
     }
 }
 
-/// Session variables become `Set`. A statement that also sets global or
-/// user variables becomes `Other`: kilit does not follow those.
+/// Session variables become `Set`. Global and user variables in the same
+/// statement are skipped: they do not change how this session runs DDL.
+/// A statement with no session variable at all becomes `Other`.
 fn set_statement(set: ast::Set) -> StatementKind {
     let assignments: Vec<(Option<ContextModifier>, ObjectName, Expr)> = match set {
         ast::Set::SingleAssignment {
@@ -372,17 +373,20 @@ fn set_statement(set: ast::Set) -> StatementKind {
         _ => return StatementKind::Other,
     };
 
-    let mut variables = Vec::with_capacity(assignments.len());
-    for (scope, name, value) in assignments {
-        let Some(name) = session_variable(scope, &name) else {
-            return StatementKind::Other;
-        };
-        variables.push(Variable {
-            name,
-            value: value.to_string(),
-        });
+    let variables: Vec<Variable> = assignments
+        .into_iter()
+        .filter_map(|(scope, name, value)| {
+            Some(Variable {
+                name: session_variable(scope, &name)?,
+                value: value.to_string(),
+            })
+        })
+        .collect();
+    if variables.is_empty() {
+        StatementKind::Other
+    } else {
+        StatementKind::Set { variables }
     }
-    StatementKind::Set { variables }
 }
 
 /// The lowercase name of a session variable, or `None` for a global or a
@@ -731,6 +735,20 @@ mod tests {
                         value: "0".into(),
                     },
                 ]
+            }
+        );
+    }
+
+    #[test]
+    fn session_variables_are_kept_next_to_user_variables() {
+        // How mysqldump turns the checks off while saving the old value.
+        assert_eq!(
+            kind("SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0"),
+            StatementKind::Set {
+                variables: vec![Variable {
+                    name: "foreign_key_checks".into(),
+                    value: "0".into(),
+                }]
             }
         );
     }

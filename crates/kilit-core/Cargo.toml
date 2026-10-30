@@ -11,10 +11,8 @@ publish = false
 
 [dependencies]
 serde.workspace = true
-sqlparser.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
+sqlparser.workspace = true
 
 [lints]
 workspace = true

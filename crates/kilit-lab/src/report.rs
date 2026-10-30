@@ -1,10 +1,9 @@
 //! Prints the lab's results as plain-text tables.
 
+use kilit_core::{Outcome, Server, Variant, Verdict, Writes};
+
 use crate::fixture::ORDERS_ROWS;
-use crate::matrix::Server;
-use crate::probe::{Measurement, Outcome};
-use crate::scenario::Variant;
-use crate::verdict::{Verdict, Writes};
+use crate::probe::Measurement;
 
 /// One line per scenario: what the server does when nothing is forced.
 pub fn print_summary(server: &Server, address: &str, measurements: &[Measurement]) {
@@ -65,6 +64,9 @@ pub fn print_details(measurements: &[Measurement]) {
         let scenario = measurement.scenario;
         println!();
         println!("{}: {}", scenario.id, scenario.title);
+        for statement in &scenario.setup {
+            println!("{statement};  -- setup");
+        }
         for statement in &scenario.session {
             println!("{statement};");
         }

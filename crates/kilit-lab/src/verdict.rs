@@ -8,11 +8,7 @@
 //! default run must leave exactly the same traces as the forced run of
 //! that algorithm, or the verdict is marked inconsistent.
 
-use kilit_core::Algorithm;
-use serde::Serialize;
-
-use crate::probe::{Observation, Outcome};
-use crate::scenario::Variant;
+use kilit_core::{Algorithm, Observation, Outcome, Variant, Verdict, Writes};
 
 /// The order in which MySQL tries algorithms when none is forced.
 const CHEAPEST_FIRST: [Algorithm; 3] = [Algorithm::Instant, Algorithm::Inplace, Algorithm::Copy];
@@ -20,38 +16,6 @@ const CHEAPEST_FIRST: [Algorithm; 3] = [Algorithm::Instant, Algorithm::Inplace, 
 /// MySQL's "this algorithm or lock is not possible for this change" errors:
 /// ER_ALTER_OPERATION_NOT_SUPPORTED and ER_ALTER_OPERATION_NOT_SUPPORTED_REASON.
 const NOT_SUPPORTED: [u16; 2] = [1845, 1846];
-
-#[derive(Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "result", rename_all = "snake_case")]
-pub enum Verdict {
-    /// The statement runs.
-    Runs {
-        /// The algorithm the server picks by itself. `None` if no forced
-        /// algorithm was accepted, which should not happen.
-        algorithm: Option<Algorithm>,
-        rebuilds_table: bool,
-        copied_rows: Option<u64>,
-        writes: Writes,
-        /// The default run left the same traces as the forced run of
-        /// `algorithm`. If not, look at the details: the server did
-        /// something we do not expect.
-        consistent: bool,
-    },
-    /// The statement fails with these data, whatever the algorithm.
-    Fails { code: u16, message: String },
-}
-
-/// Whether the table stays writable while the ALTER runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Writes {
-    /// `LOCK=NONE` was accepted.
-    Allowed,
-    /// `LOCK=NONE` was refused as not possible: writes wait for the ALTER.
-    Blocked,
-    /// `LOCK=NONE` failed for some other reason.
-    Unknown,
-}
 
 /// Decides the verdict from the observations of one scenario.
 ///
@@ -238,20 +202,5 @@ mod tests {
     fn lock_none_failing_for_another_reason_is_unknown() {
         assert_eq!(writes(Some(&rejected(1062))), Writes::Unknown);
         assert_eq!(writes(Some(&rejected(1846))), Writes::Blocked);
-    }
-
-    #[test]
-    fn verdicts_serialize_to_stable_json() {
-        let verdict = Verdict::Runs {
-            algorithm: Some(Algorithm::Instant),
-            rebuilds_table: false,
-            copied_rows: Some(0),
-            writes: Writes::Allowed,
-            consistent: true,
-        };
-        assert_eq!(
-            serde_json::to_string(&verdict).unwrap(),
-            r#"{"result":"runs","algorithm":"INSTANT","rebuilds_table":false,"copied_rows":0,"writes":"allowed","consistent":true}"#
-        );
     }
 }

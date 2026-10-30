@@ -1,0 +1,3 @@
+title = "Drop a foreign key"
+setup = ["ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)"]
+operation = "DROP FOREIGN KEY fk_orders_user"

@@ -1,0 +1,2 @@
+title = "Add a column with a character set, a collation and a comment"
+operation = "ADD COLUMN label VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'shown to customers'"

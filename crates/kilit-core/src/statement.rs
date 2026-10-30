@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// One statement of the input.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -204,7 +204,7 @@ pub enum ForeignKeyAction {
 }
 
 /// An algorithm, as forced with `ALGORITHM=...` or as picked by the server.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Algorithm {
     /// Change only the table's metadata; rows are not touched.

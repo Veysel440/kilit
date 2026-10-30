@@ -1,0 +1,2 @@
+title = "Add a nullable column as the first column"
+operation = "ADD COLUMN coupon VARCHAR(255) NULL FIRST"
