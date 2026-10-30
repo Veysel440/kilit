@@ -100,6 +100,12 @@ const RENAME_COLUMN: Case = Case {
     exceptions: &[],
 };
 
+const SET_COLUMN_DEFAULT: Case = Case {
+    id: "set-column-default",
+    scenarios: &["set-column-default"],
+    exceptions: &[],
+};
+
 const ADD_INDEX: Case = Case {
     id: "add-index",
     scenarios: &["add-index"],
@@ -152,10 +158,11 @@ const DROP_FOREIGN_KEY: Case = Case {
 };
 
 /// Every case kilit knows.
-pub const CASES: [&Case; 10] = [
+pub const CASES: [&Case; 11] = [
     &ADD_COLUMN,
     &DROP_COLUMN,
     &RENAME_COLUMN,
+    &SET_COLUMN_DEFAULT,
     &ADD_INDEX,
     &ADD_UNIQUE_INDEX,
     &ADD_FULLTEXT_INDEX,
@@ -365,6 +372,7 @@ fn classify(
         }
         Operation::DropColumn { .. } => &DROP_COLUMN,
         Operation::RenameColumn { .. } => &RENAME_COLUMN,
+        Operation::SetColumnDefault { .. } => &SET_COLUMN_DEFAULT,
         Operation::AddIndex(index) => match index.kind {
             IndexKind::Plain => &ADD_INDEX,
             IndexKind::Unique => &ADD_UNIQUE_INDEX,

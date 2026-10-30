@@ -90,6 +90,11 @@ pub enum Operation {
         column: Column,
         position: Option<Position>,
     },
+    /// `ALTER COLUMN c SET DEFAULT value`: only the default changes.
+    SetColumnDefault {
+        column: String,
+        default: String,
+    },
     /// `RENAME COLUMN a TO b`: only the name changes.
     RenameColumn {
         from: String,
@@ -268,6 +273,9 @@ impl fmt::Display for Operation {
                 write_position(f, position.as_ref())
             }
             Operation::RenameColumn { from, to } => write!(f, "rename column {from} to {to}"),
+            Operation::SetColumnDefault { column, default } => {
+                write!(f, "set the default of {column} to {default}")
+            }
             Operation::AddIndex(index) => write!(f, "add {index}"),
             Operation::DropIndex { name } => write!(f, "drop index {name}"),
             Operation::AddPrimaryKey { columns } => {

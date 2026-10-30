@@ -5,9 +5,10 @@
 //! becomes `Unparsed`. Nothing is dropped silently.
 
 use sqlparser::ast::{
-    self, AlterTableAlgorithm, AlterTableLock, AlterTableOperation, ColumnOption, ContextModifier,
-    Expr, GeneratedExpressionMode, Ident, IndexColumn, MySQLColumnPosition, ObjectName,
-    ObjectNamePart, ObjectType, ReferentialAction, RenameTableNameKind, TableConstraint,
+    self, AlterColumnOperation, AlterTableAlgorithm, AlterTableLock, AlterTableOperation,
+    ColumnOption, ContextModifier, Expr, GeneratedExpressionMode, Ident, IndexColumn,
+    MySQLColumnPosition, ObjectName, ObjectNamePart, ObjectType, ReferentialAction,
+    RenameTableNameKind, TableConstraint,
 };
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::keywords::Keyword;
@@ -190,6 +191,13 @@ fn operation_of(operation: AlterTableOperation) -> Operation {
         } => Operation::RenameColumn {
             from: old_column_name.value,
             to: new_column_name.value,
+        },
+        AlterTableOperation::AlterColumn {
+            column_name,
+            op: AlterColumnOperation::SetDefault { value },
+        } => Operation::SetColumnDefault {
+            column: column_name.value,
+            default: value.to_string(),
         },
         AlterTableOperation::AddConstraint { constraint, .. } => added_constraint(constraint),
         AlterTableOperation::DropIndex { name } => Operation::DropIndex { name: name.value },
@@ -603,6 +611,17 @@ mod tests {
             panic!("expected ADD INDEX");
         };
         assert_eq!(index.name.as_deref(), Some("i"));
+    }
+
+    #[test]
+    fn reads_set_default() {
+        assert_eq!(
+            operation("ALTER TABLE t ALTER COLUMN amount SET DEFAULT 0"),
+            Operation::SetColumnDefault {
+                column: "amount".into(),
+                default: "0".into(),
+            }
+        );
     }
 
     #[test]
