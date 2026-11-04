@@ -17,8 +17,8 @@ use crate::modify::{Change, changes};
 use crate::results::{Variant, Verdict};
 use crate::schema::{Schema, TableState};
 use crate::statement::{
-    Alter, Column, DataType, IndexKind, Lock, Operation, Position, Statement, StatementKind, Table,
-    Variable,
+    Alter, Column, DataType, Index, IndexKind, Lock, Operation, Position, Statement, StatementKind,
+    Table, Variable,
 };
 
 /// What kilit says about one statement of the input.
@@ -63,10 +63,14 @@ pub struct Case {
 
 #[derive(Debug)]
 pub struct Exception {
-    pub scenario: &'static str,
-    /// When this scenario's result applies, e.g. "if the table has a FULLTEXT index".
+    /// Scenarios that measure this situation, in each shape the lab tried.
+    /// Like a case's, they must give the same result on every server.
+    pub scenarios: &'static [&'static str],
+    /// When this result applies, e.g. "if the table has a FULLTEXT index".
     pub when: &'static str,
-    pub condition: Condition,
+    /// The situation: all of these hold. Two situations measured together
+    /// are an exception of their own.
+    pub conditions: &'static [Condition],
 }
 
 /// What an exception depends on. When kilit can see it in the tables, the
@@ -74,7 +78,8 @@ pub struct Exception {
 /// cannot, the exception becomes a note.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Condition {
-    /// The table has a FULLTEXT index.
+    /// The table has a FULLTEXT index, and keeps it: dropping the only
+    /// column of a FULLTEXT index drops the index too.
     FulltextIndex,
     /// The changed column is in an index, the primary key included.
     IndexedColumn,
@@ -97,26 +102,55 @@ const ADD_COLUMN: Case = Case {
     ],
     exceptions: &[
         Exception {
-            scenario: "add-column-with-fulltext",
+            scenarios: &["add-column-with-fulltext"],
             when: "if the table has a FULLTEXT index",
-            condition: Condition::FulltextIndex,
+            conditions: &[Condition::FulltextIndex],
         },
         Exception {
-            scenario: "add-column-after-64-changes",
+            scenarios: &["add-column-after-64-changes"],
             when: "if the table has had 64 instant column changes since it was last rebuilt",
-            condition: Condition::Hidden,
+            conditions: &[Condition::Hidden],
         },
     ],
 };
 
+/// Shapes the lab has not measured, such as a column in a foreign key or
+/// the primary key, are unknown: see [`check_dropped_column`].
 const DROP_COLUMN: Case = Case {
     id: "drop-column",
     scenarios: &["drop-column"],
-    exceptions: &[Exception {
-        scenario: "drop-column-with-fulltext",
-        when: "if the table has a FULLTEXT index",
-        condition: Condition::FulltextIndex,
-    }],
+    exceptions: &[
+        Exception {
+            scenarios: &["drop-column-with-fulltext"],
+            when: "if the table keeps a FULLTEXT index",
+            conditions: &[Condition::FulltextIndex],
+        },
+        Exception {
+            scenarios: &[
+                "drop-column-indexed",
+                "drop-column-indexed-first-of-two",
+                "drop-column-indexed-second-of-two",
+                "drop-column-indexed-unique",
+                "drop-column-indexed-prefix",
+                "drop-column-indexed-fulltext",
+            ],
+            when: "if the column is in a plain or FULLTEXT index, or has a UNIQUE index of its own",
+            conditions: &[Condition::IndexedColumn],
+        },
+        Exception {
+            scenarios: &[
+                "drop-column-indexed-with-fulltext",
+                "drop-column-indexed-first-of-two-with-fulltext",
+                "drop-column-indexed-second-of-two-with-fulltext",
+                "drop-column-indexed-unique-with-fulltext",
+                "drop-column-indexed-prefix-with-fulltext",
+                "drop-column-indexed-fulltext-with-fulltext",
+                "drop-column-indexed-fulltext-two-columns",
+            ],
+            when: "if the column is in an index and the table keeps a FULLTEXT index",
+            conditions: &[Condition::FulltextIndex, Condition::IndexedColumn],
+        },
+    ],
 };
 
 const RENAME_COLUMN: Case = Case {
@@ -136,14 +170,14 @@ const CHANGE_INTEGER_TYPE: Case = Case {
     scenarios: &["int-to-bigint", "int-to-smallint", "int-to-unsigned"],
     exceptions: &[
         Exception {
-            scenario: "modify-foreign-key-column",
+            scenarios: &["modify-foreign-key-column"],
             when: "if the column is in a foreign key",
-            condition: Condition::ForeignKeyColumn,
+            conditions: &[Condition::ForeignKeyColumn],
         },
         Exception {
-            scenario: "int-to-tinyint-out-of-range",
+            scenarios: &["int-to-tinyint-out-of-range"],
             when: "if a value does not fit the new type (in strict SQL mode, the default)",
-            condition: Condition::Hidden,
+            conditions: &[Condition::Hidden],
         },
     ],
 };
@@ -174,9 +208,9 @@ const SHORTEN_VARCHAR: Case = Case {
     id: "shorten-varchar",
     scenarios: &["varchar-50-to-40"],
     exceptions: &[Exception {
-        scenario: "varchar-50-to-5-too-long",
+        scenarios: &["varchar-50-to-5-too-long"],
         when: "if a value is longer than the new length (in strict SQL mode, the default)",
-        condition: Condition::Hidden,
+        conditions: &[Condition::Hidden],
     }],
 };
 
@@ -190,9 +224,9 @@ const CHANGE_COLUMN_COLLATION: Case = Case {
     id: "change-column-collation",
     scenarios: &["change-column-collation"],
     exceptions: &[Exception {
-        scenario: "change-column-collation-indexed",
+        scenarios: &["change-column-collation-indexed"],
         when: "if the column is in an index",
-        condition: Condition::IndexedColumn,
+        conditions: &[Condition::IndexedColumn],
     }],
 };
 
@@ -200,9 +234,9 @@ const MAKE_COLUMN_NOT_NULL: Case = Case {
     id: "make-column-not-null",
     scenarios: &["not-null-no-nulls"],
     exceptions: &[Exception {
-        scenario: "not-null-with-nulls",
+        scenarios: &["not-null-with-nulls"],
         when: "if a row holds NULL",
-        condition: Condition::Hidden,
+        conditions: &[Condition::Hidden],
     }],
 };
 
@@ -240,16 +274,20 @@ const ADD_UNIQUE_INDEX: Case = Case {
     id: "add-unique-index",
     scenarios: &["add-unique-index"],
     exceptions: &[Exception {
-        scenario: "add-unique-index-duplicates",
+        scenarios: &["add-unique-index-duplicates"],
         when: "if the columns hold duplicate values",
-        condition: Condition::Hidden,
+        conditions: &[Condition::Hidden],
     }],
 };
 
 const ADD_FULLTEXT_INDEX: Case = Case {
     id: "add-fulltext-index",
     scenarios: &["add-fulltext-index"],
-    exceptions: &[],
+    exceptions: &[Exception {
+        scenarios: &["add-second-fulltext-index"],
+        when: "if the table already has a FULLTEXT index",
+        conditions: &[Condition::FulltextIndex],
+    }],
 };
 
 const DROP_INDEX: Case = Case {
@@ -262,9 +300,9 @@ const ADD_FOREIGN_KEY: Case = Case {
     id: "add-foreign-key",
     scenarios: &["add-foreign-key"],
     exceptions: &[Exception {
-        scenario: "add-foreign-key-orphans",
+        scenarios: &["add-foreign-key-orphans"],
         when: "if a row points to a parent row that does not exist",
-        condition: Condition::Hidden,
+        conditions: &[Condition::Hidden],
     }],
 };
 
@@ -272,9 +310,9 @@ const ADD_FOREIGN_KEY_CHECKS_OFF: Case = Case {
     id: "add-foreign-key-checks-off",
     scenarios: &["add-foreign-key-checks-off"],
     exceptions: &[Exception {
-        scenario: "add-foreign-key-checks-off-orphans",
+        scenarios: &["add-foreign-key-checks-off-orphans"],
         when: "if a row points to a parent row that does not exist (the row is kept unchecked)",
-        condition: Condition::Hidden,
+        conditions: &[Condition::Hidden],
     }],
 };
 
@@ -448,7 +486,7 @@ fn predict(
         case,
         mut notes,
         column,
-    } = match classify(operation, session, table, results) {
+    } = match classify(operation, session, table, schema, results) {
         Ok(classified) => classified,
         Err(reason) => return unknown(reason),
     };
@@ -460,96 +498,63 @@ fn predict(
     };
 
     // All of the case's scenarios must agree on this server.
-    let mut verdict: Option<Verdict> = None;
-    for id in case.scenarios {
-        let Some(scenario) = results.scenario(id) else {
-            return unknown(format!(
-                "the lab has no result for {id} on {}",
-                results.server.name()
-            ));
-        };
-        if matches!(
-            scenario.verdict,
-            Verdict::Runs {
-                consistent: false,
-                ..
-            }
-        ) {
-            return unknown(format!(
-                "the lab saw something unexpected in {id}; run kilit-lab with --details"
-            ));
-        }
-        let Some(this) = scenario.verdict_for(variant) else {
-            return unknown(format!("the lab did not run {id} as {variant}"));
-        };
-        match &verdict {
-            None => verdict = Some(this),
-            Some(first) if *first == this => {}
-            Some(_) => {
-                return unknown(format!(
-                    "the lab's scenarios for {} disagree on {}",
-                    case.id,
-                    results.server.name()
-                ));
-            }
-        }
-    }
-    let Some(verdict) = verdict else {
-        return unknown(format!("{} has no lab scenarios", case.id));
+    let verdict = match agreed(case.scenarios, case.id, variant, results) {
+        Ok(verdict) => verdict,
+        Err(reason) => return unknown(reason),
     };
 
     // A situation kilit can see in the table decides the answer; one it
-    // cannot see becomes a note.
+    // cannot see becomes a note. When several hold, the exception measured
+    // with all of their conditions decides, never the order of the list.
+    let situation = Situation {
+        table,
+        column: column.as_deref(),
+        dropped: match operation {
+            Operation::DropColumn { name } => Some(name),
+            _ => None,
+        },
+        session,
+        schema,
+    };
+    let mut holding = Vec::new();
     let mut unseen = Vec::new();
     for exception in case.exceptions {
-        match applies(
-            exception.condition,
-            table,
-            column.as_deref(),
-            session,
-            schema,
-        ) {
-            Applies::Yes(why) => {
-                let Some(other) = results
-                    .scenario(exception.scenario)
-                    .and_then(|scenario| scenario.verdict_for(variant))
-                else {
-                    return unknown(format!(
-                        "{why}, and the lab did not run {} as {variant}",
-                        exception.scenario
-                    ));
-                };
-                notes.push(why);
-                return Prediction::Measured {
-                    case: case.id,
-                    verdict: other,
-                    evidence: vec![exception.scenario],
-                    notes,
-                };
-            }
+        match holds(exception, &situation) {
+            Applies::Yes(why) => holding.push((exception, why)),
             Applies::Unmeasured(reason) => return unknown(reason),
             Applies::No => {}
             Applies::Maybe => unseen.push(exception),
         }
     }
+    if !holding.is_empty() {
+        let (exception, why) = match deciding(holding) {
+            Ok(decides) => decides,
+            Err(reason) => return unknown(reason),
+        };
+        let other = match agreed(exception.scenarios, case.id, variant, results) {
+            Ok(other) => other,
+            Err(reason) => return unknown(format!("{}, and {reason}", why.join(", and "))),
+        };
+        notes.extend(why);
+        return Prediction::Measured {
+            case: case.id,
+            verdict: other,
+            evidence: exception.scenarios.to_vec(),
+            notes,
+        };
+    }
     for exception in unseen {
-        let Some(other) = results
-            .scenario(exception.scenario)
-            .and_then(|scenario| scenario.verdict_for(variant))
-        else {
+        let Ok(other) = agreed(exception.scenarios, case.id, variant, results) else {
             continue;
         };
+        let scenarios = scenario_list(exception.scenarios);
         if other == verdict {
-            notes.push(format!(
-                "{}: same result ({})",
-                exception.when, exception.scenario
-            ));
+            notes.push(format!("{}: same result ({scenarios})", exception.when));
         } else {
             notes.push(format!(
-                "{}: {} ({})",
+                "{}: {} ({scenarios})",
                 exception.when,
-                brief(&other),
-                exception.scenario
+                brief(&other)
             ));
         }
     }
@@ -562,11 +567,115 @@ fn predict(
     }
 }
 
+/// The verdict that all of `scenarios` give for `variant`, or why there is
+/// none. `case` names them in the reason.
+fn agreed(
+    scenarios: &[&str],
+    case: &str,
+    variant: Variant,
+    results: &ServerResults,
+) -> Result<Verdict, String> {
+    let mut verdict: Option<Verdict> = None;
+    for id in scenarios {
+        let Some(scenario) = results.scenario(id) else {
+            return Err(format!(
+                "the lab has no result for {id} on {}",
+                results.server.name()
+            ));
+        };
+        if matches!(
+            scenario.verdict,
+            Verdict::Runs {
+                consistent: false,
+                ..
+            }
+        ) {
+            return Err(format!(
+                "the lab saw something unexpected in {id}; run kilit-lab with --details"
+            ));
+        }
+        let Some(this) = scenario.verdict_for(variant) else {
+            return Err(format!("the lab did not run {id} as {variant}"));
+        };
+        match &verdict {
+            None => verdict = Some(this),
+            Some(first) if *first == this => {}
+            Some(_) => {
+                return Err(format!(
+                    "the lab's scenarios for {case} disagree on {}",
+                    results.server.name()
+                ));
+            }
+        }
+    }
+    verdict.ok_or_else(|| format!("{case} has no lab scenarios"))
+}
+
+/// The scenarios behind a note: `drop-column-with-fulltext`, or
+/// `drop-column-indexed and 5 more lab scenarios`.
+fn scenario_list(scenarios: &[&str]) -> String {
+    match scenarios {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [first, more] => format!("{first} and {more}"),
+        [first, rest @ ..] => format!("{first} and {} more lab scenarios", rest.len()),
+    }
+}
+
+/// When several exceptions hold, the one whose conditions include all of
+/// theirs decides: the lab measured that very combination. Without one,
+/// kilit does not pick.
+fn deciding(
+    mut holding: Vec<(&'static Exception, Vec<String>)>,
+) -> Result<(&'static Exception, Vec<String>), String> {
+    let covers_all = |exception: &Exception| {
+        holding.iter().all(|(other, _)| {
+            other
+                .conditions
+                .iter()
+                .all(|condition| exception.conditions.contains(condition))
+        })
+    };
+    if let Some(at) = holding
+        .iter()
+        .position(|(exception, _)| covers_all(exception))
+    {
+        return Ok(holding.swap_remove(at));
+    }
+    let mut reasons: Vec<&str> = Vec::new();
+    for (_, why) in &holding {
+        for reason in why {
+            if !reasons.contains(&reason.as_str()) {
+                reasons.push(reason);
+            }
+        }
+    }
+    let count = match holding.len() {
+        2 => "two".to_owned(),
+        many => many.to_string(),
+    };
+    Err(format!(
+        "{}: {count} measured situations apply, and the lab has not measured them together",
+        reasons.join(", and ")
+    ))
+}
+
+/// What the conditions of an exception are checked against.
+struct Situation<'a> {
+    table: TableState<'a>,
+    /// The column the change is about, as the table has it now.
+    column: Option<&'a str>,
+    /// The column the statement drops, which takes its indexes with it.
+    dropped: Option<&'a str>,
+    session: &'a Session,
+    schema: &'a Schema,
+}
+
 /// Whether an exception's situation holds.
 #[derive(Debug, PartialEq, Eq)]
 enum Applies {
-    /// It holds, for this reason.
-    Yes(String),
+    /// It holds, with a reason for each condition.
+    Yes(Vec<String>),
     No,
     /// kilit cannot tell: it does not know the table, or no schema shows it.
     Maybe,
@@ -574,47 +683,66 @@ enum Applies {
     Unmeasured(String),
 }
 
-fn applies(
-    condition: Condition,
-    table: TableState<'_>,
-    column: Option<&str>,
-    session: &Session,
-    schema: &Schema,
-) -> Applies {
-    let TableState::Known(table) = table else {
+/// All of the exception's conditions must hold. One that does not decides
+/// first, then one the lab has not measured, then one kilit cannot see.
+fn holds(exception: &Exception, situation: &Situation<'_>) -> Applies {
+    let mut reasons = Vec::new();
+    let mut unmeasured = None;
+    let mut maybe = false;
+    for &condition in exception.conditions {
+        match applies(condition, situation) {
+            Applies::No => return Applies::No,
+            Applies::Yes(why) => reasons.extend(why),
+            Applies::Unmeasured(reason) => {
+                unmeasured.get_or_insert(reason);
+            }
+            Applies::Maybe => maybe = true,
+        }
+    }
+    match unmeasured {
+        Some(reason) => Applies::Unmeasured(reason),
+        None if maybe => Applies::Maybe,
+        None => Applies::Yes(reasons),
+    }
+}
+
+fn applies(condition: Condition, situation: &Situation<'_>) -> Applies {
+    let TableState::Known(table) = situation.table else {
         return Applies::Maybe;
     };
-    match (condition, column) {
+    match (condition, situation.column) {
         (Condition::Hidden, _) | (Condition::IndexedColumn | Condition::ForeignKeyColumn, None) => {
             Applies::Maybe
         }
-        (Condition::FulltextIndex, _) => match table.fulltext_index() {
-            Some(index) => Applies::Yes(format!(
+        (Condition::FulltextIndex, _) => match kept_fulltext_index(table, situation.dropped) {
+            Some(index) => Applies::Yes(vec![format!(
                 "{} has the FULLTEXT index {}",
                 table.name,
                 index.name.as_deref().unwrap_or_default()
-            )),
+            )]),
             None => Applies::No,
         },
         (Condition::IndexedColumn, Some(column)) => match table.index_on(column) {
-            Some(index) => Applies::Yes(format!("{column} is in the index {index}")),
+            Some(index) => Applies::Yes(vec![format!("{column} is in the index {index}")]),
             None => Applies::No,
         },
         (Condition::ForeignKeyColumn, Some(column)) => {
             if let Some(key) = table.foreign_key_on(column) {
                 let key = key.name.as_deref().unwrap_or_default();
-                return match session.foreign_key_checks {
-                    Setting::On => Applies::Yes(format!("{column} is in the foreign key {key}")),
-                    Setting::ServerDefault => Applies::Yes(format!(
+                return match situation.session.foreign_key_checks {
+                    Setting::On => {
+                        Applies::Yes(vec![format!("{column} is in the foreign key {key}")])
+                    }
+                    Setting::ServerDefault => Applies::Yes(vec![format!(
                         "{column} is in the foreign key {key}; {ASSUMES_FOREIGN_KEY_CHECKS}"
-                    )),
+                    )]),
                     Setting::Off | Setting::Unclear => Applies::Unmeasured(format!(
                         "{column} is in the foreign key {key}, and the lab has not measured \
                          changing such a column with foreign_key_checks off"
                     )),
                 };
             }
-            match referenced_by(schema, table, column) {
+            match referenced_by(situation.schema, table, column) {
                 Some((other, key)) => Applies::Unmeasured(format!(
                     "{column} is referenced by the foreign key {key} on {other}, and the lab \
                      has not measured changing a referenced column"
@@ -623,6 +751,39 @@ fn applies(
             }
         }
     }
+}
+
+/// A FULLTEXT index that the table keeps after the statement. Dropping a
+/// column drops the indexes it is the only column of.
+fn kept_fulltext_index<'a>(table: &'a Table, dropped: Option<&str>) -> Option<&'a Index> {
+    table.indexes.iter().find(|index| {
+        index.kind == IndexKind::Fulltext
+            && index.columns.iter().any(|entry| {
+                dropped.is_none_or(|dropped| {
+                    entry_column(entry).is_none_or(|column| !column.eq_ignore_ascii_case(dropped))
+                })
+            })
+    })
+}
+
+/// The column an index entry names: `email` in `email` or `email(10)`.
+/// An expression such as `(lower(email))` names none.
+fn entry_column(entry: &str) -> Option<&str> {
+    if entry.starts_with('(') {
+        return None;
+    }
+    entry.split('(').next()
+}
+
+/// Whether an expression, such as `(amount * 2)`, names the column. A word
+/// inside a string counts too, which only makes kilit more careful.
+fn uses_column(expression: &str, column: &str) -> bool {
+    expression
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+        .any(|word| word.eq_ignore_ascii_case(column))
+        || expression
+            .to_lowercase()
+            .contains(&format!("`{}`", column.to_lowercase()))
 }
 
 /// A foreign key on another table that points at `table.column`.
@@ -655,6 +816,7 @@ fn classify(
     operation: &Operation,
     session: &Session,
     table: TableState<'_>,
+    schema: &Schema,
     results: &ServerResults,
 ) -> Result<Classified, String> {
     let mut notes = Vec::new();
@@ -665,6 +827,7 @@ fn classify(
             &ADD_COLUMN
         }
         Operation::DropColumn { name } => {
+            check_dropped_column(table, name, schema)?;
             subject = Some(name.clone());
             &DROP_COLUMN
         }
@@ -754,6 +917,125 @@ fn check_new_column(column: &Column) -> Result<(), String> {
             "the new column has options kilit does not understand yet: {}",
             column.other_options.join(" ")
         ));
+    }
+    Ok(())
+}
+
+const DROPPING_NOT_MEASURED: &str = "dropping such a column has not been measured yet";
+
+/// The lab measured dropping a column that is in no index, or in plain or
+/// FULLTEXT indexes, or that has a UNIQUE index of its own. Other shapes
+/// it has not measured, so the answer the lab gave for indexed columns
+/// must not reach them. Without the table kilit cannot see the shape; the
+/// notes say what the lab measured.
+fn check_dropped_column(
+    table: TableState<'_>,
+    column: &str,
+    schema: &Schema,
+) -> Result<(), String> {
+    let TableState::Known(table) = table else {
+        return Ok(());
+    };
+    if let Some(key) = table.foreign_key_on(column) {
+        return Err(format!(
+            "{column} is in the foreign key {}, and {DROPPING_NOT_MEASURED}",
+            key.name.as_deref().unwrap_or_default()
+        ));
+    }
+    // One look at each index: the first that uses the column in an
+    // expression, and the first of a shape the lab has not measured.
+    let mut functional = None;
+    let mut unmeasured = None;
+    let mut indexed = table.in_primary_key(column);
+    for index in &table.indexes {
+        let index_name = || index.name.as_deref().unwrap_or_default();
+        let mut has_column = false;
+        let mut has_expression = false;
+        for entry in &index.columns {
+            match entry_column(entry) {
+                Some(entry) => has_column |= entry.eq_ignore_ascii_case(column),
+                None => {
+                    has_expression = true;
+                    if functional.is_none() && uses_column(entry, column) {
+                        functional = Some(format!(
+                            "{column} is used by the functional index {}, and \
+                             {DROPPING_NOT_MEASURED}",
+                            index_name()
+                        ));
+                    }
+                }
+            }
+        }
+        if !has_column {
+            continue;
+        }
+        indexed = true;
+        if unmeasured.is_some() {
+            continue;
+        }
+        unmeasured = match index.kind {
+            _ if has_expression => Some(format!(
+                "{column} is in the index {}, which also indexes an expression, and \
+                 {DROPPING_NOT_MEASURED}",
+                index_name()
+            )),
+            IndexKind::Spatial => Some(format!(
+                "{column} is in the spatial index {}, and {DROPPING_NOT_MEASURED}",
+                index_name()
+            )),
+            // The other columns must stay unique without it.
+            IndexKind::Unique if index.columns.len() > 1 => Some(format!(
+                "{column} is in the unique index {} with other columns, which must stay \
+                 unique without it; that depends on the rows, and {DROPPING_NOT_MEASURED}",
+                index_name()
+            )),
+            IndexKind::Plain | IndexKind::Unique | IndexKind::Fulltext => None,
+        };
+    }
+    // MySQL keeps an index on the columns a foreign key points at, so only
+    // an indexed column needs the look through every table.
+    if let Some((other, key)) = indexed
+        .then(|| referenced_by(schema, table, column))
+        .flatten()
+    {
+        return Err(format!(
+            "{column} is referenced by the foreign key {key} on {other}, and \
+             {DROPPING_NOT_MEASURED}"
+        ));
+    }
+    if let Some(reason) = functional.or(unmeasured) {
+        return Err(reason);
+    }
+    if table.in_primary_key(column) {
+        return Err(if table.primary_key.len() > 1 {
+            format!(
+                "{column} is in the primary key with other columns, which must stay unique \
+                 without it; that depends on the rows, and {DROPPING_NOT_MEASURED}"
+            )
+        } else {
+            format!("{column} is the primary key, and {DROPPING_NOT_MEASURED}")
+        });
+    }
+    // Generated columns are measured neither as the column dropped nor as
+    // what uses it. Only the indexed shapes are kept away here, from the
+    // answer the lab gave for indexed columns.
+    if indexed {
+        for other in &table.columns {
+            let Some(generated) = &other.generated else {
+                continue;
+            };
+            if other.name.eq_ignore_ascii_case(column) {
+                return Err(format!(
+                    "{column} is a generated column, and {DROPPING_NOT_MEASURED}"
+                ));
+            }
+            if uses_column(&generated.expression, column) {
+                return Err(format!(
+                    "the generated column {} uses {column}, and {DROPPING_NOT_MEASURED}",
+                    other.name
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -1362,5 +1644,419 @@ mod tests {
         );
         let lines: Vec<usize> = findings.iter().map(|finding| finding.line).collect();
         assert_eq!(lines, [1, 3, 4]);
+    }
+
+    /// Two hand-written tables, shaped like the lab's.
+    const SHOP: &str = "
+        CREATE TABLE users (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(100) NOT NULL
+        ) DEFAULT CHARSET=utf8mb4;
+        CREATE TABLE orders (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            user_id BIGINT UNSIGNED NOT NULL,
+            amount INT NOT NULL,
+            email VARCHAR(255) NULL,
+            note VARCHAR(50) NULL
+        ) DEFAULT CHARSET=utf8mb4;";
+
+    /// The prediction for the last statement of `sql`, on [`SHOP`] as
+    /// `setup` leaves it.
+    fn on_shop(setup: &str, sql: &str) -> Prediction {
+        predictions_with(&format!("{SHOP}\n{setup}"), sql)
+            .pop()
+            .unwrap()
+    }
+
+    /// The verdict of a measured prediction, or what else it is.
+    fn said(prediction: &Prediction) -> String {
+        match prediction {
+            Prediction::Measured { verdict, .. } => verdict.to_string(),
+            Prediction::Unknown { reason } => format!("unknown: {reason}"),
+            Prediction::NotChecked { .. } => "not checked".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_second_fulltext_index_does_not_rebuild_the_table() {
+        // The first FULLTEXT index is in the schema dump.
+        let dump = "CREATE TABLE posts (id INT PRIMARY KEY, title VARCHAR(100), body TEXT,
+                    FULLTEXT KEY posts_title_fulltext (title));";
+        let Prediction::Measured {
+            case,
+            verdict,
+            evidence,
+            notes,
+        } = predictions_with(
+            dump,
+            "ALTER TABLE posts ADD FULLTEXT INDEX posts_body_fulltext (body)",
+        )
+        .remove(0)
+        else {
+            panic!("expected a measured prediction");
+        };
+        assert_eq!(case, "add-fulltext-index");
+        assert_eq!(verdict.to_string(), "INPLACE, no rebuild, writes wait");
+        assert_eq!(evidence, ["add-second-fulltext-index"]);
+        assert_eq!(notes, ["posts has the FULLTEXT index posts_title_fulltext"]);
+
+        // The first one comes earlier in the same migration.
+        let predictions = predictions_with(
+            SHOP,
+            "ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note);
+             ALTER TABLE orders ADD FULLTEXT INDEX ft_email (email);",
+        );
+        let verdicts: Vec<String> = predictions.iter().map(said).collect();
+        assert_eq!(
+            verdicts,
+            [
+                "INPLACE, rebuilds the table, writes wait",
+                "INPLACE, no rebuild, writes wait"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fulltext_index_dropped_earlier_no_longer_counts() {
+        // InnoDB keeps a hidden column for FULLTEXT indexes after the last
+        // one is dropped, and MySQL then adds the next one without a
+        // rebuild. No schema shows that column, so kilit warns of a
+        // rebuild: the safe side.
+        let predictions = predictions_with(
+            SHOP,
+            "ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note);
+             ALTER TABLE orders DROP INDEX ft_note;
+             ALTER TABLE orders ADD FULLTEXT INDEX ft_email (email);",
+        );
+        assert_eq!(
+            said(&predictions[2]),
+            "INPLACE, rebuilds the table, writes wait"
+        );
+    }
+
+    #[test]
+    fn without_the_table_a_second_fulltext_index_is_a_note() {
+        let note = "if the table already has a FULLTEXT index: INPLACE, no rebuild, writes wait \
+                    (add-second-fulltext-index)";
+        let (_, verdict, notes) = measured(only("ALTER TABLE posts ADD FULLTEXT INDEX ft (body)"));
+        assert_eq!(verdict, "INPLACE, rebuilds the table, writes wait");
+        assert_eq!(notes, [note]);
+        // Nor on a table kilit lost track of.
+        let predictions = predictions_with(
+            SHOP,
+            "ALTER TABLE orders CONVERT TO CHARACTER SET latin1;
+             ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note);",
+        );
+        let (_, verdict, notes) = measured(predictions[1].clone());
+        assert_eq!(verdict, "INPLACE, rebuilds the table, writes wait");
+        assert_eq!(notes, [note]);
+    }
+
+    #[test]
+    fn dropping_a_column_with_an_index_rebuilds_the_table() {
+        let setup = "ALTER TABLE orders ADD INDEX idx_amount (amount);";
+        let Prediction::Measured {
+            case,
+            verdict,
+            evidence,
+            notes,
+        } = on_shop(setup, "ALTER TABLE orders DROP COLUMN amount")
+        else {
+            panic!("expected a measured prediction");
+        };
+        assert_eq!(case, "drop-column");
+        assert_eq!(
+            verdict.to_string(),
+            "INPLACE, rebuilds the table, writes continue"
+        );
+        assert_eq!(evidence, DROP_COLUMN.exceptions[1].scenarios);
+        assert_eq!(notes, ["amount is in the index idx_amount"]);
+        // MySQL refuses to do it instantly.
+        let forced = said(&on_shop(
+            setup,
+            "ALTER TABLE orders DROP COLUMN amount, ALGORITHM=INSTANT",
+        ));
+        assert!(forced.starts_with("fails with error 1845"), "{forced}");
+    }
+
+    #[test]
+    fn every_index_shape_the_lab_measured_gets_its_answer() {
+        for (setup, column) in [
+            ("ALTER TABLE orders ADD INDEX i (amount, user_id)", "amount"),
+            ("ALTER TABLE orders ADD INDEX i (user_id, amount)", "amount"),
+            ("ALTER TABLE orders ADD UNIQUE INDEX i (amount)", "amount"),
+            ("ALTER TABLE orders ADD INDEX i (note(10))", "note"),
+            // The index goes with its only column.
+            ("ALTER TABLE orders ADD FULLTEXT INDEX i (note)", "note"),
+        ] {
+            let prediction = on_shop(
+                &format!("{setup};"),
+                &format!("ALTER TABLE orders DROP COLUMN {column}"),
+            );
+            assert_eq!(
+                said(&prediction),
+                "INPLACE, rebuilds the table, writes continue",
+                "{setup}"
+            );
+        }
+    }
+
+    #[test]
+    fn index_shapes_the_lab_has_not_measured_are_unknown() {
+        let places = "CREATE TABLE places (id INT PRIMARY KEY, spot POINT NOT NULL,
+                      SPATIAL INDEX places_spot (spot));";
+        for (setup, sql, expected) in [
+            (
+                "ALTER TABLE orders DROP PRIMARY KEY, ADD PRIMARY KEY (id, amount);",
+                "ALTER TABLE orders DROP COLUMN amount",
+                "amount is in the primary key with other columns, which must stay unique \
+                 without it; that depends on the rows, and dropping such a column has not \
+                 been measured yet",
+            ),
+            (
+                "",
+                "ALTER TABLE orders DROP COLUMN id",
+                "id is the primary key, and dropping such a column has not been measured yet",
+            ),
+            (
+                "ALTER TABLE orders ADD UNIQUE INDEX uq (user_id, amount);",
+                "ALTER TABLE orders DROP COLUMN amount",
+                "amount is in the unique index uq with other columns, which must stay unique \
+                 without it; that depends on the rows, and dropping such a column has not \
+                 been measured yet",
+            ),
+            (
+                places,
+                "ALTER TABLE places DROP COLUMN spot",
+                "spot is in the spatial index places_spot, and dropping such a column has not \
+                 been measured yet",
+            ),
+            (
+                "ALTER TABLE orders ADD INDEX mixed (amount, (note + 1));",
+                "ALTER TABLE orders DROP COLUMN amount",
+                "amount is in the index mixed, which also indexes an expression, and dropping \
+                 such a column has not been measured yet",
+            ),
+        ] {
+            assert_eq!(reason(on_shop(setup, sql)), expected, "{sql}");
+        }
+    }
+
+    #[test]
+    fn dropping_a_column_mysql_may_refuse_to_drop_is_unknown() {
+        let foreign_key = "ALTER TABLE orders ADD CONSTRAINT orders_user \
+                           FOREIGN KEY (user_id) REFERENCES users (id);";
+        assert_eq!(
+            reason(on_shop(
+                foreign_key,
+                "ALTER TABLE orders DROP COLUMN user_id"
+            )),
+            "user_id is in the foreign key orders_user, and dropping such a column has not \
+             been measured yet"
+        );
+        assert_eq!(
+            reason(on_shop(foreign_key, "ALTER TABLE users DROP COLUMN id")),
+            "id is referenced by the foreign key orders_user on orders, and dropping such a \
+             column has not been measured yet"
+        );
+        // A functional index uses the column, which is in no other index.
+        for index in ["(amount * 2)", "(`amount` * 2)"] {
+            assert_eq!(
+                reason(on_shop(
+                    &format!("ALTER TABLE orders ADD INDEX twice ({index});"),
+                    "ALTER TABLE orders DROP COLUMN amount"
+                )),
+                "amount is used by the functional index twice, and dropping such a column \
+                 has not been measured yet",
+                "{index}"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_columns_do_not_get_the_answer_measured_for_indexed_columns() {
+        let generated = "ALTER TABLE orders ADD COLUMN amount2 INT AS (amount * 2) VIRTUAL;";
+        // Not indexed: the answer kilit gave before, which this change
+        // leaves alone. MySQL refuses to drop a column a generated column
+        // uses (error 3108); the lab has not measured it yet.
+        assert_eq!(
+            said(&on_shop(generated, "ALTER TABLE orders DROP COLUMN amount")),
+            "INSTANT, no rebuild, writes continue"
+        );
+        assert_eq!(
+            reason(on_shop(
+                &format!("{generated} ALTER TABLE orders ADD INDEX i (amount);"),
+                "ALTER TABLE orders DROP COLUMN amount"
+            )),
+            "the generated column amount2 uses amount, and dropping such a column has not \
+             been measured yet"
+        );
+        assert_eq!(
+            reason(on_shop(
+                &format!("{generated} ALTER TABLE orders ADD INDEX i (amount2);"),
+                "ALTER TABLE orders DROP COLUMN amount2"
+            )),
+            "amount2 is a generated column, and dropping such a column has not been \
+             measured yet"
+        );
+    }
+
+    #[test]
+    fn a_fulltext_index_that_stays_decides_over_the_index() {
+        let fulltext = "ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note);";
+        // Both situations hold, and the lab measured them together.
+        let Prediction::Measured {
+            verdict,
+            evidence,
+            notes,
+            ..
+        } = on_shop(
+            &format!("{fulltext} ALTER TABLE orders ADD INDEX idx_amount (amount);"),
+            "ALTER TABLE orders DROP COLUMN amount",
+        )
+        else {
+            panic!("expected a measured prediction");
+        };
+        assert_eq!(verdict.to_string(), "COPY, copies every row, writes wait");
+        assert_eq!(evidence, DROP_COLUMN.exceptions[2].scenarios);
+        assert_eq!(
+            notes,
+            [
+                "orders has the FULLTEXT index ft_note",
+                "amount is in the index idx_amount"
+            ]
+        );
+        // The only column of the only FULLTEXT index: the index goes with
+        // it, the table keeps none, and MySQL rebuilds instead of copying.
+        assert_eq!(
+            said(&on_shop(fulltext, "ALTER TABLE orders DROP COLUMN note")),
+            "INPLACE, rebuilds the table, writes continue"
+        );
+        // Another FULLTEXT index stays, or this one keeps another column.
+        for setup in [
+            format!("{fulltext} ALTER TABLE orders ADD FULLTEXT INDEX ft_email (email);"),
+            "ALTER TABLE orders ADD FULLTEXT INDEX ft (note, email);".to_owned(),
+        ] {
+            assert_eq!(
+                said(&on_shop(&setup, "ALTER TABLE orders DROP COLUMN note")),
+                "COPY, copies every row, writes wait",
+                "{setup}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_column_in_no_index_keeps_its_answer() {
+        // Instant, even when other columns are indexed.
+        let Prediction::Measured {
+            verdict,
+            evidence,
+            notes,
+            ..
+        } = on_shop(
+            "ALTER TABLE orders ADD INDEX idx_amount (amount);",
+            "ALTER TABLE orders DROP COLUMN note",
+        )
+        else {
+            panic!("expected a measured prediction");
+        };
+        assert_eq!(verdict.to_string(), "INSTANT, no rebuild, writes continue");
+        assert_eq!(evidence, ["drop-column"]);
+        assert!(notes.is_empty(), "{notes:?}");
+        // A copy when the table has a FULLTEXT index.
+        let Prediction::Measured {
+            verdict,
+            evidence,
+            notes,
+            ..
+        } = on_shop(
+            "ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note);",
+            "ALTER TABLE orders DROP COLUMN amount",
+        )
+        else {
+            panic!("expected a measured prediction");
+        };
+        assert_eq!(verdict.to_string(), "COPY, copies every row, writes wait");
+        assert_eq!(evidence, ["drop-column-with-fulltext"]);
+        assert_eq!(notes, ["orders has the FULLTEXT index ft_note"]);
+    }
+
+    #[test]
+    fn without_the_table_dropping_a_column_lists_what_was_measured() {
+        let (case, verdict, notes) = measured(only("ALTER TABLE orders DROP COLUMN amount"));
+        assert_eq!(case, "drop-column");
+        assert_eq!(verdict, "INSTANT, no rebuild, writes continue");
+        assert_eq!(
+            notes,
+            [
+                "if the table keeps a FULLTEXT index: COPY, copies every row, writes wait \
+                 (drop-column-with-fulltext)",
+                "if the column is in a plain or FULLTEXT index, or has a UNIQUE index of its \
+                 own: INPLACE, rebuilds the table, writes continue (drop-column-indexed and 5 \
+                 more lab scenarios)",
+                "if the column is in an index and the table keeps a FULLTEXT index: COPY, \
+                 copies every row, writes wait (drop-column-indexed-with-fulltext and 6 more \
+                 lab scenarios)",
+            ]
+        );
+    }
+
+    #[test]
+    fn situations_measured_apart_are_not_combined_by_their_order() {
+        static FULLTEXT: Exception = Exception {
+            scenarios: &["a"],
+            when: "a",
+            conditions: &[Condition::FulltextIndex],
+        };
+        static INDEXED: Exception = Exception {
+            scenarios: &["b"],
+            when: "b",
+            conditions: &[Condition::IndexedColumn],
+        };
+        static BOTH: Exception = Exception {
+            scenarios: &["c"],
+            when: "c",
+            conditions: &[Condition::FulltextIndex, Condition::IndexedColumn],
+        };
+        let holding = |exceptions: &[&'static Exception]| {
+            exceptions
+                .iter()
+                .map(|exception| (*exception, vec![format!("{} holds", exception.when)]))
+                .collect::<Vec<_>>()
+        };
+        for exceptions in [[&FULLTEXT, &INDEXED], [&INDEXED, &FULLTEXT]] {
+            let reason = deciding(holding(&exceptions)).unwrap_err();
+            assert!(
+                reason.ends_with(
+                    ": two measured situations apply, and the lab has not measured them together"
+                ),
+                "{reason}"
+            );
+        }
+        for exceptions in [[&FULLTEXT, &INDEXED, &BOTH], [&BOTH, &INDEXED, &FULLTEXT]] {
+            let (decides, why) = deciding(holding(&exceptions)).unwrap();
+            assert_eq!(decides.scenarios, ["c"]);
+            assert_eq!(why, ["c holds"]);
+        }
+    }
+
+    #[test]
+    fn no_two_exceptions_of_a_case_hold_in_the_same_situation() {
+        // Otherwise the order of the list would pick between them.
+        for case in CASES {
+            let seen: Vec<&[Condition]> = case
+                .exceptions
+                .iter()
+                .map(|exception| exception.conditions)
+                .filter(|conditions| !conditions.contains(&Condition::Hidden))
+                .collect();
+            for (at, conditions) in seen.iter().enumerate() {
+                for other in &seen[at + 1..] {
+                    let same = conditions.len() == other.len()
+                        && conditions.iter().all(|condition| other.contains(condition));
+                    assert!(!same, "{}: {conditions:?} twice", case.id);
+                }
+            }
+        }
     }
 }

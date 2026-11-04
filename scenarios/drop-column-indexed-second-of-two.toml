@@ -1,0 +1,3 @@
+title = "Drop the second column of a two-column index"
+setup = ["ALTER TABLE orders ADD INDEX idx_orders_user_amount (user_id, amount)"]
+operation = "DROP COLUMN amount"

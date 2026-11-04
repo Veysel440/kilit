@@ -172,6 +172,62 @@ fn a_postgresql_style_migration_gets_no_measured_answer() {
 }
 
 #[test]
+fn indexes_on_the_table_change_the_answer() {
+    // $table->dropColumn('status'), whose index goes with it; then
+    // $table->fullText('note') and $table->fullText('legacy_code').
+    let schema = example("mysql-schema.sql");
+    let schema = schema.to_str().unwrap();
+    let sql = "alter table `orders` drop `status`;
+               alter table `orders` add fulltext `orders_note_fulltext`(`note`);
+               alter table `orders` add fulltext `orders_legacy_code_fulltext`(`legacy_code`);";
+    let output = kilit(&["check", "--schema", schema], sql);
+    let text = stdout(&output);
+    for answer in [
+        "  line 1: alter table `orders` drop `status`\n\
+         \x20   INPLACE, rebuilds the table, writes continue\n\
+         \x20   measured as drop-column (6 lab scenarios)\n\
+         \x20   - status is in the index orders_status_index\n",
+        "    INPLACE, rebuilds the table, writes wait\n\
+         \x20   measured as add-fulltext-index (1 lab scenario)\n\
+         \x20 line 3:",
+        "    INPLACE, no rebuild, writes wait\n\
+         \x20   measured as add-fulltext-index (1 lab scenario)\n\
+         \x20   - orders has the FULLTEXT index orders_note_fulltext\n",
+    ] {
+        assert!(text.contains(answer), "{text}");
+    }
+    assert!(
+        text.ends_with("\n3 statements: 2 make writes wait, 1 runs while writes continue\n"),
+        "{text}"
+    );
+    assert_eq!(output.status.code(), Some(1));
+
+    let output = kilit(&["check", "--schema", schema, "--format", "json"], sql);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let statements = json["sources"][0]["statements"].as_array().unwrap();
+    let answers: Vec<(&str, bool, &str)> = statements
+        .iter()
+        .map(|statement| {
+            (
+                statement["impact"].as_str().unwrap(),
+                statement["rebuilds_table"].as_bool().unwrap(),
+                statement["evidence"][0].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        answers,
+        [
+            ("writes_continue", true, "drop-column-indexed"),
+            ("writes_wait", true, "add-fulltext-index"),
+            ("writes_wait", false, "add-second-fulltext-index"),
+        ]
+    );
+    assert_eq!(statements[0]["evidence"].as_array().unwrap().len(), 6);
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
 fn a_table_created_here_is_never_in_the_metadata_lock_warning() {
     // The ALTER fails, but no transaction can be using order_notes yet, so it
     // waits for nothing before it fails.

@@ -1,0 +1,3 @@
+title = "Drop a column that has an index of its own"
+setup = ["ALTER TABLE orders ADD INDEX idx_orders_amount (amount)"]
+operation = "DROP COLUMN amount"

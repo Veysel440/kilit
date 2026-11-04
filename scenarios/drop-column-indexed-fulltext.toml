@@ -1,0 +1,3 @@
+title = "Drop the column of the only FULLTEXT index, which goes with it"
+setup = ["ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)"]
+operation = "DROP COLUMN note"

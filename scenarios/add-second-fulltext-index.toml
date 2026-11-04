@@ -1,0 +1,3 @@
+title = "Add a FULLTEXT index to a table that already has one"
+setup = ["ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)"]
+operation = "ADD FULLTEXT INDEX ft_orders_email (email)"

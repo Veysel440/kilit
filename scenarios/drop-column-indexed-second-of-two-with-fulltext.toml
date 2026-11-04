@@ -1,0 +1,6 @@
+title = "Drop the second column of a two-column index from a table with a FULLTEXT index"
+setup = [
+    "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)",
+    "ALTER TABLE orders ADD INDEX idx_orders_user_amount (user_id, amount)",
+]
+operation = "DROP COLUMN amount"

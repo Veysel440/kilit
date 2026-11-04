@@ -73,7 +73,7 @@ fn every_scenario_is_used() {
                     || case
                         .exceptions
                         .iter()
-                        .any(|exception| exception.scenario == id)
+                        .any(|exception| exception.scenarios.contains(&id))
             });
             assert!(
                 used,
@@ -88,27 +88,32 @@ fn every_scenario_is_used() {
 fn the_scenarios_of_a_case_agree() {
     for results in Knowledge::built_in().servers() {
         for case in CASES {
-            for variant in Variant::ALL {
-                let verdicts: Vec<_> = case
-                    .scenarios
-                    .iter()
-                    .map(|id| {
-                        let scenario = results.scenario(id).unwrap_or_else(|| {
-                            panic!(
-                                "{} uses {id}, which was not measured on {}",
-                                case.id,
-                                results.server.name()
-                            )
-                        });
-                        scenario.verdict_for(variant)
-                    })
-                    .collect();
-                assert!(
-                    verdicts.windows(2).all(|pair| pair[0] == pair[1]),
-                    "the scenarios of {} disagree on {} as {variant}: {verdicts:?}",
-                    case.id,
-                    results.server.name()
-                );
+            // The case's own scenarios, then each exception's.
+            let groups = std::iter::once(case.scenarios)
+                .chain(case.exceptions.iter().map(|exception| exception.scenarios));
+            for scenarios in groups {
+                for variant in Variant::ALL {
+                    let verdicts: Vec<_> = scenarios
+                        .iter()
+                        .map(|id| {
+                            let scenario = results.scenario(id).unwrap_or_else(|| {
+                                panic!(
+                                    "{} uses {id}, which was not measured on {}",
+                                    case.id,
+                                    results.server.name()
+                                )
+                            });
+                            scenario.verdict_for(variant)
+                        })
+                        .collect();
+                    assert!(
+                        verdicts.windows(2).all(|pair| pair[0] == pair[1]),
+                        "the scenarios {scenarios:?} of {} disagree on {} as {variant}: \
+                         {verdicts:?}",
+                        case.id,
+                        results.server.name()
+                    );
+                }
             }
         }
     }
@@ -150,29 +155,33 @@ fn what_kilit_sees_in_the_tables_decides_the_answer() {
         let server = results.server.name();
         for case in CASES {
             for exception in case.exceptions {
-                if exception.condition == Condition::Hidden {
+                if exception.conditions.contains(&Condition::Hidden) {
                     continue;
                 }
-                let scenario = results.scenario(exception.scenario).unwrap();
-                let schema = lab_schema(scenario);
-                for variant in Variant::ALL {
-                    match predict(scenario, variant, &server, &schema) {
-                        Prediction::Measured {
-                            case: found,
-                            verdict,
-                            evidence,
-                            ..
-                        } => {
-                            let id = exception.scenario;
-                            assert_eq!(found, case.id, "{id} as {variant} on {server}");
-                            assert_eq!(evidence, [id], "{id} as {variant} on {server}");
-                            assert_eq!(
-                                Some(verdict),
-                                scenario.verdict_for(variant),
-                                "{id} as {variant} on {server}"
-                            );
+                for id in exception.scenarios {
+                    let scenario = results.scenario(id).unwrap();
+                    let schema = lab_schema(scenario);
+                    for variant in Variant::ALL {
+                        match predict(scenario, variant, &server, &schema) {
+                            Prediction::Measured {
+                                case: found,
+                                verdict,
+                                evidence,
+                                ..
+                            } => {
+                                assert_eq!(found, case.id, "{id} as {variant} on {server}");
+                                assert_eq!(
+                                    evidence, exception.scenarios,
+                                    "{id} as {variant} on {server}"
+                                );
+                                assert_eq!(
+                                    Some(verdict),
+                                    scenario.verdict_for(variant),
+                                    "{id} as {variant} on {server}"
+                                );
+                            }
+                            other => panic!("{id} as {variant} on {server}: {other:?}"),
                         }
-                        other => panic!("{} on {server}: {other:?}", exception.scenario),
                     }
                 }
             }
@@ -186,27 +195,32 @@ fn what_kilit_cannot_see_shows_up_as_a_note() {
         let server = results.server.name();
         for case in CASES {
             for exception in case.exceptions {
-                let scenario = results.scenario(exception.scenario).unwrap();
-                let schema = match exception.condition {
+                // A note names the exception's first scenario.
+                let first = exception.scenarios[0];
+                for id in exception.scenarios {
+                    let scenario = results.scenario(id).unwrap();
                     // No schema shows the rows: a note even with the tables.
-                    Condition::Hidden => lab_schema(scenario),
-                    // A note when kilit does not know the table.
-                    Condition::FulltextIndex => Schema::new(),
-                    // Always decided from the table, which a MODIFY needs anyway.
-                    Condition::IndexedColumn | Condition::ForeignKeyColumn => continue,
-                };
-                match predict(scenario, Variant::SERVER_DEFAULT, &server, &schema) {
-                    Prediction::Measured {
-                        case: found, notes, ..
-                    } => {
-                        assert_eq!(found, case.id, "{}", exception.scenario);
-                        assert!(
-                            notes.iter().any(|note| note.contains(exception.scenario)),
-                            "{} is missing from the notes: {notes:?}",
-                            exception.scenario
-                        );
+                    // Otherwise a note when kilit does not know the table.
+                    let schema = if exception.conditions.contains(&Condition::Hidden) {
+                        lab_schema(scenario)
+                    } else {
+                        Schema::new()
+                    };
+                    match predict(scenario, Variant::SERVER_DEFAULT, &server, &schema) {
+                        Prediction::Measured {
+                            case: found, notes, ..
+                        } => {
+                            assert_eq!(found, case.id, "{id}");
+                            assert!(
+                                notes.iter().any(|note| note.contains(first)),
+                                "{first} is missing from the notes of {id}: {notes:?}"
+                            );
+                        }
+                        // Without the table a MODIFY has no answer at all.
+                        Prediction::Unknown { reason }
+                            if reason.starts_with("MODIFY and CHANGE depend on") => {}
+                        other => panic!("{id} on {server}: {other:?}"),
                     }
-                    other => panic!("{} on {server}: {other:?}", exception.scenario),
                 }
             }
         }
@@ -310,6 +324,52 @@ fn a_fulltext_index_turns_a_new_column_into_a_copy() {
             "INPLACE, rebuilds the table, writes wait",
             "COPY, copies every row, writes wait"
         ]
+    );
+}
+
+#[test]
+fn a_second_fulltext_index_does_not_rebuild_the_table() {
+    // $table->fullText('note'); then $table->fullText('legacy_code');
+    assert_eq!(
+        on_mysql_84(
+            LARAVEL_TABLES,
+            "alter table `orders` add fulltext `orders_note_fulltext`(`note`);
+             alter table `orders` add fulltext `orders_legacy_code_fulltext`(`legacy_code`);"
+        ),
+        [
+            "INPLACE, rebuilds the table, writes wait",
+            "INPLACE, no rebuild, writes wait"
+        ]
+    );
+}
+
+#[test]
+fn dropping_an_indexed_column_rebuilds_the_table() {
+    // $table->dropColumn('status'); orders_status_index goes with it. With
+    // a FULLTEXT index that stays on the table, MySQL copies it instead.
+    assert_eq!(
+        on_mysql_84(
+            LARAVEL_TABLES,
+            "alter table `orders` drop `status`;
+             alter table `orders` add fulltext `orders_note_fulltext`(`note`);
+             alter table `orders` add index `orders_amount_index`(`amount`);
+             alter table `orders` drop `amount`;"
+        ),
+        [
+            "INPLACE, rebuilds the table, writes continue",
+            "INPLACE, rebuilds the table, writes wait",
+            "INPLACE, no rebuild, writes continue",
+            "COPY, copies every row, writes wait"
+        ]
+    );
+}
+
+#[test]
+fn dropping_a_foreign_key_column_is_not_answered_yet() {
+    // $table->dropColumn('user_id'); without dropForeign first
+    assert_eq!(
+        on_mysql_84(LARAVEL_TABLES, "alter table `orders` drop `user_id`"),
+        ["unknown"]
     );
 }
 

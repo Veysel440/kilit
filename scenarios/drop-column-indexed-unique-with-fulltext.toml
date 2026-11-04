@@ -1,0 +1,6 @@
+title = "Drop a column that has a UNIQUE index of its own from a table with a FULLTEXT index"
+setup = [
+    "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)",
+    "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_amount (amount)",
+]
+operation = "DROP COLUMN amount"

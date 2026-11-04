@@ -145,12 +145,16 @@ Both versions behave the same in every scenario.
 | ↳ after 64 instant column changes | INPLACE, rebuilds the table | continue |
 | Drop a column<br>`$table->dropColumn('note')` | INSTANT | continue |
 | ↳ when the table has a FULLTEXT index | COPY, copies every row | **wait** |
+| ↳ when the column is in an index, alone or with others, or has a UNIQUE index of its own, and the table has no FULLTEXT index<br>`$table->index('amount')` | INPLACE, rebuilds the table | continue |
+| ↳ when the column is the only column of the only FULLTEXT index, which goes with it | INPLACE, rebuilds the table | continue |
+| ↳ when the column is in a foreign key, the primary key, a functional index or a UNIQUE index with other columns | not answered yet | – |
 | Rename a column<br>`$table->renameColumn('note', 'memo')` | INSTANT | continue |
 | Set a column default<br>`ALTER COLUMN … SET DEFAULT` (raw SQL) | INSTANT | continue |
 | Add an index<br>`$table->index('amount')` | INPLACE | continue |
 | Add a unique index<br>`$table->unique('email')` | INPLACE | continue |
 | ↳ when values repeat | fails, error 1062 | – |
 | Add a FULLTEXT index<br>`$table->fullText('note')` | INPLACE, rebuilds the table | **wait** |
+| ↳ when the table already has one | INPLACE | **wait** |
 | Drop an index<br>`$table->dropIndex('orders_amount_index')` | INPLACE | continue |
 | Add a foreign key<br>`$table->foreign('user_id')->references('id')->on('users')` | COPY, copies every row | **wait** |
 | ↳ when a row points to a missing parent | fails, error 1452 | – |
