@@ -1,8 +1,10 @@
 //! Turns SQL text into kilit's statements, with sqlparser's MySQL dialect.
 //!
 //! This is the only module that sees sqlparser's types. Anything sqlparser
-//! reads but kilit does not model becomes `Other`; anything it cannot read
-//! becomes `Unparsed`. Nothing is dropped silently.
+//! reads but kilit does not model becomes `Other`. Anything it cannot read,
+//! anything MySQL 8.0.46 and 8.4.13 do not accept although sqlparser does,
+//! and `TRUNCATE` and `LOCK TABLES`, which kilit has not measured, become
+//! `Unparsed`, with the reason. Nothing is dropped silently.
 
 use sqlparser::ast::{
     self, AlterColumnOperation, AlterTableAlgorithm, AlterTableLock, AlterTableOperation,
@@ -42,15 +44,23 @@ fn read(sql: &str) -> StatementKind {
         Ok(statements) => match <[ast::Statement; 1]>::try_from(statements) {
             Ok([statement]) => convert(statement),
             Err(statements) => StatementKind::Unparsed {
-                error: format!("expected one statement, found {}", statements.len()),
+                error: unreadable(format!(
+                    "expected one statement, found {}",
+                    statements.len()
+                )),
                 table: table_named_in(sql),
             },
         },
         Err(err) => StatementKind::Unparsed {
-            error: parser_message(err),
+            error: unreadable(parser_message(err)),
             table: table_named_in(sql),
         },
     }
+}
+
+/// The reason kilit gives no answer for a statement it could not read.
+fn unreadable(detail: impl std::fmt::Display) -> String {
+    format!("kilit could not read this statement: {detail}")
 }
 
 /// The table a statement names after the word `TABLE`, such as `orders` in
@@ -80,6 +90,14 @@ fn parser_message(err: ParserError) -> String {
 }
 
 fn convert(statement: ast::Statement) -> StatementKind {
+    // The statement fails on the measured servers or has not been measured:
+    // it changes no table definition there, so there is no table to name.
+    if let Some(reason) = no_answer(&statement) {
+        return StatementKind::Unparsed {
+            error: reason,
+            table: None,
+        };
+    }
     match statement {
         ast::Statement::AlterTable(alter) => {
             let mut result = Alter {
@@ -150,14 +168,153 @@ fn convert(statement: ast::Statement) -> StatementKind {
     }
 }
 
+/// How kilit's reasons name what MySQL 8.0.46 and 8.4.13 reject. Each word
+/// was run by hand on both servers and failed with error 1064; the lab has
+/// no fact for it yet, so kilit says no more than that.
+const REJECTED_BY: &str = "MySQL 8.0.46 and 8.4.13 do not accept";
+
+/// Why kilit gives no answer for `statement`, which sqlparser reads: MySQL
+/// 8.0.46 and 8.4.13 do not accept it, or kilit has not measured it.
+fn no_answer(statement: &ast::Statement) -> Option<String> {
+    match statement {
+        ast::Statement::Truncate(_) => {
+            return Some(
+                "truncating a table has not been measured yet; TRUNCATE removes every row"
+                    .to_owned(),
+            );
+        }
+        ast::Statement::LockTables { .. } => {
+            return Some(
+                "LOCK TABLES has not been measured yet; other connections cannot write \
+                 to the tables until UNLOCK TABLES"
+                    .to_owned(),
+            );
+        }
+        _ => {}
+    }
+    let rejected = rejected_words(statement);
+    if !rejected.is_empty() {
+        return Some(format!("{REJECTED_BY} {}", rejected.join(" or ")));
+    }
+    if table_names(statement).into_iter().any(double_quoted) {
+        return Some(
+            "a double-quoted table name works only when sql_mode has ANSI_QUOTES, \
+             and kilit does not know the server's sql_mode"
+                .to_owned(),
+        );
+    }
+    None
+}
+
+/// The words in `statement` that MySQL 8.0.46 and 8.4.13 do not accept, as
+/// kilit names them.
+fn rejected_words(statement: &ast::Statement) -> Vec<&'static str> {
+    let mut words = Vec::new();
+    match statement {
+        ast::Statement::AlterTable(alter) => {
+            if alter.if_exists {
+                words.push("ALTER TABLE IF EXISTS");
+            }
+            if alter.only {
+                words.push("ALTER TABLE ONLY");
+            }
+            for operation in &alter.operations {
+                match operation {
+                    AlterTableOperation::DropColumn {
+                        if_exists: true, ..
+                    } => words.push("DROP COLUMN IF EXISTS"),
+                    AlterTableOperation::AddConstraint {
+                        not_valid: true, ..
+                    } => words.push("NOT VALID"),
+                    _ => {}
+                }
+            }
+        }
+        ast::Statement::CreateIndex(index) => {
+            if index.concurrently {
+                words.push("CREATE INDEX CONCURRENTLY");
+            }
+            if index.if_not_exists {
+                words.push("CREATE INDEX IF NOT EXISTS");
+            }
+            if !index.include.is_empty() {
+                words.push("INCLUDE in CREATE INDEX");
+            }
+            match index.nulls_distinct {
+                Some(true) => words.push("NULLS DISTINCT in CREATE INDEX"),
+                Some(false) => words.push("NULLS NOT DISTINCT in CREATE INDEX"),
+                None => {}
+            }
+            if index.predicate.is_some() {
+                words.push("WHERE in CREATE INDEX");
+            }
+            if index
+                .columns
+                .iter()
+                .any(|column| column.column.options.nulls_first.is_some())
+            {
+                words.push("NULLS FIRST or NULLS LAST in an index");
+            }
+        }
+        ast::Statement::Drop {
+            object_type: ObjectType::Index,
+            if_exists,
+            table,
+            ..
+        } => {
+            if table.is_none() {
+                words.push("DROP INDEX without ON and a table name");
+            } else if *if_exists {
+                words.push("DROP INDEX IF EXISTS");
+            }
+        }
+        // LOCK TABLES with READ or WRITE is MySQL's: sqlparser reads it as
+        // `LockTables`. Anything else that starts with LOCK lands here.
+        ast::Statement::Lock(_) => words.push("LOCK TABLE without READ or WRITE"),
+        _ => {}
+    }
+    words
+}
+
+/// The tables `statement` names, where MySQL expects a table name.
+fn table_names(statement: &ast::Statement) -> Vec<&ObjectName> {
+    match statement {
+        ast::Statement::AlterTable(alter) => vec![&alter.name],
+        ast::Statement::CreateIndex(index) => vec![&index.table_name],
+        ast::Statement::CreateTable(create) => vec![&create.name],
+        ast::Statement::Drop {
+            table: Some(table), ..
+        } => vec![table],
+        ast::Statement::Drop {
+            object_type: ObjectType::Table,
+            names,
+            ..
+        } => names.iter().collect(),
+        ast::Statement::RenameTable(renames) => renames
+            .iter()
+            .flat_map(|rename| [&rename.old_name, &rename.new_name])
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether `name` is written in double quotes, which MySQL reads as a
+/// string unless sql_mode has ANSI_QUOTES.
+fn double_quoted(name: &ObjectName) -> bool {
+    name.0.iter().any(
+        |part| matches!(part, ObjectNamePart::Identifier(ident) if ident.quote_style == Some('"')),
+    )
+}
+
 /// `CREATE TABLE` with its columns, keys and default character set.
 fn create_table(create: ast::CreateTable) -> StatementKind {
     let name = object_name(&create.name);
     if create.like.is_some() || create.query.is_some() || create.clone.is_some() {
         return StatementKind::Unparsed {
-            error: "the table takes its columns from elsewhere (LIKE or AS SELECT), \
-                    which kilit does not follow yet"
-                .to_owned(),
+            error: unreadable(
+                "the table takes its columns from elsewhere (LIKE or AS SELECT), \
+                 which kilit does not follow yet",
+            ),
             table: Some(name),
         };
     }
@@ -986,10 +1143,198 @@ mod tests {
         assert_eq!(
             kind(&nested),
             StatementKind::Unparsed {
-                error: "the statement is nested too deeply".into(),
+                error: "kilit could not read this statement: the statement is nested too deeply"
+                    .into(),
                 table: Some("t".into()),
             }
         );
+    }
+
+    /// Why kilit gives no answer for the only statement of `sql`, which
+    /// changes no table definition on the measured servers.
+    fn no_answer_for(sql: &str) -> String {
+        match kind(sql) {
+            StatementKind::Unparsed { error, table: None } => error,
+            other => panic!("{sql}: expected no answer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn words_mysql_does_not_accept_get_no_answer() {
+        // Each failed with error 1064 on MySQL 8.0.46 and 8.4.13, run by hand.
+        for (sql, words) in [
+            (
+                "ALTER TABLE IF EXISTS orders ADD COLUMN coupon INT",
+                "ALTER TABLE IF EXISTS",
+            ),
+            (
+                "ALTER TABLE ONLY orders ADD COLUMN coupon INT NULL",
+                "ALTER TABLE ONLY",
+            ),
+            (
+                "ALTER TABLE orders DROP COLUMN IF EXISTS note",
+                "DROP COLUMN IF EXISTS",
+            ),
+            (
+                "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) \
+                 REFERENCES users (id) NOT VALID",
+                "NOT VALID",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS i ON orders (amount)",
+                "CREATE INDEX IF NOT EXISTS",
+            ),
+            (
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS i ON orders (amount)",
+                "CREATE INDEX CONCURRENTLY or CREATE INDEX IF NOT EXISTS",
+            ),
+            (
+                "CREATE INDEX i ON orders (amount) WHERE amount > 0",
+                "WHERE in CREATE INDEX",
+            ),
+            (
+                "CREATE INDEX i ON orders (amount) INCLUDE (user_id)",
+                "INCLUDE in CREATE INDEX",
+            ),
+            (
+                "CREATE UNIQUE INDEX i ON orders (amount) NULLS NOT DISTINCT",
+                "NULLS NOT DISTINCT in CREATE INDEX",
+            ),
+            (
+                "CREATE UNIQUE INDEX i ON orders (amount) NULLS DISTINCT",
+                "NULLS DISTINCT in CREATE INDEX",
+            ),
+            (
+                "CREATE INDEX i ON orders (amount DESC NULLS LAST)",
+                "NULLS FIRST or NULLS LAST in an index",
+            ),
+            (
+                "CREATE INDEX i ON orders (amount NULLS FIRST)",
+                "NULLS FIRST or NULLS LAST in an index",
+            ),
+            (
+                "DROP INDEX IF EXISTS orders_status_index ON orders",
+                "DROP INDEX IF EXISTS",
+            ),
+            (
+                "DROP INDEX orders_status_index",
+                "DROP INDEX without ON and a table name",
+            ),
+            (
+                "LOCK TABLE orders IN ACCESS EXCLUSIVE MODE",
+                "LOCK TABLE without READ or WRITE",
+            ),
+        ] {
+            assert_eq!(
+                no_answer_for(sql),
+                format!("MySQL 8.0.46 and 8.4.13 do not accept {words}"),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_double_quoted_table_name_gets_no_answer() {
+        for sql in [
+            r#"ALTER TABLE "orders" ADD COLUMN coupon INT"#,
+            r#"CREATE INDEX i ON "orders" (amount)"#,
+            r#"DROP INDEX orders_status_index ON "orders""#,
+            r#"CREATE TABLE "drafts" (id INT PRIMARY KEY)"#,
+            r#"DROP TABLE "shops""#,
+            r#"RENAME TABLE "shops" TO stores"#,
+            r#"RENAME TABLE shops TO "stores""#,
+        ] {
+            assert_eq!(
+                no_answer_for(sql),
+                "a double-quoted table name works only when sql_mode has ANSI_QUOTES, \
+                 and kilit does not know the server's sql_mode",
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn truncate_and_lock_tables_get_no_answer() {
+        for sql in ["TRUNCATE TABLE orders", "TRUNCATE orders"] {
+            assert_eq!(
+                no_answer_for(sql),
+                "truncating a table has not been measured yet; TRUNCATE removes every row",
+                "{sql}"
+            );
+        }
+        assert_eq!(
+            no_answer_for("LOCK TABLES orders WRITE, users READ"),
+            "LOCK TABLES has not been measured yet; other connections cannot write \
+             to the tables until UNLOCK TABLES"
+        );
+    }
+
+    #[test]
+    fn the_same_statements_in_mysql_s_words_keep_their_kind() {
+        // Next to each word above, what MySQL accepts.
+        for sql in [
+            "ALTER TABLE orders ADD COLUMN coupon INT NULL",
+            "ALTER TABLE orders DROP COLUMN note",
+            "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users (id)",
+            "CREATE INDEX i ON orders (amount)",
+            "CREATE UNIQUE INDEX i ON orders (amount)",
+            "CREATE INDEX i USING BTREE ON orders (amount)",
+            "CREATE INDEX i ON orders (amount) USING BTREE",
+            "CREATE INDEX i ON orders (amount DESC)",
+            "CREATE INDEX i ON orders (amount) ALGORITHM=INPLACE LOCK=NONE",
+            "DROP INDEX orders_status_index ON orders",
+            "ALTER TABLE orders DROP INDEX orders_status_index",
+            "ALTER TABLE orders ADD COLUMN coupon INT NULL, ALGORITHM=INSTANT",
+            "ALTER TABLE `orders` ADD COLUMN `coupon` INT NULL",
+            "alter table `orders` drop index `orders_status_index`",
+            "alter table `orders` add constraint `orders_user_id_foreign` \
+             foreign key (`user_id`) references `users` (`id`)",
+        ] {
+            assert!(matches!(kind(sql), StatementKind::Alter(_)), "{sql}");
+        }
+        assert_eq!(
+            alter("CREATE INDEX i ON orders (amount) ALGORITHM=INPLACE LOCK=NONE"),
+            Alter {
+                table: "orders".into(),
+                operations: vec![Operation::AddIndex(Index {
+                    name: Some("i".into()),
+                    kind: IndexKind::Plain,
+                    columns: vec!["amount".into()],
+                })],
+                algorithm: Some(Algorithm::Inplace),
+                lock: Some(Lock::None),
+            }
+        );
+        assert_eq!(
+            kind("DROP TABLE IF EXISTS shops"),
+            StatementKind::DropTable {
+                tables: vec!["shops".into()]
+            }
+        );
+        assert!(matches!(
+            kind("CREATE TABLE IF NOT EXISTS drafts (id INT PRIMARY KEY)"),
+            StatementKind::CreateTable {
+                if_not_exists: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            kind("RENAME TABLE shops TO stores"),
+            StatementKind::RenameTable { .. }
+        ));
+        for sql in [
+            "INSERT INTO shops (name) VALUES ('a')",
+            "UPDATE orders SET amount = 1",
+            "DELETE FROM orders",
+            "SELECT * FROM orders",
+            "UNLOCK TABLES",
+        ] {
+            assert_eq!(kind(sql), StatementKind::Other, "{sql}");
+        }
+        assert!(matches!(
+            kind("SET foreign_key_checks = 0"),
+            StatementKind::Set { .. }
+        ));
     }
 
     #[test]

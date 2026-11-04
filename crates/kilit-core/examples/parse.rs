@@ -78,8 +78,8 @@ fn main() -> ExitCode {
             }
             StatementKind::Other => println!("  not analyzed"),
             StatementKind::Unparsed { error, table } => match table {
-                Some(table) => println!("  NOT READ, on {table}: {error}"),
-                None => println!("  NOT READ: {error}"),
+                Some(table) => println!("  NO ANSWER, on {table}: {error}"),
+                None => println!("  NO ANSWER: {error}"),
             },
         }
         println!();

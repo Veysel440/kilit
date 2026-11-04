@@ -248,6 +248,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn what_mysql_does_not_accept_is_unknown_on_old_and_new_tables() {
+        // Each fails with error 1064 on MySQL 8.0.46 and 8.4.13.
+        for statement in [
+            "ALTER TABLE {} DROP COLUMN IF EXISTS note",
+            "ALTER TABLE IF EXISTS {} ADD COLUMN coupon INT",
+            "ALTER TABLE ONLY {} ADD COLUMN coupon INT NULL",
+            "CREATE INDEX IF NOT EXISTS i ON {} (amount)",
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS i ON {} (amount)",
+            "CREATE INDEX i ON {} (amount) WHERE amount > 0",
+            "DROP INDEX IF EXISTS i ON {}",
+            "ALTER TABLE {} ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users (id) NOT VALID",
+            r#"ALTER TABLE "{}" ADD COLUMN coupon INT"#,
+        ] {
+            let on_orders = statement.replace("{}", "orders");
+            assert_eq!(impacts_of(&on_orders), [Impact::Unknown], "{on_orders}");
+            let on_new_table = format!(
+                "CREATE TABLE drafts (id INT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, \
+                 amount INT NOT NULL, note VARCHAR(50) NULL, INDEX i (amount));
+                 {}",
+                statement.replace("{}", "drafts")
+            );
+            assert_eq!(
+                impacts_of(&on_new_table),
+                [Impact::NotChecked, Impact::Unknown],
+                "{on_new_table}"
+            );
+        }
+    }
+
     fn on_new_tables_of(sql: &str) -> Vec<bool> {
         on_new_tables(&parse(sql))
     }

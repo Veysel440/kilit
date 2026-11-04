@@ -359,9 +359,7 @@ pub fn check(statements: &[Statement], schema: &Schema, results: &ServerResults)
                 unknown("renaming tables has not been measured yet")
             }
             StatementKind::Other => not_checked("not a schema change"),
-            StatementKind::Unparsed { error, .. } => {
-                unknown(format!("kilit could not read this statement: {error}"))
-            }
+            StatementKind::Unparsed { error, .. } => unknown(error.as_str()),
         };
         // The next statement sees the tables as this one leaves them.
         schema.apply(statement);
@@ -1255,6 +1253,104 @@ mod tests {
     fn unreadable_statements_are_unknown() {
         let reason = reason(only("ALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4"));
         assert!(reason.starts_with("kilit could not read this statement"));
+    }
+
+    #[test]
+    fn statements_mysql_does_not_accept_are_unknown_with_the_words() {
+        // Measured cases until now: each would have had a lab answer.
+        for (sql, words) in [
+            (
+                "ALTER TABLE orders DROP COLUMN IF EXISTS note",
+                "DROP COLUMN IF EXISTS",
+            ),
+            (
+                "ALTER TABLE IF EXISTS orders ADD COLUMN coupon INT",
+                "ALTER TABLE IF EXISTS",
+            ),
+            (
+                "ALTER TABLE ONLY orders ADD COLUMN coupon INT NULL",
+                "ALTER TABLE ONLY",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS i ON orders (amount)",
+                "CREATE INDEX IF NOT EXISTS",
+            ),
+            (
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS i ON orders (amount)",
+                "CREATE INDEX CONCURRENTLY or CREATE INDEX IF NOT EXISTS",
+            ),
+            (
+                "CREATE INDEX i ON orders (amount) WHERE amount > 0",
+                "WHERE in CREATE INDEX",
+            ),
+            (
+                "DROP INDEX IF EXISTS orders_status_index ON orders",
+                "DROP INDEX IF EXISTS",
+            ),
+            (
+                "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) \
+                 REFERENCES users (id) NOT VALID",
+                "NOT VALID",
+            ),
+        ] {
+            assert_eq!(
+                reason(on_laravel_tables(sql)),
+                format!("MySQL 8.0.46 and 8.4.13 do not accept {words}"),
+                "{sql}"
+            );
+        }
+        assert_eq!(
+            reason(on_laravel_tables(
+                r#"ALTER TABLE "orders" ADD COLUMN coupon INT"#
+            )),
+            "a double-quoted table name works only when sql_mode has ANSI_QUOTES, \
+             and kilit does not know the server's sql_mode"
+        );
+    }
+
+    #[test]
+    fn truncate_lock_tables_and_drop_index_without_on_are_unknown() {
+        for sql in [
+            "TRUNCATE TABLE orders",
+            "LOCK TABLES orders WRITE",
+            "DROP INDEX orders_status_index",
+        ] {
+            assert!(
+                matches!(on_laravel_tables(sql), Prediction::Unknown { .. }),
+                "{sql}"
+            );
+        }
+        for sql in [
+            "INSERT INTO shops (name) VALUES ('a')",
+            "UPDATE orders SET amount = 1",
+            "DELETE FROM orders",
+            "SELECT * FROM orders",
+            "SET foreign_key_checks = 0",
+            "UNLOCK TABLES",
+        ] {
+            assert!(
+                matches!(on_laravel_tables(sql), Prediction::NotChecked { .. }),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_statement_mysql_rejects_leaves_the_tables_as_they_were() {
+        // 8.0.46 and 8.4.13 fail the first statement, so note is still there
+        // and orders is still known.
+        let predictions = predictions_with(
+            LARAVEL_TABLES,
+            "ALTER TABLE orders DROP COLUMN IF EXISTS note;
+             ALTER TABLE orders MODIFY note VARCHAR(100) NULL;
+             ALTER TABLE orders MODIFY amount BIGINT NOT NULL;",
+        );
+        assert!(matches!(predictions[0], Prediction::Unknown { .. }));
+        assert_eq!(
+            measured(predictions[1].clone()).0,
+            "lengthen-varchar-past-255-bytes"
+        );
+        assert_eq!(measured(predictions[2].clone()).0, "change-integer-type");
     }
 
     #[test]

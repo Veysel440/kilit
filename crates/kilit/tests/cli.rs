@@ -144,6 +144,34 @@ fn what_kilit_cannot_tell_on_a_new_table_is_unknown() {
 }
 
 #[test]
+fn a_postgresql_style_migration_gets_no_measured_answer() {
+    // Written in PostgreSQL's words and fed to kilit as a MySQL migration:
+    // MySQL 8.0.46 and 8.4.13 reject both statements with error 1064.
+    let schema = example("mysql-schema.sql");
+    let sql = "alter table orders add constraint orders_user_id_fk \
+               foreign key (user_id) references users (id) not valid;
+               create index concurrently if not exists orders_amount_index on orders (amount);";
+    let output = kilit(&["check", "--schema", schema.to_str().unwrap()], sql);
+    let text = stdout(&output);
+    for reason in [
+        "    UNKNOWN: MySQL 8.0.46 and 8.4.13 do not accept NOT VALID\n",
+        "    UNKNOWN: MySQL 8.0.46 and 8.4.13 do not accept CREATE INDEX CONCURRENTLY \
+         or CREATE INDEX IF NOT EXISTS\n",
+    ] {
+        assert!(text.contains(reason), "{text}");
+    }
+    assert!(text.ends_with("\n2 statements: 2 unknown\n"), "{text}");
+    // MySQL rejects them before it locks anything.
+    assert!(!text.contains("metadata lock on"), "{text}");
+    assert_eq!(output.status.code(), Some(0), "{text}");
+    let strict = kilit(
+        &["check", "--strict", "--schema", schema.to_str().unwrap()],
+        sql,
+    );
+    assert_eq!(strict.status.code(), Some(1));
+}
+
+#[test]
 fn a_table_created_here_is_never_in_the_metadata_lock_warning() {
     // The ALTER fails, but no transaction can be using order_notes yet, so it
     // waits for nothing before it fails.

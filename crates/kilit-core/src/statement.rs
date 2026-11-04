@@ -39,11 +39,16 @@ pub enum StatementKind {
     /// A statement kilit reads but does not analyze, such as `INSERT`, or a
     /// `SET` that does not touch the session (`SET GLOBAL`, `SET @x`).
     Other,
-    /// A statement kilit could not read. It must never be treated as safe.
+    /// A statement kilit gives no answer for: it could not read it, MySQL
+    /// 8.0.46 and 8.4.13 do not accept it, or kilit has not measured it
+    /// (`TRUNCATE`, `LOCK TABLES`). It must never be treated as safe.
     Unparsed {
+        /// Why, as kilit says it.
         error: String,
-        /// The table named after the word `TABLE`, if any: the statement
-        /// may have changed it, so kilit stops trusting what it knew about it.
+        /// For a statement kilit could not read, the table named after the
+        /// word `TABLE`, if any: the statement may have changed it, so kilit
+        /// stops trusting what it knew about it. `None` for a statement that
+        /// changes no table's definition on the measured servers.
         table: Option<String>,
     },
 }
