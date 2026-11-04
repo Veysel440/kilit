@@ -101,8 +101,8 @@ async fn run_target(url: &str, scenarios: &[Scenario], root: &Path, details: boo
     // After connecting to 127.0.0.1, mysql_async would by default reconnect
     // through the server's unix socket path, looked up on *this* machine.
     // A local MySQL listening there would silently take the container's place.
-    let opts = OptsBuilder::from_opts(opts).prefer_socket(false);
-    let mut conn = Conn::new(opts).await.map_err(|err| {
+    let opts: Opts = OptsBuilder::from_opts(opts).prefer_socket(false).into();
+    let mut conn = Conn::new(opts.clone()).await.map_err(|err| {
         // A network error usually means the servers are not running.
         let hint = if matches!(err, mysql_async::Error::Io(_)) {
             "\n       is the lab running? try `docker compose up -d --wait`"
@@ -123,6 +123,9 @@ async fn run_target(url: &str, scenarios: &[Scenario], root: &Path, details: boo
     facts::check_charsets(&mut conn)
         .await
         .map_err(|err| format!("{address}: {err}"))?;
+    facts::check_metadata_lock(&mut conn, &opts)
+        .await
+        .map_err(|err| format!("{address}: metadata lock: {err}"))?;
 
     let mut measurements = Vec::with_capacity(scenarios.len());
     for scenario in scenarios {
@@ -132,6 +135,8 @@ async fn run_target(url: &str, scenarios: &[Scenario], root: &Path, details: boo
     conn.disconnect().await?;
 
     report::print_summary(&server, &address, &measurements);
+    println!();
+    println!("  kilit-core's facts hold: character sets; ALTERs wait for open transactions");
     if details {
         report::print_details(&measurements);
     }

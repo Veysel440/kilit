@@ -1,0 +1,19 @@
+[package]
+name = "kilit"
+description = "Says what MySQL will do with a schema migration, from measurements on real servers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+clap.workspace = true
+kilit-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

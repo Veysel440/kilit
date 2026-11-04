@@ -1,0 +1,244 @@
+//! The kilit command as a user runs it: arguments, standard input, output
+//! and exit status.
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+
+/// kilit-core's examples: a Laravel app's tables, and what
+/// `php artisan migrate --pretend` printed for six migrations on them.
+fn example(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../kilit-core/examples")
+        .join(name)
+}
+
+/// Runs kilit with `args`, feeding `stdin` to it.
+fn kilit(args: &[&str], stdin: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kilit"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // kilit may exit before it reads, say on a bad option: then the write
+    // fails, and the exit status tells the rest.
+    let _ = child.stdin.take().unwrap().write_all(stdin.as_bytes());
+    child.wait_with_output().unwrap()
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8(output.stdout.clone()).unwrap()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8(output.stderr.clone()).unwrap()
+}
+
+fn laravel_demo(args: &[&str]) -> Output {
+    let schema = example("mysql-schema.sql");
+    let pretend = std::fs::read_to_string(example("laravel-pretend.txt")).unwrap();
+    let mut all = vec!["check", "--schema", schema.to_str().unwrap()];
+    all.extend(args);
+    kilit(&all, &pretend)
+}
+
+#[test]
+fn reads_laravel_s_pretend_output_from_standard_input() {
+    let output = laravel_demo(&[]);
+    let text = stdout(&output);
+    assert!(
+        text.contains(
+            "2026_11_02_090100_widen_amount_on_orders_table
+  alter table `orders` modify `amount` bigint not null
+    COPY, copies every row, writes wait
+"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "    - order_events is created earlier in these migrations: nothing else uses it yet, \
+             so nothing waits for it\n"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("\nmetadata lock on orders:\n"), "{text}");
+    assert!(
+        text.ends_with(
+            "\n8 statements: 3 make writes wait, 1 unknown, 2 run while writes continue, \
+             1 changes a table created here, 1 not checked\n"
+        ),
+        "{text}"
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+}
+
+#[test]
+fn json_is_one_document_with_the_same_answers() {
+    let output = laravel_demo(&["--format", "json"]);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["server"], "mysql-8.4.13");
+    assert_eq!(json["sources"].as_array().unwrap().len(), 6);
+
+    let widen = &json["sources"][1];
+    assert_eq!(
+        widen["name"],
+        "2026_11_02_090100_widen_amount_on_orders_table"
+    );
+    assert_eq!(widen["kind"], "laravel_migration");
+    let statement = &widen["statements"][0];
+    assert_eq!(statement["line"], 7);
+    assert_eq!(statement["impact"], "writes_wait");
+    assert_eq!(statement["case"], "change-integer-type");
+    assert_eq!(statement["algorithm"], "COPY");
+    assert_eq!(statement["copies_rows"], true);
+    assert_eq!(statement["writes"], "blocked");
+
+    assert_eq!(json["sources"][3]["statements"][1]["impact"], "new_table");
+    assert_eq!(json["warnings"][0]["id"], "metadata-lock");
+    assert_eq!(json["warnings"][0]["tables"], serde_json::json!(["orders"]));
+    assert_eq!(json["summary"]["writes_wait"], 3);
+    assert_eq!(json["exit_code"], 1);
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn writes_that_continue_exit_with_0() {
+    let output = kilit(
+        &["check"],
+        "alter table `orders` add `coupon` varchar(255) null;",
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
+}
+
+#[test]
+fn strict_also_fails_on_what_kilit_cannot_tell() {
+    let sql = "alter table `orders` drop `legacy_code`, drop `legacy_flag`;";
+    assert_eq!(kilit(&["check"], sql).status.code(), Some(0));
+    assert_eq!(kilit(&["check", "--strict"], sql).status.code(), Some(1));
+}
+
+#[test]
+fn files_are_checked_in_order_as_one_migration() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("files_in_order");
+    std::fs::create_dir_all(&dir).unwrap();
+    let create = dir.join("1_create.sql");
+    let alter = dir.join("2_alter.sql");
+    std::fs::write(
+        &create,
+        "CREATE TABLE notes (id INT PRIMARY KEY, body TEXT);",
+    )
+    .unwrap();
+    std::fs::write(&alter, "\nALTER TABLE notes ADD FULLTEXT (body);").unwrap();
+
+    let output = kilit(
+        &["check", create.to_str().unwrap(), alter.to_str().unwrap()],
+        "",
+    );
+    let text = stdout(&output);
+    assert!(
+        text.contains(&format!("{}\n  line 2: ALTER TABLE notes", alter.display())),
+        "{text}"
+    );
+    // The FULLTEXT index makes writes wait, but nothing uses the new table.
+    assert_eq!(output.status.code(), Some(0), "{text}");
+}
+
+#[test]
+fn nothing_to_migrate_is_nothing_to_check() {
+    let output = kilit(&["check"], "\n   INFO  Nothing to migrate.  \n\n");
+    assert!(stdout(&output).ends_with("\nnothing to check: Laravel has no pending migration\n"));
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn lines_kilit_cannot_read_exit_with_2() {
+    let output = kilit(
+        &["check"],
+        "   INFO  Running migrations.
+
+  2026_11_02_090100_widen_amount_on_orders_table .............................
+
+   ERROR  [2026_11_02_090100_widen_amount_on_orders_table] failed to dump queries.
+",
+    );
+    assert!(
+        stdout(&output).contains(
+            "  standard input, line 5: ERROR  [2026_11_02_090100_widen_amount_on_orders_table] \
+             failed to dump queries.\n"
+        ),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn an_unknown_server_exits_with_2() {
+    let output = kilit(&["check", "--server", "mysql-5.7.44"], "select 1;");
+    assert_eq!(
+        stderr(&output),
+        "kilit: no lab results for mysql-5.7.44; kilit has results for mysql-8.0.46, \
+         mysql-8.4.13\n"
+    );
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn a_missing_file_exits_with_2() {
+    let output = kilit(&["check", "no-such-migration.sql"], "");
+    assert!(stderr(&output).starts_with("kilit: no-such-migration.sql: "));
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn a_bad_option_exits_with_2() {
+    assert_eq!(kilit(&["check", "--nope"], "").status.code(), Some(2));
+}
+
+#[test]
+fn servers_lists_what_kilit_has_results_for() {
+    let output = kilit(&["servers"], "");
+    let text = stdout(&output);
+    assert!(text.starts_with("mysql-8.0.46  "), "{text}");
+    assert!(text.contains("\nmysql-8.4.13  "), "{text}");
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn the_readme_example_is_real_output() {
+    // The README shows some migrations of the demo, run from a Laravel
+    // project's root: every block it shows must be in the real output.
+    let readme = include_str!("../../../README.md");
+    let command = "$ php artisan migrate --pretend | kilit check --schema \
+                   database/schema/mysql-schema.sql\n";
+    let start = readme.find(command).expect("the README shows the command") + command.len();
+    let shown = &readme[start..start + readme[start..].find("```").unwrap()];
+
+    let project = Path::new(env!("CARGO_TARGET_TMPDIR")).join("laravel-project");
+    std::fs::create_dir_all(project.join("database/schema")).unwrap();
+    std::fs::copy(
+        example("mysql-schema.sql"),
+        project.join("database/schema/mysql-schema.sql"),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kilit"))
+        .args(["check", "--schema", "database/schema/mysql-schema.sql"])
+        .current_dir(&project)
+        .stdin(std::fs::File::open(example("laravel-pretend.txt")).unwrap())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut real = String::new();
+    std::io::Read::read_to_string(child.stdout.as_mut().unwrap(), &mut real).unwrap();
+    child.wait().unwrap();
+
+    for block in shown.split("\n\n") {
+        assert!(
+            real.contains(block.trim_end()),
+            "the README shows\n{block}\nbut kilit prints\n{real}"
+        );
+    }
+}

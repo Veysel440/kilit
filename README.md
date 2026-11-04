@@ -10,16 +10,18 @@
 [![MySQL 8.0 and 8.4](https://img.shields.io/badge/MySQL-8.0%20%7C%208.4-4479A1?logo=mysql&logoColor=white)](#what-mysql-does-with-common-changes)
 [![Status: early development](https://img.shields.io/badge/status-early%20development-yellow)](#roadmap)
 
-[Why](#why) · [Example](#example) · [Findings](#what-mysql-does-with-common-changes) · [Getting started](#getting-started) · [How it works](#how-it-works) · [Roadmap](#roadmap)
+[Why](#why) · [Example](#example) · [Findings](#what-mysql-does-with-common-changes) · [Getting started](#getting-started) · [In CI](#in-ci) · [How it works](#how-it-works) · [Roadmap](#roadmap)
 
 </div>
 
 kilit reads a schema migration and tells you, statement by statement, what
 MySQL will do with it: change only the table's metadata, work on the table in
 place, or copy every row into a new table, and whether writes keep flowing
-while it runs. Give it your schema as well and it follows your tables through
-the migration, so it can judge `->change()` too. Every answer comes from
-measurements on real MySQL servers, not from guesses.
+while it runs. It reads plain SQL or the output of `php artisan migrate
+--pretend`. Give it your schema as well and it follows your tables through the
+migration, so it can judge `->change()` too. Every answer comes from
+measurements on real MySQL servers, not from guesses, and the exit status can
+stop a deploy that would make writes wait.
 
 *kilit* is Turkish for *lock*.
 
@@ -45,46 +47,77 @@ records what they did, and kilit answers from those records.
 
 ## Example
 
-With the schema that `php artisan schema:dump` writes for a small Laravel
-app, and a migration on its `orders` table:
+Six pending migrations of a small Laravel app, piped from `migrate --pretend`
+into kilit with the app's schema. Four of them:
 
 ```text
-$ cargo run -p kilit-core --example check
+$ php artisan migrate --pretend | kilit check --schema database/schema/mysql-schema.sql
 checked against mysql-8.4.13, as measured by kilit-lab
-tables from mysql-schema.sql: migrations, orders, shops, users
+tables from database/schema/mysql-schema.sql: 4 (migrations, orders, shops, users)
 
-line 9: alter table `orders` modify `amount` bigint not null
-  COPY, copies every row, writes wait
-  measured as change-integer-type (3 lab scenarios)
-  - changes the type from INT to BIGINT
-  - if a value does not fit the new type (in strict SQL mode, the default): fails with error 1264 (int-to-tinyint-out-of-range)
+2026_11_02_090100_widen_amount_on_orders_table
+  alter table `orders` modify `amount` bigint not null
+    COPY, copies every row, writes wait
+    measured as change-integer-type (3 lab scenarios)
+    - changes the type from INT to BIGINT
+    - if a value does not fit the new type (in strict SQL mode, the default): fails with error 1264 (int-to-tinyint-out-of-range)
 
-line 16: alter table `orders` modify `status` varchar(30) not null
-  UNKNOWN: 2 changes in one statement. kilit has measured them one at a time, and MySQL picks one algorithm for the whole statement, which can be heavier than each change alone:
-    - changes VARCHAR(20) to VARCHAR(30), 80 to 120 bytes in utf8mb4
-    - drops the default 'new'
+2026_11_02_090200_add_shop_to_orders_table
+  alter table `orders` add `shop_id` bigint unsigned null
+    INSTANT, no rebuild, writes continue
+    measured as add-column (7 lab scenarios)
+    - if the table has had 64 instant column changes since it was last rebuilt: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)
+  alter table `orders` add constraint `orders_shop_id_foreign` foreign key (`shop_id`) references `shops` (`id`)
+    COPY, copies every row, writes wait
+    measured as add-foreign-key (1 lab scenario)
+    - assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it
+    - if a row points to a parent row that does not exist: fails with error 1452 (add-foreign-key-orphans)
 
-line 19: alter table `orders` modify `user_id` int unsigned not null
-  fails with error 3780
-  measured as change-integer-type (1 lab scenario)
-  - changes the type from BIGINT UNSIGNED to INT UNSIGNED
-  - user_id is in the foreign key orders_user_id_foreign; assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it
+2026_11_02_090300_create_order_events_table
+  create table `order_events` (`id` bigint unsigned not null auto_increment primary key, `order_id`...
+    not checked: creates a new table; no existing rows are touched
+  alter table `order_events` add constraint `order_events_order_id_foreign` foreign key (`order_id`) references `orders` (`id`) on delete cascade
+    COPY, copies every row, writes wait
+    measured as add-foreign-key (1 lab scenario)
+    - assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it
+    - if a row points to a parent row that does not exist: fails with error 1452 (add-foreign-key-orphans)
+    - order_events is created earlier in these migrations: nothing else uses it yet, so nothing waits for it
 
-line 25: alter table `orders` add fulltext `orders_note_fulltext`(`note`)
-  INPLACE, rebuilds the table, writes wait
-  measured as add-fulltext-index (1 lab scenario)
+2026_11_02_090400_lengthen_status_on_orders_table
+  alter table `orders` modify `status` varchar(30) not null
+    UNKNOWN: 2 changes in one statement. kilit has measured them one at a time, and MySQL picks one algorithm for the whole statement, which can be heavier than each change alone:
+      - changes VARCHAR(20) to VARCHAR(30), 80 to 120 bytes in utf8mb4
+      - drops the default 'new'
 
-line 28: alter table `orders` add `channel` varchar(255) null
-  COPY, copies every row, writes wait
-  measured as add-column (1 lab scenario)
-  - orders has the FULLTEXT index orders_note_fulltext
+metadata lock on orders:
+  Every ALTER TABLE first waits for the open transactions that have used its
+  table to end. While it waits, new queries on that table queue behind it,
+  reads too, even for an INSTANT change, and by default MySQL lets it wait a
+  year (lock_wait_timeout = 31536000). Run SET SESSION lock_wait_timeout = 5
+  before the migration to cap the wait: the ALTER then fails with error 1205
+  after 5 seconds, the queries behind it go on, and you can run the migration
+  again later.
+  measured by kilit-lab on mysql-8.4.13
+
+8 statements: 3 make writes wait, 1 unknown, 2 run while writes continue, 1 changes a table created here, 1 not checked
 ```
 
-Line 16 is `$table->string('status', 30)->change()`. Since Laravel 11,
-`->change()` replaces the whole column definition, so a modifier the call does
-not repeat, here `->default('new')`, is dropped. Line 28 adds a column the way
-line 6 did, and that one was instant; the FULLTEXT index added on line 25
-turns it into a table copy.
+- `$table->bigInteger('amount')->change()` copies the table, and writes wait
+  until it is done.
+- `$table->foreignId('shop_id')->nullable()->constrained()` is two
+  statements: the column is instant, the foreign key copies the table.
+- The foreign key of the new `order_events` table copies too, but that table
+  has no rows and nothing uses it yet, so kilit does not count it against
+  you.
+- `$table->string('status', 30)->change()` looks like one change. Since
+  Laravel 11, `->change()` replaces the whole column definition, so the
+  `->default('new')` it does not repeat is dropped as well. kilit has measured
+  each change alone, not the two together, and says so instead of guessing.
+- Every `ALTER TABLE` waits for transactions that are using its table, and
+  holds up the queries that come after it. kilit-lab measures this on every
+  server, and kilit warns about it once, naming the tables.
+
+kilit exits with 1 here, because three statements make writes wait.
 
 Every statement gets one of three answers:
 
@@ -182,21 +215,36 @@ database: the lab's results are compiled into kilit.
 ```sh
 git clone https://github.com/Veysel440/kilit.git
 cd kilit
-
-# the sample migration, on the sample tables in crates/kilit-core/examples/
-cargo run -p kilit-core --example check
-
-# your own migration and schema, against MySQL 8.4.13 (the default) or 8.0.46
-cargo run -p kilit-core --example check -- --schema path/to/mysql-schema.sql path/to/migration.sql
-cargo run -p kilit-core --example check -- --schema path/to/mysql-schema.sql path/to/migration.sql mysql-8.0.46
+cargo install --locked --path crates/kilit   # puts kilit in ~/.cargo/bin
 ```
 
-In a Laravel project, `php artisan schema:dump` writes the schema to
-`database/schema/mysql-schema.sql`, and `php artisan migrate --pretend` prints
-the statements your migrations will run; save those to a file. kilit reads
-plain SQL for now; reading the `--pretend` output directly is on the
-[roadmap](#roadmap). Without `--schema`, kilit still answers everything that
-does not depend on the table, and says so where it does.
+In a Laravel project:
+
+```sh
+php artisan schema:dump
+php artisan migrate --pretend | kilit check --schema database/schema/mysql-schema.sql
+```
+
+`schema:dump` writes your tables to `database/schema/mysql-schema.sql`, with
+the `mysqldump` client. Laravel loads that file before it runs migrations on an
+empty database; if you do not want that, write the file elsewhere with
+`--path`. Run both commands against a database whose tables match production,
+because that is where the migration will run. Without `--schema`, kilit still
+answers everything that does not depend on the table, and says so where it
+does.
+
+For SQL files, or saved `--pretend` output:
+
+```sh
+kilit check --schema schema.sql migration.sql   # several files run in order, as one migration
+kilit check --server mysql-8.0.46 migration.sql # the default is the newest server, mysql-8.4.13
+kilit servers                                   # the servers kilit has results for
+```
+
+On Windows, pipe in WSL, Git Bash or `cmd`, which pass Laravel's output
+through as it is. PowerShell before 7.4 re-encodes text in a pipe and with `>`:
+kilit still reads the statement mark that this garbles, but text in other
+languages inside your SQL can come through garbled.
 
 ### Running the lab
 
@@ -213,6 +261,22 @@ docker compose down                  # remove the servers
 > The lab drops and recreates a database named `kilit_lab`. Only point it at
 > throwaway servers.
 
+## In CI
+
+`kilit check` exits with:
+
+| Status | When |
+| --- | --- |
+| 0 | no statement fails and none makes writes wait |
+| 1 | a statement fails or makes writes wait; with `--strict`, also when kilit cannot tell what a statement does |
+| 2 | kilit could not check everything: a bad option, a file it cannot read, an unknown server, or lines of the input it does not understand |
+
+`--format json` prints the same answers as one JSON document: the migrations
+with their statements, each with its `impact` (`fails`, `writes_wait`,
+`writes_continue`, `new_table`, `unknown` or `not_checked`), the measured
+algorithm and the lab scenarios behind it, the warnings, a summary and the exit
+status.
+
 ## How it works
 
 ```mermaid
@@ -221,8 +285,10 @@ flowchart LR
     lab <-->|"6 runs per scenario"| servers[("MySQL 8.0.46<br/>MySQL 8.4.13")]
     lab --> matrix["matrix/*.json<br/>what each server did"]
     matrix -->|"compiled in"| core["kilit-core"]
-    migration["your migration"] --> core
-    core --> answers["an answer per statement"]
+    migration["your migration<br/>SQL or migrate --pretend"] --> cli["kilit check"]
+    schema["your schema"] --> cli
+    core --> cli
+    cli --> answers["an answer per statement<br/>and an exit status"]
 ```
 
 **The lab** (`kilit-lab`) starts every scenario from the same two tables,
@@ -236,10 +302,17 @@ nothing is forced, checked against the run as written, whether the table is
 rebuilt or copied, and whether writes can continue. The results go to
 `matrix/`, one JSON file per server version. They hold no timestamps or ids, so
 a file changes only when a server behaves differently, and the lab reports
-which scenarios changed.
+which scenarios changed. Before the scenarios, the lab also checks the facts
+kilit uses without a scenario of their own: how many bytes a character takes in
+each character set, and that an `ALTER TABLE` waits for a transaction that has
+read its table and is still open, with `ALGORITHM=INSTANT`, `INPLACE` and
+`COPY` alike, while a plain `SELECT` from another connection waits behind it.
 
-**The reader** splits SQL into statements, so a semicolon inside a string or a
-comment does not end one, and reads each statement with
+**The reader** takes SQL, or the output of `php artisan migrate --pretend`,
+which it recognizes on its own: Laravel 10 to 13 print it the same way, one
+statement per line, under each migration's name. It splits SQL into
+statements, so a semicolon inside a string or a comment does not end one, and
+reads each statement with
 [sqlparser](https://crates.io/crates/sqlparser)'s MySQL dialect into kilit's
 own types. Nothing is dropped silently: an operation it reads but does not model
 becomes `Other`, and a statement it cannot read becomes `Unparsed` without
@@ -264,6 +337,12 @@ such as rows that break a new constraint, it becomes a note. A statement that
 forces `ALGORITHM=...` or `LOCK=NONE` is answered from the lab's run of exactly
 that variant.
 
+**The command** (`kilit`) reads every input as one migration, in order, so a
+table created by one migration is known to the next. It sums up what each
+answer means while the migration runs: it fails, writes wait, writes continue,
+it only touches a table created earlier in the same migrations, or kilit
+cannot tell. The exit status follows from that.
+
 ## Design principles
 
 - **Measured, not guessed.** Every answer names the lab scenarios behind it.
@@ -276,7 +355,7 @@ that variant.
 - **Reproducible.** Running the lab again changes a result file only when a
   server behaves differently. The lab also checks the few facts kilit uses
   without a scenario of their own, such as how many bytes a character takes
-  in each character set.
+  in each character set and how `ALTER TABLE` waits for the metadata lock.
 - **Pure Rust.** No C or assembly is compiled anywhere in the dependency tree,
   and `unsafe` code is forbidden in the workspace.
 - **No I/O in the core.** `kilit-core` takes text and returns data. The lab's
@@ -297,10 +376,11 @@ kilit is young, and it says so when it does not know. Today:
 - sqlparser 0.63 cannot read `CONVERT TO CHARACTER SET`, `ENGINE=...`,
   `RENAME INDEX`, `ALGORITHM=NOCOPY` or `OPTIMIZE TABLE` yet, so kilit reports
   them as unreadable.
-- "Writes continue" describes the change itself. Every `ALTER TABLE`, even an
-  instant one, briefly needs an exclusive metadata lock on the table. If a long
-  transaction is using the table, the `ALTER` waits for it, and new queries on
-  the table queue up behind the `ALTER`. kilit does not warn about this yet.
+- "Writes continue" describes the change itself. Every `ALTER TABLE` also
+  waits for the metadata lock first; kilit warns about it, but cannot know
+  which transactions will be open when you deploy.
+- Laravel's `migrate --pretend` output turns every run of spaces into one,
+  even inside quotes, so kilit sees `DEFAULT 'a  b'` as `DEFAULT 'a b'`.
 
 ## Roadmap
 
@@ -311,8 +391,9 @@ kilit is young, and it says so when it does not know. Today:
   session settings such as `foreign_key_checks`
 - [x] Schema awareness: answers for `MODIFY` and `CHANGE` from the column's
   current definition, and definite answers for tables with a FULLTEXT index
-- [ ] A `kilit check` command: Laravel's `migrate --pretend` output as input,
+- [x] A `kilit check` command: Laravel's `migrate --pretend` output as input,
   JSON output, and exit codes for CI
+- [x] A warning about the metadata lock, measured on every server
 - [ ] Continuous integration, including a scheduled lab run that catches
   behavior changes in new MySQL releases
 - [ ] A first release on crates.io
@@ -320,6 +401,7 @@ kilit is young, and it says so when it does not know. Today:
 ## Project layout
 
 ```text
+crates/kilit/        the kilit command
 crates/kilit-core/   reads migrations and checks them; no I/O
 crates/kilit-lab/    measures schema changes on real MySQL servers
 scenarios/           one TOML file per measured change, and the lab's tables

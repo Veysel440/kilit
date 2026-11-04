@@ -1,6 +1,7 @@
-//! kilit-core reads MySQL schema migrations, follows the tables they
-//! change, and says what MySQL will do with each statement, from what
-//! kilit-lab measured on real servers.
+//! kilit-core reads MySQL schema migrations, as SQL or as the output of
+//! `php artisan migrate --pretend`, follows the tables they change, and says
+//! what MySQL will do with each statement, from what kilit-lab measured on
+//! real servers.
 //!
 //! It does no I/O: it takes text and returns data. Reading files, talking
 //! to servers and printing belong to the crates that use it.
@@ -22,9 +23,12 @@
 
 mod charset;
 mod check;
+mod impact;
 mod knowledge;
+mod metadata_lock;
 mod modify;
 mod parse;
+mod pretend;
 mod results;
 mod schema;
 mod split;
@@ -32,8 +36,13 @@ mod statement;
 
 pub use charset::{CHARSETS, Charset};
 pub use check::{CASES, Case, Condition, Exception, Finding, Prediction, check};
+pub use impact::{Impact, impacts};
 pub use knowledge::{Knowledge, ScenarioResult, ServerResults};
+pub use metadata_lock::{
+    ALGORITHMS_THAT_WAIT, DEFAULT_LOCK_WAIT_TIMEOUT, LOCK_WAIT_TIMEOUT_ERROR, metadata_lock_warning,
+};
 pub use parse::parse;
+pub use pretend::{LaravelMigration, Pretend, UnreadableLine, read_pretend};
 pub use results::{Observation, Outcome, Server, Variant, Verdict, Writes};
 pub use schema::{Schema, TableState};
 pub use statement::{
