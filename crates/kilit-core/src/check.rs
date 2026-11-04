@@ -450,7 +450,7 @@ pub fn check(statements: &[Statement], schema: &Schema, results: &ServerResults)
             StatementKind::Unparsed { error, .. } => unknown(error.as_str()),
         };
         // The next statement sees the tables as this one leaves them.
-        schema.apply(statement);
+        follow(&mut schema, statement, &prediction);
         findings.push(Finding {
             line: statement.line,
             sql: statement.sql.clone(),
@@ -458,6 +458,24 @@ pub fn check(statements: &[Statement], schema: &Schema, results: &ServerResults)
         });
     }
     findings
+}
+
+/// Moves `schema` past `statement`. MySQL runs an ALTER TABLE whole or not
+/// at all, so one that kilit answers "fails" for leaves the tables as they
+/// were, with none of its changes. Any other answer applies the statement:
+/// a failure only in a note may not happen, and an unknown statement is
+/// followed as if it ran.
+fn follow(schema: &mut Schema, statement: &Statement, prediction: &Prediction) {
+    let fails = matches!(
+        prediction,
+        Prediction::Measured {
+            verdict: Verdict::Fails { .. },
+            ..
+        }
+    );
+    if !fails {
+        schema.apply(statement);
+    }
 }
 
 fn not_checked(reason: impl Into<String>) -> Prediction {
@@ -2693,6 +2711,189 @@ mod tests {
                 let (found, said, _) = measured(prediction);
                 assert_eq!((found, said.as_str()), (case, verdict), "{sql}");
             }
+        }
+    }
+
+    #[test]
+    fn a_failing_statement_leaves_the_tables_as_they_were() {
+        // MySQL refuses to drop the FULLTEXT index instantly, so it stays,
+        // and the next new column copies the table.
+        let fulltext = "ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note);";
+        let predictions = predictions_with(
+            &format!("{SHOP} {fulltext}"),
+            "ALTER TABLE orders DROP INDEX ft_note, ALGORITHM=INSTANT;
+             ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;",
+        );
+        assert!(said(&predictions[0]).starts_with("fails with error 1845"));
+        let Prediction::Measured {
+            verdict,
+            evidence,
+            notes,
+            ..
+        } = predictions[1].clone()
+        else {
+            panic!("expected a measured prediction: {:?}", predictions[1]);
+        };
+        assert_eq!(verdict.to_string(), "COPY, copies every row, writes wait");
+        assert_eq!(evidence, ["add-column-with-fulltext"]);
+        assert_eq!(notes, ["orders has the FULLTEXT index ft_note"]);
+    }
+
+    #[test]
+    fn a_column_change_that_fails_leaves_the_old_definition() {
+        // user_id stays BIGINT UNSIGNED, in the foreign key: the same change
+        // fails again, and the old definition changes nothing.
+        let predictions = predictions_with(
+            LARAVEL_TABLES,
+            "alter table `orders` modify `user_id` int unsigned not null;
+             alter table `orders` modify `user_id` int unsigned not null;
+             alter table `orders` modify `user_id` bigint unsigned not null;",
+        );
+        assert!(said(&predictions[0]).starts_with("fails with error 3780"));
+        assert!(said(&predictions[1]).starts_with("fails with error 3780"));
+        let (case, verdict, _) = measured(predictions[2].clone());
+        assert_eq!(
+            (case, verdict.as_str()),
+            (
+                "modify-same-definition",
+                "INSTANT, no rebuild, writes continue"
+            )
+        );
+    }
+
+    #[test]
+    fn an_index_mysql_refuses_to_add_is_not_there_afterwards() {
+        // An index cannot be added instantly, nor a FULLTEXT index while
+        // writes continue.
+        let told: Vec<String> = predictions_with(
+            SHOP,
+            "ALTER TABLE orders ADD INDEX idx_amount (amount), ALGORITHM=INSTANT;
+             ALTER TABLE orders DROP COLUMN amount;
+             ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note), LOCK=NONE;
+             ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;",
+        )
+        .iter()
+        .map(said)
+        .collect();
+        assert!(told[0].starts_with("fails with error 1845"), "{told:?}");
+        // No index on amount: dropping it stays instant.
+        assert_eq!(told[1], "INSTANT, no rebuild, writes continue");
+        assert!(told[2].starts_with("fails with error 1846"), "{told:?}");
+        // No FULLTEXT index: the new column stays instant.
+        assert_eq!(told[3], "INSTANT, no rebuild, writes continue");
+    }
+
+    #[test]
+    fn a_failing_statement_keeps_none_of_its_changes() {
+        // kilit answers "unknown" for several changes in one statement, so
+        // no such statement gets a measured failure today; when one does,
+        // none of its changes are kept. Any other answer keeps them all.
+        let statements =
+            parse("ALTER TABLE orders ADD INDEX idx_amount (amount), DROP COLUMN note");
+        let before = Schema::from_sql(SHOP);
+        let fails = Prediction::Measured {
+            case: "add-index",
+            verdict: Verdict::Fails {
+                code: 1845,
+                message: String::new(),
+            },
+            evidence: Vec::new(),
+            notes: Vec::new(),
+        };
+        let mut schema = before.clone();
+        follow(&mut schema, &statements[0], &fails);
+        assert_eq!(schema.table("orders"), before.table("orders"));
+
+        follow(&mut schema, &statements[0], &unknown("2 changes"));
+        let TableState::Known(orders) = schema.table("orders") else {
+            panic!("orders should be known");
+        };
+        assert!(orders.column("note").is_none());
+        assert_eq!(orders.index_on("amount").as_deref(), Some("idx_amount"));
+    }
+
+    #[test]
+    fn a_failure_on_a_table_created_here_leaves_it_as_created() {
+        let statements = parse(
+            "CREATE TABLE tokens (id INT PRIMARY KEY, label VARCHAR(20) NULL);
+             ALTER TABLE tokens ADD COLUMN token CHAR(36) NOT NULL DEFAULT (UUID());
+             ALTER TABLE tokens MODIFY token CHAR(36) NULL;",
+        );
+        let findings = check(&statements, &Schema::new(), results());
+        assert_eq!(
+            crate::impact::impacts(&statements, &findings),
+            [
+                crate::impact::Impact::NotChecked,
+                crate::impact::Impact::Fails,
+                crate::impact::Impact::Unknown
+            ]
+        );
+        // The table never got the column, in MySQL either.
+        assert_eq!(
+            reason(findings[2].prediction.clone()),
+            "tokens has no column token, as far as kilit can tell"
+        );
+    }
+
+    #[test]
+    fn statements_that_do_not_fail_still_change_the_tables() {
+        // A measured answer that runs.
+        let told: Vec<String> = predictions_with(
+            SHOP,
+            "ALTER TABLE orders ADD INDEX idx_amount (amount);
+             ALTER TABLE orders DROP COLUMN amount;",
+        )
+        .iter()
+        .map(said)
+        .collect();
+        assert_eq!(told[1], "INPLACE, rebuilds the table, writes continue");
+
+        // A failure in a note only: a row may point to a missing parent,
+        // or not. The key is kept.
+        let predictions = predictions_with(
+            SHOP,
+            "ALTER TABLE orders ADD CONSTRAINT fk_orders_user \
+             FOREIGN KEY (user_id) REFERENCES users (id);
+             ALTER TABLE orders MODIFY user_id INT UNSIGNED NOT NULL;",
+        );
+        let (_, verdict, notes) = measured(predictions[0].clone());
+        assert_eq!(verdict, "COPY, copies every row, writes wait");
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("fails with error 1452")),
+            "{notes:?}"
+        );
+        assert!(said(&predictions[1]).starts_with("fails with error 3780"));
+
+        // An unknown statement is followed as if it ran, as before.
+        let predictions = predictions_with(
+            SHOP,
+            "ALTER TABLE orders ADD INDEX idx_amount (amount), ADD COLUMN c INT NULL;
+             ALTER TABLE orders DROP COLUMN amount;",
+        );
+        assert!(reason(predictions[0].clone()).starts_with("2 changes in one statement"));
+        assert_eq!(
+            said(&predictions[1]),
+            "INPLACE, rebuilds the table, writes continue"
+        );
+    }
+
+    #[test]
+    fn the_answer_of_the_selected_server_decides() {
+        let schema = Schema::from_sql(&format!(
+            "{SHOP} ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note);"
+        ));
+        let sql = "ALTER TABLE orders DROP INDEX ft_note, ALGORITHM=INSTANT;
+                   ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;";
+        for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+            let results = Knowledge::built_in().server(server).unwrap();
+            let told: Vec<String> = check(&parse(sql), &schema, results)
+                .iter()
+                .map(|finding| said(&finding.prediction))
+                .collect();
+            assert!(told[0].starts_with("fails with error 1845"), "{server}");
+            assert_eq!(told[1], "COPY, copies every row, writes wait", "{server}");
         }
     }
 

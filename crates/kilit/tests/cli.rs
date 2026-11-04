@@ -296,6 +296,52 @@ fn expression_defaults_and_a_functional_index_get_their_measured_answers() {
 }
 
 #[test]
+fn a_statement_that_fails_changes_no_table_on_either_server() {
+    // The first change fails (user_id is in a foreign key), so the second
+    // still sees BIGINT UNSIGNED; the index MySQL refuses to add instantly
+    // is not there when amount is dropped.
+    let schema = example("mysql-schema.sql");
+    let schema = schema.to_str().unwrap();
+    let sql = "alter table `orders` modify `user_id` int unsigned not null;
+               alter table `orders` modify `user_id` bigint unsigned not null;
+               alter table `orders` add index `orders_amount_index`(`amount`), algorithm=instant;
+               alter table `orders` drop `amount`;";
+    let answers = |server: Option<&str>| {
+        let mut args = vec!["check", "--schema", schema, "--format", "json"];
+        if let Some(server) = server {
+            args.extend(["--server", server]);
+        }
+        let output = kilit(&args, sql);
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        json["sources"][0]["statements"].clone()
+    };
+    let default_server = answers(None);
+    let impacts: Vec<(&str, &str)> = default_server
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|statement| {
+            (
+                statement["impact"].as_str().unwrap(),
+                statement["case"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        impacts,
+        [
+            ("fails", "change-integer-type"),
+            ("writes_continue", "modify-same-definition"),
+            ("fails", "add-index"),
+            ("writes_continue", "drop-column"),
+        ]
+    );
+    assert_eq!(default_server[3]["algorithm"], "INSTANT");
+    assert_eq!(answers(Some("mysql-8.0.46")), default_server);
+}
+
+#[test]
 fn a_table_created_here_is_never_in_the_metadata_lock_warning() {
     // The ALTER fails, but no transaction can be using order_notes yet, so it
     // waits for nothing before it fails.
