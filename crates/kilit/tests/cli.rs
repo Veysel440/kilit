@@ -121,6 +121,60 @@ fn strict_also_fails_on_what_kilit_cannot_tell() {
 }
 
 #[test]
+fn what_kilit_cannot_tell_on_a_new_table_is_unknown() {
+    // Nothing uses the new table, but MySQL 8.0.46 and 8.4.13 reject the
+    // second statement with error 1064: NOT VALID is PostgreSQL's.
+    let sql = "create table `order_tags` (`id` bigint unsigned not null primary key, \
+               `kind` varchar(20) not null);
+               alter table `order_tags` add constraint `order_tags_kind_check` \
+               check (`kind` in ('gift', 'rush')) not valid;";
+    let output = kilit(&["check"], sql);
+    let text = stdout(&output);
+    assert!(
+        text.ends_with("\n2 statements: 1 unknown, 1 not checked\n"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("created earlier in these migrations"),
+        "{text}"
+    );
+    assert!(!text.contains("metadata lock on"), "{text}");
+    assert_eq!(output.status.code(), Some(0), "{text}");
+    assert_eq!(kilit(&["check", "--strict"], sql).status.code(), Some(1));
+}
+
+#[test]
+fn a_table_created_here_is_never_in_the_metadata_lock_warning() {
+    // The ALTER fails, but no transaction can be using order_notes yet, so it
+    // waits for nothing before it fails.
+    let schema = example("mysql-schema.sql");
+    let output = kilit(
+        &[
+            "check",
+            "--schema",
+            schema.to_str().unwrap(),
+            "--format",
+            "json",
+        ],
+        "create table `order_notes` (`id` bigint unsigned not null auto_increment primary key, \
+         `order_id` bigint unsigned not null);
+         alter table `order_notes` add constraint `order_notes_order_id_foreign` \
+         foreign key (`order_id`) references `orders` (`id`);
+         alter table `order_notes` modify `order_id` int not null;",
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let impacts: Vec<&str> = json["sources"][0]["statements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|statement| statement["impact"].as_str().unwrap())
+        .collect();
+    assert_eq!(impacts, ["not_checked", "new_table", "fails"]);
+    assert_eq!(json["warnings"], serde_json::json!([]));
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
 fn files_are_checked_in_order_as_one_migration() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("files_in_order");
     std::fs::create_dir_all(&dir).unwrap();

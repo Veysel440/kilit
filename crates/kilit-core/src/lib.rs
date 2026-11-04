@@ -36,7 +36,7 @@ mod statement;
 
 pub use charset::{CHARSETS, Charset};
 pub use check::{CASES, Case, Condition, Exception, Finding, Prediction, check};
-pub use impact::{Impact, impacts};
+pub use impact::{Impact, impacts, on_new_tables};
 pub use knowledge::{Knowledge, ScenarioResult, ServerResults};
 pub use metadata_lock::{
     ALGORITHMS_THAT_WAIT, DEFAULT_LOCK_WAIT_TIMEOUT, LOCK_WAIT_TIMEOUT_ERROR, metadata_lock_warning,

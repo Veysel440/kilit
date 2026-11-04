@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use kilit_core::{
     Algorithm, Impact, Prediction, Schema, ServerResults, Statement, StatementKind, Verdict,
-    Writes, check, impacts, metadata_lock_warning,
+    Writes, check, impacts, metadata_lock_warning, on_new_tables,
 };
 use serde::Serialize;
 
@@ -37,6 +37,8 @@ struct Checked<'a> {
     statement: &'a Statement,
     prediction: Prediction,
     impact: Impact,
+    /// The statement changes only tables that the input created earlier.
+    on_new_table: bool,
 }
 
 impl<'a> Report<'a> {
@@ -56,8 +58,9 @@ impl<'a> Report<'a> {
         let tables = schema.map_or(&no_tables, |(_, schema)| schema);
         let findings = check(&statements, tables, results);
         let impacts = impacts(&statements, &findings);
+        let on_new_tables = on_new_tables(&statements);
 
-        let mut checked = findings.into_iter().zip(impacts);
+        let mut checked = findings.into_iter().zip(impacts).zip(on_new_tables);
         let sources: Vec<SourceReport> = input
             .sources
             .iter()
@@ -68,13 +71,14 @@ impl<'a> Report<'a> {
                     .statements
                     .iter()
                     .map(|statement| {
-                        let (finding, impact) = checked
+                        let ((finding, impact), on_new_table) = checked
                             .next()
                             .expect("check gives one finding per statement");
                         Checked {
                             statement,
                             prediction: finding.prediction,
                             impact,
+                            on_new_table,
                         }
                     })
                     .collect(),
@@ -83,7 +87,9 @@ impl<'a> Report<'a> {
 
         let mut locked_tables: Vec<String> = Vec::new();
         for checked in sources.iter().flat_map(|source| &source.statements) {
-            if matches!(checked.impact, Impact::NewTable | Impact::NotChecked) {
+            // No transaction can be using a table the input created, whatever
+            // kilit says about the statement.
+            if checked.on_new_table || checked.impact == Impact::NotChecked {
                 continue;
             }
             if let Some(table) = altered_table(checked.statement)
