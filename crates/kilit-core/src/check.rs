@@ -114,6 +114,45 @@ const ADD_COLUMN: Case = Case {
     ],
 };
 
+/// A new column whose default is one of the expressions in
+/// [`EXPRESSION_DEFAULTS`] that MySQL accepts, by copying the table.
+const ADD_COLUMN_EXPRESSION_DEFAULT: Case = Case {
+    id: "add-column-expression-default",
+    scenarios: &[
+        "add-column-default-now",
+        "add-column-default-current-timestamp-in-parentheses",
+        "add-column-default-curdate",
+        "add-column-default-date-in-a-year",
+        "add-column-default-json-array",
+    ],
+    exceptions: &[],
+};
+
+/// A new column whose default MySQL calls unsafe for the binary log
+/// (error 1674): a replica could compute another value. Only the defaults
+/// in [`EXPRESSION_DEFAULTS`] belong here, not every such function.
+const ADD_COLUMN_BINLOG_UNSAFE_DEFAULT: Case = Case {
+    id: "add-column-binlog-unsafe-default",
+    scenarios: &["add-column-default-uuid", "add-column-default-rand"],
+    exceptions: &[],
+};
+
+/// The expression defaults the lab measured, as kilit reads them, in
+/// uppercase, with the case of each. Any other expression default is
+/// unknown: a function the lab has not run may behave either way.
+const EXPRESSION_DEFAULTS: [(&str, &Case); 7] = [
+    ("(NOW())", &ADD_COLUMN_EXPRESSION_DEFAULT),
+    ("(CURRENT_TIMESTAMP)", &ADD_COLUMN_EXPRESSION_DEFAULT),
+    ("(CURDATE())", &ADD_COLUMN_EXPRESSION_DEFAULT),
+    (
+        "(CURRENT_DATE + INTERVAL 1 YEAR)",
+        &ADD_COLUMN_EXPRESSION_DEFAULT,
+    ),
+    ("(JSON_ARRAY())", &ADD_COLUMN_EXPRESSION_DEFAULT),
+    ("(UUID())", &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT),
+    ("(RAND())", &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT),
+];
+
 /// Shapes the lab has not measured, such as a column in a foreign key or
 /// the primary key, are unknown: see [`check_dropped_column`].
 const DROP_COLUMN: Case = Case {
@@ -270,6 +309,14 @@ const ADD_INDEX: Case = Case {
     exceptions: &[],
 };
 
+/// The one functional index the lab measured, on `LOWER()` of a VARCHAR
+/// column: see [`check_functional_index`].
+const ADD_FUNCTIONAL_INDEX: Case = Case {
+    id: "add-functional-index",
+    scenarios: &["add-functional-index"],
+    exceptions: &[],
+};
+
 const ADD_UNIQUE_INDEX: Case = Case {
     id: "add-unique-index",
     scenarios: &["add-unique-index"],
@@ -323,8 +370,10 @@ const DROP_FOREIGN_KEY: Case = Case {
 };
 
 /// Every case kilit knows.
-pub const CASES: [&Case; 22] = [
+pub const CASES: [&Case; 25] = [
     &ADD_COLUMN,
+    &ADD_COLUMN_EXPRESSION_DEFAULT,
+    &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT,
     &DROP_COLUMN,
     &RENAME_COLUMN,
     &SET_COLUMN_DEFAULT,
@@ -340,6 +389,7 @@ pub const CASES: [&Case; 22] = [
     &MOVE_COLUMN,
     &MODIFY_SAME_DEFINITION,
     &ADD_INDEX,
+    &ADD_FUNCTIONAL_INDEX,
     &ADD_UNIQUE_INDEX,
     &ADD_FULLTEXT_INDEX,
     &DROP_INDEX,
@@ -382,7 +432,7 @@ pub fn check(statements: &[Statement], schema: &Schema, results: &ServerResults)
                     "sets {} for the statements after it",
                     variables
                         .iter()
-                        .map(|variable| format!("{} = {}", variable.name, variable.value))
+                        .map(ToString::to_string)
                         .collect::<Vec<_>>()
                         .join(", ")
                 ))
@@ -426,6 +476,23 @@ fn unknown(reason: impl Into<String>) -> Prediction {
 #[derive(Default)]
 struct Session {
     foreign_key_checks: Setting,
+    /// `sql_log_bin`, which decides whether MySQL refuses some expression
+    /// defaults.
+    binary_log: BinaryLog,
+}
+
+/// Whether the session's statements go to the binary log, as far as the
+/// input says. The lab measured expression defaults with them going there.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum BinaryLog {
+    /// Nothing in the input sets `sql_log_bin`.
+    #[default]
+    NotSet,
+    /// `sql_log_bin = 1` or `ON`, as in the lab.
+    On,
+    /// Set any other way, as written: `sql_log_bin = 0`, `sql_log_bin =
+    /// DEFAULT`, or `GLOBAL sql_log_bin = 1`, which MySQL refuses.
+    Other(String),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -442,8 +509,20 @@ enum Setting {
 impl Session {
     fn apply(&mut self, variables: &[Variable]) {
         for variable in variables {
-            if variable.name == "foreign_key_checks" {
-                self.foreign_key_checks = Setting::parse(&variable.value);
+            match variable.name.as_str() {
+                // A global value does not change this session's.
+                "foreign_key_checks" if !variable.global => {
+                    self.foreign_key_checks = Setting::parse(&variable.value);
+                }
+                "sql_log_bin" => {
+                    let on = !variable.global && Setting::parse(&variable.value) == Setting::On;
+                    self.binary_log = if on {
+                        BinaryLog::On
+                    } else {
+                        BinaryLog::Other(variable.to_string())
+                    };
+                }
+                _ => {}
             }
         }
     }
@@ -462,6 +541,8 @@ impl Setting {
 
 const ASSUMES_FOREIGN_KEY_CHECKS: &str =
     "assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it";
+
+const ASSUMES_BINARY_LOG: &str = "assumes the binary log is on, the MySQL default";
 
 fn predict(
     alter: &Alter,
@@ -769,7 +850,7 @@ fn kept_fulltext_index<'a>(table: &'a Table, dropped: Option<&str>) -> Option<&'
 /// The column an index entry names: `email` in `email` or `email(10)`.
 /// An expression such as `(lower(email))` names none.
 fn entry_column(entry: &str) -> Option<&str> {
-    if entry.starts_with('(') {
+    if is_expression(entry) {
         return None;
     }
     entry.split('(').next()
@@ -824,7 +905,20 @@ fn classify(
     let case = match operation {
         Operation::AddColumn { column, .. } => {
             check_new_column(column)?;
-            &ADD_COLUMN
+            match expression_default(column.default.as_deref()) {
+                None => &ADD_COLUMN,
+                Some(default) => {
+                    let case = measured_default(default)?;
+                    if let BinaryLog::Other(setting) = &session.binary_log {
+                        return Err(format!(
+                            "a statement before this one sets {setting}, and the lab has \
+                             measured expression defaults only with the binary log on"
+                        ));
+                    }
+                    notes.push(ASSUMES_BINARY_LOG.to_owned());
+                    case
+                }
+            }
         }
         Operation::DropColumn { name } => {
             check_dropped_column(table, name, schema)?;
@@ -835,11 +929,27 @@ fn classify(
             subject = Some(from.clone());
             &RENAME_COLUMN
         }
-        Operation::SetColumnDefault { column, .. } => {
+        Operation::SetColumnDefault { column, default } => {
+            // Measured with a literal, on a column that had no default.
+            if let Some(default) = expression_default(Some(default)) {
+                return Err(format!(
+                    "setting the expression default {default} has not been measured yet"
+                ));
+            }
+            if let TableState::Known(table) = table
+                && let Some(old) = table.column(column)
+                && let Some(old_default) = expression_default(old.default.as_deref())
+            {
+                return Err(format!(
+                    "{column} has the expression default {old_default}, and changing it \
+                     has not been measured yet"
+                ));
+            }
             subject = Some(column.clone());
             &SET_COLUMN_DEFAULT
         }
         Operation::ModifyColumn { column, position } => {
+            check_new_definition(column)?;
             subject = Some(column.name.clone());
             modified(
                 table,
@@ -855,6 +965,7 @@ fn classify(
             column,
             position,
         } => {
+            check_new_definition(column)?;
             subject = Some(old_name.clone());
             modified(
                 table,
@@ -865,11 +976,15 @@ fn classify(
                 &mut notes,
             )?
         }
+        Operation::AddIndex(index) if index.columns.iter().any(|entry| is_expression(entry)) => {
+            check_functional_index(index, table)?;
+            &ADD_FUNCTIONAL_INDEX
+        }
         Operation::AddIndex(index) => match index.kind {
             IndexKind::Plain => &ADD_INDEX,
             IndexKind::Unique => &ADD_UNIQUE_INDEX,
             IndexKind::Fulltext => &ADD_FULLTEXT_INDEX,
-            IndexKind::Spatial => return Err("spatial indexes have not been measured yet".into()),
+            IndexKind::Spatial => return Err(SPATIAL_NOT_MEASURED.into()),
         },
         Operation::DropIndex { .. } => &DROP_INDEX,
         Operation::AddForeignKey(_) => match session.foreign_key_checks {
@@ -919,6 +1034,119 @@ fn check_new_column(column: &Column) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// The default, if it is an expression. MySQL takes an expression only in
+/// parentheses: `(NOW())`. `CURRENT_TIMESTAMP` and its synonyms without
+/// them are not expressions here, and keep the answers measured for them.
+fn expression_default(default: Option<&str>) -> Option<&str> {
+    default.filter(|default| is_expression(default))
+}
+
+/// Whether a default or an index entry is an expression: it starts with a
+/// parenthesis, as MySQL requires. `note(10)` is a prefix of `note`.
+fn is_expression(text: &str) -> bool {
+    text.trim_start().starts_with('(')
+}
+
+/// The case of an expression default the lab measured, matched in
+/// uppercase: Laravel writes `(CURDATE())`, others `(now())`.
+fn measured_default(default: &str) -> Result<&'static Case, String> {
+    let written = default.to_ascii_uppercase();
+    EXPRESSION_DEFAULTS
+        .iter()
+        .find(|(measured, _)| *measured == written)
+        .map(|(_, case)| *case)
+        .ok_or_else(|| format!("the expression default {default} has not been measured yet"))
+}
+
+/// The lab measured MODIFY and CHANGE with literal defaults only.
+fn check_new_definition(column: &Column) -> Result<(), String> {
+    match expression_default(column.default.as_deref()) {
+        Some(default) => Err(format!(
+            "the new definition has the expression default {default}, and a MODIFY or \
+             CHANGE with an expression default has not been measured yet"
+        )),
+        None => Ok(()),
+    }
+}
+
+const SPATIAL_NOT_MEASURED: &str = "spatial indexes have not been measured yet";
+
+/// The one functional index the lab measured is a plain index on `LOWER()`
+/// of a VARCHAR column. MySQL refuses others that look alike, such as
+/// `LOWER()` of a TEXT column (error 3757), so kilit needs the table to
+/// answer, and every other shape is unknown.
+fn check_functional_index(index: &Index, table: TableState<'_>) -> Result<(), String> {
+    match index.kind {
+        IndexKind::Plain => {}
+        IndexKind::Unique => {
+            return Err("a UNIQUE index on an expression has not been measured yet".into());
+        }
+        IndexKind::Fulltext => {
+            return Err("a FULLTEXT index on an expression has not been measured yet".into());
+        }
+        IndexKind::Spatial => return Err(SPATIAL_NOT_MEASURED.into()),
+    }
+    let [entry] = index.columns.as_slice() else {
+        let what = if index.columns.iter().all(|entry| is_expression(entry)) {
+            "several expressions"
+        } else {
+            "both columns and expressions"
+        };
+        return Err(format!("an index on {what} has not been measured yet"));
+    };
+    let Some(column) = lowered_column(entry) else {
+        return Err(format!(
+            "a functional index on {entry} has not been measured yet; the lab measured one \
+             on LOWER() of a VARCHAR column"
+        ));
+    };
+    let table = match table {
+        TableState::Known(table) => table,
+        TableState::Lost { reason } => {
+            return Err(format!(
+                "kilit lost track of this table ({reason}), and a functional index was \
+                 measured only on LOWER() of a VARCHAR column"
+            ));
+        }
+        TableState::Missing => {
+            return Err(format!(
+                "kilit does not know this table, so it cannot tell whether {column} is a \
+                 VARCHAR column, the only kind the lab measured a functional index on"
+            ));
+        }
+    };
+    let Some(found) = table.column(column) else {
+        return Err(format!(
+            "{} has no column {column}, as far as kilit can tell",
+            table.name
+        ));
+    };
+    if !matches!(found.data_type, DataType::VarChar { .. }) {
+        return Err(format!(
+            "{column} is {}, and the lab measured a functional index on LOWER() of a VARCHAR \
+             column only",
+            found.data_type
+        ));
+    }
+    Ok(())
+}
+
+/// The column in `(LOWER(email))` or ``(lower(`email`))``, in any case.
+fn lowered_column(entry: &str) -> Option<&str> {
+    let call = entry.strip_prefix('(')?.strip_suffix(')')?;
+    let (function, rest) = call.split_once('(')?;
+    if !function.eq_ignore_ascii_case("LOWER") {
+        return None;
+    }
+    let argument = rest.strip_suffix(')')?;
+    let column = argument
+        .strip_prefix('`')
+        .and_then(|quoted| quoted.strip_suffix('`'))
+        .unwrap_or(argument);
+    let plain = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    (!column.is_empty() && column.chars().all(plain)).then_some(column)
 }
 
 const DROPPING_NOT_MEASURED: &str = "dropping such a column has not been measured yet";
@@ -1116,6 +1344,13 @@ fn case_of(change: &Change) -> Result<&'static Case, String> {
         Change::Collation { .. } => &CHANGE_COLUMN_COLLATION,
         Change::Nullable { to: false } => &MAKE_COLUMN_NOT_NULL,
         Change::Nullable { to: true } => &MAKE_COLUMN_NULLABLE,
+        // Measured between literal defaults.
+        Change::Default { from, .. } if expression_default(from.as_deref()).is_some() => {
+            return Err(format!(
+                "the statement {change}, and changing an expression default has not been \
+                 measured yet"
+            ));
+        }
         Change::Default { .. } => &MODIFY_COLUMN_DEFAULT,
         Change::Position => &MOVE_COLUMN,
         Change::Comment { .. } => {
@@ -2037,6 +2272,427 @@ mod tests {
             let (decides, why) = deciding(holding(&exceptions)).unwrap();
             assert_eq!(decides.scenarios, ["c"]);
             assert_eq!(why, ["c holds"]);
+        }
+    }
+
+    #[test]
+    fn every_expression_default_the_lab_measured_gets_its_answer() {
+        for (column, case, verdict) in [
+            (
+                "token CHAR(36) NOT NULL DEFAULT (UUID())",
+                "add-column-binlog-unsafe-default",
+                "fails with error 1674",
+            ),
+            (
+                "weight DOUBLE NOT NULL DEFAULT (rand())",
+                "add-column-binlog-unsafe-default",
+                "fails with error 1674",
+            ),
+            (
+                "placed_at DATETIME NOT NULL DEFAULT (NOW())",
+                "add-column-expression-default",
+                "COPY, copies every row, writes wait",
+            ),
+            (
+                "seen_at TIMESTAMP NULL DEFAULT (CURRENT_TIMESTAMP)",
+                "add-column-expression-default",
+                "COPY, copies every row, writes wait",
+            ),
+            (
+                // $table->date('due_on')->useCurrent()
+                "`due_on` date not null default (CURDATE())",
+                "add-column-expression-default",
+                "COPY, copies every row, writes wait",
+            ),
+            (
+                "expires_on DATE NOT NULL DEFAULT (current_date + interval 1 year)",
+                "add-column-expression-default",
+                "COPY, copies every row, writes wait",
+            ),
+            (
+                "tags JSON NOT NULL DEFAULT (JSON_ARRAY())",
+                "add-column-expression-default",
+                "COPY, copies every row, writes wait",
+            ),
+        ] {
+            let sql = format!("ALTER TABLE orders ADD COLUMN {column}");
+            // The same with and without the table: no exception to look for.
+            for prediction in [only(&sql), on_shop("", &sql)] {
+                let (found, said, notes) = measured(prediction);
+                assert_eq!(found, case, "{sql}");
+                assert!(said.starts_with(verdict), "{sql}: {said}");
+                assert_eq!(notes, [ASSUMES_BINARY_LOG], "{sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_expression_default_kilit_answers_for_was_measured() {
+        for (default, case) in EXPRESSION_DEFAULTS {
+            let measured = case.scenarios.iter().any(|id| {
+                let scenario = results().scenario(id).unwrap();
+                parse(&scenario.statement).iter().any(|statement| {
+                    matches!(&statement.kind, StatementKind::Alter(alter)
+                        if matches!(alter.operations.as_slice(),
+                            [Operation::AddColumn { column, .. }]
+                                if column.default.as_deref().map(str::to_ascii_uppercase)
+                                    .as_deref() == Some(default)))
+                })
+            });
+            assert!(measured, "{default} is in no lab scenario of {}", case.id);
+        }
+    }
+
+    #[test]
+    fn expression_defaults_the_lab_has_not_measured_are_unknown() {
+        // As kilit prints them back.
+        for default in [
+            "(CONCAT('a', 'b'))",
+            "(CURRENT_DATE)",
+            "(CURRENT_TIMESTAMP())",
+            "(CURDATE() + INTERVAL 1 DAY)",
+            "(YEAR(CURDATE()))",
+            "(UUID_TO_BIN(UUID()))",
+            "(0)",
+            "('x')",
+        ] {
+            let sql = format!("ALTER TABLE orders ADD COLUMN c VARCHAR(40) NULL DEFAULT {default}");
+            assert_eq!(
+                reason(only(&sql)),
+                format!("the expression default {default} has not been measured yet"),
+                "{sql}"
+            );
+        }
+        // With another change it was unknown already.
+        assert!(
+            reason(only(
+                "ALTER TABLE orders ADD COLUMN token CHAR(36) NOT NULL DEFAULT (UUID()), \
+                 ADD INDEX i (amount)"
+            ))
+            .starts_with("2 changes in one statement")
+        );
+    }
+
+    #[test]
+    fn the_binary_log_follows_the_session() {
+        let uuid = "ALTER TABLE orders ADD COLUMN token CHAR(36) NOT NULL DEFAULT (UUID());";
+        let now = "ALTER TABLE orders ADD COLUMN placed_at DATETIME NOT NULL DEFAULT (NOW());";
+        let told: Vec<String> = predictions(&format!(
+            "{uuid} SET sql_log_bin = 0; {uuid} {now} ALTER TABLE orders ADD coupon INT NULL;
+             SET sql_log_bin = 1; {uuid} {now}"
+        ))
+        .iter()
+        .map(said)
+        .collect();
+        let off = "unknown: a statement before this one sets sql_log_bin = 0, and the lab has \
+                   measured expression defaults only with the binary log on";
+        assert!(told[0].starts_with("fails with error 1674"), "{told:?}");
+        assert_eq!(told[1], "not checked");
+        assert_eq!(told[2], off);
+        assert_eq!(told[3], off);
+        // A column without an expression default does not depend on it.
+        assert_eq!(told[4], "INSTANT, no rebuild, writes continue");
+        assert_eq!(told[5], "not checked");
+        assert!(told[6].starts_with("fails with error 1674"), "{told:?}");
+        assert_eq!(told[7], "COPY, copies every row, writes wait");
+
+        for setting in [
+            "sql_log_bin = ON",
+            "SESSION sql_log_bin = 1",
+            "@@sql_log_bin = TRUE",
+        ] {
+            let (_, verdict, notes) =
+                measured(predictions(&format!("SET {setting}; {uuid}"))[1].clone());
+            assert!(verdict.starts_with("fails with error 1674"), "{setting}");
+            assert_eq!(notes, [ASSUMES_BINARY_LOG], "{setting}");
+        }
+        // Off, back to the server's value, a value kilit cannot read, or
+        // GLOBAL, which MySQL refuses: the lab has not measured these.
+        for (setting, written) in [
+            ("SET sql_log_bin = OFF", "sql_log_bin = OFF"),
+            ("SET sql_log_bin = DEFAULT", "sql_log_bin = DEFAULT"),
+            ("SET sql_log_bin = @saved", "sql_log_bin = @saved"),
+            ("SET GLOBAL sql_log_bin = 1", "GLOBAL sql_log_bin = 1"),
+            ("SET @@global.sql_log_bin = 0", "GLOBAL sql_log_bin = 0"),
+        ] {
+            let answers = predictions(&format!("{setting}; {uuid}"));
+            assert!(
+                matches!(&answers[0], Prediction::NotChecked { reason }
+                    if *reason == format!("sets {written} for the statements after it")),
+                "{setting}: {:?}",
+                answers[0]
+            );
+            assert!(
+                reason(answers[1].clone()).contains(&format!("sets {written}, and")),
+                "{setting}"
+            );
+        }
+    }
+
+    #[test]
+    fn on_a_new_table_a_measured_failure_still_fails() {
+        // The empty table fails too (checked by hand on both servers).
+        let statements = parse(
+            "CREATE TABLE tokens (id INT PRIMARY KEY);
+             ALTER TABLE tokens ADD COLUMN token CHAR(36) NOT NULL DEFAULT (UUID());
+             ALTER TABLE tokens ADD COLUMN placed_at DATETIME NOT NULL DEFAULT (NOW());",
+        );
+        let findings = check(&statements, &Schema::new(), results());
+        assert_eq!(
+            crate::impact::impacts(&statements, &findings),
+            [
+                crate::impact::Impact::NotChecked,
+                crate::impact::Impact::Fails,
+                crate::impact::Impact::NewTable
+            ]
+        );
+    }
+
+    #[test]
+    fn literal_and_current_timestamp_defaults_keep_their_answer() {
+        for column in [
+            "seen_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
+            // useCurrent(), useCurrentOnUpdate(), and with a precision.
+            "`created_at` timestamp not null default CURRENT_TIMESTAMP",
+            "`updated_at` timestamp not null default CURRENT_TIMESTAMP on update CURRENT_TIMESTAMP",
+            "`created_at` timestamp(6) not null default CURRENT_TIMESTAMP(6)",
+            "placed_at DATETIME NULL DEFAULT NOW()",
+            "touched_at TIMESTAMP NULL ON UPDATE CURRENT_TIMESTAMP",
+            "c INT NOT NULL DEFAULT 0",
+            "s VARCHAR(20) NOT NULL DEFAULT 'x'",
+            "n INT NULL DEFAULT NULL",
+        ] {
+            let sql = format!("ALTER TABLE orders ADD COLUMN {column}");
+            let (case, said, notes) = measured(only(&sql));
+            assert_eq!(
+                (case, said.as_str()),
+                ("add-column", "INSTANT, no rebuild, writes continue"),
+                "{sql}"
+            );
+            // The two exceptions kilit cannot check without the table.
+            assert_eq!(notes.len(), 2, "{sql}: {notes:?}");
+        }
+        assert_eq!(
+            measured(on_shop(
+                "",
+                "ALTER TABLE orders MODIFY amount INT NOT NULL DEFAULT 0"
+            ))
+            .0,
+            "modify-column-default"
+        );
+        assert_eq!(
+            measured(on_shop(
+                "",
+                "ALTER TABLE orders ALTER COLUMN amount SET DEFAULT 0"
+            ))
+            .0,
+            "set-column-default"
+        );
+    }
+
+    #[test]
+    fn a_changed_default_measured_with_literals_is_unknown_with_an_expression() {
+        for (sql, expected) in [
+            (
+                "ALTER TABLE orders MODIFY note VARCHAR(50) NULL DEFAULT (UUID())",
+                "the new definition has the expression default (UUID()), and a MODIFY or \
+                 CHANGE with an expression default has not been measured yet",
+            ),
+            (
+                "ALTER TABLE orders CHANGE note memo VARCHAR(50) NULL DEFAULT (NOW())",
+                "the new definition has the expression default (NOW()), and a MODIFY or \
+                 CHANGE with an expression default has not been measured yet",
+            ),
+            (
+                "ALTER TABLE orders ALTER COLUMN note SET DEFAULT (CONCAT('a', 'b'))",
+                "setting the expression default (CONCAT('a', 'b')) has not been measured yet",
+            ),
+        ] {
+            assert_eq!(reason(on_shop("", sql)), expected, "{sql}");
+        }
+        // A column whose default is an expression already.
+        let setup = "ALTER TABLE orders ADD COLUMN due_on DATE NULL DEFAULT (CURDATE());";
+        for (sql, expected) in [
+            (
+                "ALTER TABLE orders MODIFY due_on DATE NULL",
+                "the statement drops the default (CURDATE()), and changing an expression \
+                 default has not been measured yet",
+            ),
+            (
+                "ALTER TABLE orders MODIFY due_on DATE NULL DEFAULT '2030-01-01'",
+                "the statement changes the default from (CURDATE()) to '2030-01-01', and \
+                 changing an expression default has not been measured yet",
+            ),
+            (
+                "ALTER TABLE orders ALTER COLUMN due_on SET DEFAULT '2030-01-01'",
+                "due_on has the expression default (CURDATE()), and changing it has not been \
+                 measured yet",
+            ),
+            (
+                "ALTER TABLE orders MODIFY due_on DATE NOT NULL DEFAULT (CURDATE())",
+                "the new definition has the expression default (CURDATE()), and a MODIFY or \
+                 CHANGE with an expression default has not been measured yet",
+            ),
+        ] {
+            assert_eq!(reason(on_shop(setup, sql)), expected, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_functional_index_on_lower_of_a_varchar_column_makes_writes_wait() {
+        for sql in [
+            "ALTER TABLE orders ADD INDEX idx_lower_email ((LOWER(email)))",
+            // $table->rawIndex('(lower(email))', 'orders_lower_email_index')
+            "alter table `orders` add index `orders_lower_email_index`((lower(email)))",
+            "alter table `orders` add index `orders_lower_email_index`((lower(`email`)))",
+            "CREATE INDEX idx_lower_email ON orders ((LOWER(email)))",
+        ] {
+            let Prediction::Measured {
+                case,
+                verdict,
+                evidence,
+                notes,
+            } = on_shop("", sql)
+            else {
+                panic!("expected a measured prediction: {sql}");
+            };
+            assert_eq!(case, "add-functional-index", "{sql}");
+            assert_eq!(
+                verdict.to_string(),
+                "INPLACE, no rebuild, writes wait",
+                "{sql}"
+            );
+            assert_eq!(evidence, ["add-functional-index"], "{sql}");
+            assert!(notes.is_empty(), "{sql}: {notes:?}");
+        }
+        let forced = said(&on_shop(
+            "",
+            "ALTER TABLE orders ADD INDEX i ((LOWER(email))), LOCK=NONE",
+        ));
+        assert!(forced.starts_with("fails with error 1846"), "{forced}");
+    }
+
+    #[test]
+    fn functional_index_shapes_the_lab_has_not_measured_are_unknown() {
+        let lowered_only = "has not been measured yet; the lab measured one on LOWER() of a \
+                            VARCHAR column";
+        for (setup, sql, expected) in [
+            (
+                "",
+                "ALTER TABLE orders ADD UNIQUE INDEX u ((LOWER(email)))",
+                "a UNIQUE index on an expression has not been measured yet".to_owned(),
+            ),
+            (
+                "",
+                "ALTER TABLE orders ADD FULLTEXT INDEX f ((LOWER(email)))",
+                "a FULLTEXT index on an expression has not been measured yet".to_owned(),
+            ),
+            (
+                "",
+                "ALTER TABLE orders ADD INDEX i (user_id, (LOWER(email)))",
+                "an index on both columns and expressions has not been measured yet".to_owned(),
+            ),
+            (
+                "",
+                "ALTER TABLE orders ADD INDEX i ((LOWER(email)), (amount * 2))",
+                "an index on several expressions has not been measured yet".to_owned(),
+            ),
+            (
+                "",
+                "ALTER TABLE orders ADD INDEX i ((UPPER(email)))",
+                format!("a functional index on (UPPER(email)) {lowered_only}"),
+            ),
+            (
+                "",
+                "ALTER TABLE orders ADD INDEX i ((LOWER(CONCAT(email, note))))",
+                format!("a functional index on (LOWER(CONCAT(email, note))) {lowered_only}"),
+            ),
+            // Shapes MySQL refuses, by hand on both servers: error 3762, 3758, 3757.
+            (
+                "",
+                "ALTER TABLE orders ADD INDEX i ((note))",
+                format!("a functional index on (note) {lowered_only}"),
+            ),
+            (
+                "",
+                "ALTER TABLE orders ADD INDEX i ((RAND()))",
+                format!("a functional index on (RAND()) {lowered_only}"),
+            ),
+            (
+                "ALTER TABLE orders ADD COLUMN body TEXT NULL;",
+                "ALTER TABLE orders ADD INDEX i ((LOWER(body)))",
+                "body is TEXT, and the lab measured a functional index on LOWER() of a VARCHAR \
+                 column only"
+                    .to_owned(),
+            ),
+            (
+                "",
+                "ALTER TABLE orders ADD INDEX i ((LOWER(missing)))",
+                "orders has no column missing, as far as kilit can tell".to_owned(),
+            ),
+        ] {
+            assert_eq!(reason(on_shop(setup, sql)), expected, "{sql}");
+        }
+        // Without the table kilit cannot see the column's type.
+        assert_eq!(
+            reason(only("ALTER TABLE orders ADD INDEX i ((LOWER(email)))")),
+            "kilit does not know this table, so it cannot tell whether email is a VARCHAR \
+             column, the only kind the lab measured a functional index on"
+        );
+        let predictions = predictions_with(
+            SHOP,
+            "ALTER TABLE orders CONVERT TO CHARACTER SET latin1;
+             ALTER TABLE orders ADD INDEX i ((LOWER(email)));",
+        );
+        assert!(
+            reason(predictions[1].clone()).starts_with("kilit lost track of this table (line 1")
+        );
+    }
+
+    #[test]
+    fn indexes_on_columns_keep_their_answers() {
+        let continues = "INPLACE, no rebuild, writes continue";
+        for (sql, case, verdict) in [
+            (
+                "ALTER TABLE orders ADD INDEX i (note(10))",
+                "add-index",
+                continues,
+            ),
+            (
+                "ALTER TABLE orders ADD INDEX i (`note`(10))",
+                "add-index",
+                continues,
+            ),
+            (
+                "CREATE INDEX i ON orders (note(10))",
+                "add-index",
+                continues,
+            ),
+            (
+                "ALTER TABLE orders ADD INDEX i (amount)",
+                "add-index",
+                continues,
+            ),
+            (
+                "ALTER TABLE orders ADD INDEX i (user_id, amount)",
+                "add-index",
+                continues,
+            ),
+            (
+                "ALTER TABLE orders ADD UNIQUE INDEX u (email)",
+                "add-unique-index",
+                continues,
+            ),
+            (
+                "ALTER TABLE orders ADD FULLTEXT INDEX f (note)",
+                "add-fulltext-index",
+                "INPLACE, rebuilds the table, writes wait",
+            ),
+        ] {
+            for prediction in [only(sql), on_shop("", sql)] {
+                let (found, said, _) = measured(prediction);
+                assert_eq!((found, said.as_str()), (case, verdict), "{sql}");
+            }
         }
     }
 

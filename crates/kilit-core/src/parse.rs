@@ -675,7 +675,10 @@ fn foreign_key_action(action: ReferentialAction) -> ForeignKeyAction {
 
 /// Session variables become `Set`. Global and user variables in the same
 /// statement are skipped: they do not change how this session runs DDL.
-/// A statement with no session variable at all becomes `Other`.
+/// The exception is a global `sql_log_bin`, which MySQL refuses: kilit
+/// keeps it, so that the statements after it are not judged as if nothing
+/// had touched the binary log. A statement with none of these becomes
+/// `Other`.
 fn set_statement(set: ast::Set) -> StatementKind {
     let assignments: Vec<(Option<ContextModifier>, ObjectName, Expr)> = match set {
         ast::Set::SingleAssignment {
@@ -694,9 +697,17 @@ fn set_statement(set: ast::Set) -> StatementKind {
     let variables: Vec<Variable> = assignments
         .into_iter()
         .filter_map(|(scope, name, value)| {
+            let (name, global) = match session_variable(scope, &name) {
+                Some(name) => (name, false),
+                None if global_variable(scope, &name).as_deref() == Some("sql_log_bin") => {
+                    ("sql_log_bin".to_owned(), true)
+                }
+                None => return None,
+            };
             Some(Variable {
-                name: session_variable(scope, &name)?,
+                name,
                 value: value.to_string(),
+                global,
             })
         })
         .collect();
@@ -727,6 +738,15 @@ fn session_variable(scope: Option<ContextModifier>, name: &ObjectName) -> Option
         return None;
     }
     Some(name.to_owned())
+}
+
+/// The lowercase name of a global variable: `GLOBAL x` or `@@global.x`.
+fn global_variable(scope: Option<ContextModifier>, name: &ObjectName) -> Option<String> {
+    let name = object_name(name).to_lowercase();
+    if scope == Some(ContextModifier::Global) {
+        return Some(name);
+    }
+    name.strip_prefix("@@global.").map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -824,6 +844,38 @@ mod tests {
         );
         assert_eq!(updated.default.as_deref(), Some("CURRENT_TIMESTAMP"));
         assert_eq!(updated.on_update.as_deref(), Some("CURRENT_TIMESTAMP"));
+    }
+
+    #[test]
+    fn expression_defaults_keep_their_parentheses() {
+        // MySQL takes an expression as a default only in parentheses, so
+        // they tell it from CURRENT_TIMESTAMP and from a literal.
+        for (sql, default) in [
+            (
+                "ALTER TABLE t ADD a TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP",
+                "CURRENT_TIMESTAMP",
+            ),
+            (
+                "ALTER TABLE t ADD a TIMESTAMP NULL DEFAULT (CURRENT_TIMESTAMP)",
+                "(CURRENT_TIMESTAMP)",
+            ),
+            (
+                "ALTER TABLE t ADD a CHAR(36) NOT NULL DEFAULT (UUID())",
+                "(UUID())",
+            ),
+            (
+                "ALTER TABLE t ADD a DOUBLE NOT NULL DEFAULT ( rand( ) )",
+                "(rand())",
+            ),
+            (
+                "ALTER TABLE t ADD a DATE NOT NULL DEFAULT (current_date + interval 1 year)",
+                "(current_date + INTERVAL 1 YEAR)",
+            ),
+            ("ALTER TABLE t ADD a INT NOT NULL DEFAULT (0)", "(0)"),
+            ("ALTER TABLE t ADD a INT NOT NULL DEFAULT 0", "0"),
+        ] {
+            assert_eq!(added_column(sql).default.as_deref(), Some(default), "{sql}");
+        }
     }
 
     #[test]
@@ -945,6 +997,40 @@ mod tests {
     }
 
     #[test]
+    fn an_expression_in_an_index_keeps_its_parentheses() {
+        // sqlparser reads the prefix `note(10)` as a call of `note`; only an
+        // expression starts with a parenthesis, as MySQL requires.
+        for (sql, columns) in [
+            (
+                "ALTER TABLE t ADD INDEX i ((LOWER(email)))",
+                vec!["(LOWER(email))"],
+            ),
+            (
+                "alter table `t` add index `i`((lower(email)))",
+                vec!["(lower(email))"],
+            ),
+            (
+                "CREATE INDEX i ON t ((LOWER(email)))",
+                vec!["(LOWER(email))"],
+            ),
+            ("ALTER TABLE t ADD INDEX i (note(10))", vec!["note(10)"]),
+            ("ALTER TABLE t ADD INDEX i ((note(10)))", vec!["(note(10))"]),
+            (
+                "ALTER TABLE t ADD INDEX i (user_id, (LOWER(email)))",
+                vec!["user_id", "(LOWER(email))"],
+            ),
+        ] {
+            let StatementKind::Alter(alter) = kind(sql) else {
+                panic!("expected an ALTER: {sql}");
+            };
+            let [Operation::AddIndex(index)] = alter.operations.as_slice() else {
+                panic!("expected ADD INDEX: {sql}");
+            };
+            assert_eq!(index.columns, columns, "{sql}");
+        }
+    }
+
+    #[test]
     fn reads_primary_keys() {
         assert_eq!(
             alter("ALTER TABLE t DROP PRIMARY KEY, ADD PRIMARY KEY (id, user_id)").operations,
@@ -1038,6 +1124,7 @@ mod tests {
             variables: vec![Variable {
                 name: "foreign_key_checks".into(),
                 value: "0".into(),
+                global: false,
             }],
         };
         for sql in [
@@ -1056,10 +1143,12 @@ mod tests {
                     Variable {
                         name: "foreign_key_checks".into(),
                         value: "OFF".into(),
+                        global: false,
                     },
                     Variable {
                         name: "unique_checks".into(),
                         value: "0".into(),
+                        global: false,
                     },
                 ]
             }
@@ -1075,6 +1164,7 @@ mod tests {
                 variables: vec![Variable {
                     name: "foreign_key_checks".into(),
                     value: "0".into(),
+                    global: false,
                 }]
             }
         );
@@ -1090,6 +1180,39 @@ mod tests {
         ] {
             assert_eq!(kind(sql), StatementKind::Other, "{sql}");
         }
+    }
+
+    #[test]
+    fn a_global_sql_log_bin_is_kept() {
+        // MySQL refuses it; kilit keeps it so the statements after it are
+        // not judged as if nothing had touched the binary log.
+        for sql in [
+            "SET GLOBAL sql_log_bin = 0",
+            "SET @@global.sql_log_bin = 0",
+            "SET @@GLOBAL.SQL_LOG_BIN = 0",
+        ] {
+            assert_eq!(
+                kind(sql),
+                StatementKind::Set {
+                    variables: vec![Variable {
+                        name: "sql_log_bin".into(),
+                        value: "0".into(),
+                        global: true,
+                    }]
+                },
+                "{sql}"
+            );
+        }
+        assert_eq!(
+            kind("SET SESSION sql_log_bin = OFF"),
+            StatementKind::Set {
+                variables: vec![Variable {
+                    name: "sql_log_bin".into(),
+                    value: "OFF".into(),
+                    global: false,
+                }]
+            }
+        );
     }
 
     #[test]

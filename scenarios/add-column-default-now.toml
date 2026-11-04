@@ -1,0 +1,2 @@
+title = "Add a column with DEFAULT (NOW())"
+operation = "ADD COLUMN placed_at DATETIME NOT NULL DEFAULT (NOW())"

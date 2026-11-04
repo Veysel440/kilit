@@ -300,6 +300,48 @@ fn a_fulltext_index_makes_writes_wait() {
 }
 
 #[test]
+fn a_uuid_or_rand_default_fails_while_the_binary_log_is_on() {
+    // $table->uuid('token')->default(new Expression('(UUID())'));
+    assert_eq!(
+        on_mysql_84(
+            "",
+            "alter table `orders` add `token` char(36) not null default (UUID());
+             alter table `orders` add `weight` double not null default (RAND());"
+        ),
+        ["fails with error 1674", "fails with error 1674"]
+    );
+}
+
+#[test]
+fn the_other_measured_expression_defaults_copy_the_table() {
+    // $table->date('due_on')->useCurrent(); and DB::raw() defaults.
+    assert_eq!(
+        on_mysql_84(
+            "",
+            "alter table `orders` add `due_on` date not null default (CURDATE());
+             alter table `orders` add `placed_at` datetime not null default (NOW());
+             alter table `orders` add `seen_at` timestamp null default (CURRENT_TIMESTAMP);
+             alter table `orders` add `expires_on` date not null \
+             default (CURRENT_DATE + INTERVAL 1 YEAR);
+             alter table `orders` add `tags` json not null default (JSON_ARRAY());"
+        ),
+        ["COPY, copies every row, writes wait"; 5]
+    );
+}
+
+#[test]
+fn a_functional_index_makes_writes_wait() {
+    // $table->rawIndex('(lower(email))', 'users_lower_email_index');
+    assert_eq!(
+        on_mysql_84(
+            LARAVEL_TABLES,
+            "alter table `users` add index `users_lower_email_index`((lower(email)))"
+        ),
+        ["INPLACE, no rebuild, writes wait"]
+    );
+}
+
+#[test]
 fn forcing_inplace_on_a_new_column_rebuilds_the_table() {
     assert_eq!(
         on_mysql_84(

@@ -1,0 +1,3 @@
+title = "Add a column with DEFAULT (CURDATE())"
+# What Laravel's $table->date('due_on')->useCurrent() writes.
+operation = "ADD COLUMN due_on DATE NOT NULL DEFAULT (CURDATE())"

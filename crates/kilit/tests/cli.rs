@@ -228,6 +228,74 @@ fn indexes_on_the_table_change_the_answer() {
 }
 
 #[test]
+fn expression_defaults_and_a_functional_index_get_their_measured_answers() {
+    // $table->uuid('token')->default(new Expression('(UUID())'));
+    // $table->rawIndex('(lower(email))', 'users_lower_email_index');
+    // $table->date('due_on')->useCurrent();
+    let schema = example("mysql-schema.sql");
+    let schema = schema.to_str().unwrap();
+    let sql = "alter table `orders` add `token` char(36) not null default (UUID());
+               alter table `users` add index `users_lower_email_index`((lower(email)));
+               alter table `orders` add `due_on` date not null default (CURDATE());";
+    for strict in [false, true] {
+        let mut args = vec!["check", "--schema", schema];
+        if strict {
+            args.push("--strict");
+        }
+        let output = kilit(&args, sql);
+        let text = stdout(&output);
+        for answer in [
+            "  line 1: alter table `orders` add `token` char(36) not null default (UUID())\n\
+             \x20   fails with error 1674\n\
+             \x20   measured as add-column-binlog-unsafe-default (2 lab scenarios)\n\
+             \x20   - assumes the binary log is on, the MySQL default\n",
+            "    INPLACE, no rebuild, writes wait\n\
+             \x20   measured as add-functional-index (1 lab scenario)\n\
+             \x20 line 3:",
+            "    COPY, copies every row, writes wait\n\
+             \x20   measured as add-column-expression-default (5 lab scenarios)\n\
+             \x20   - assumes the binary log is on, the MySQL default\n",
+        ] {
+            assert!(text.contains(answer), "{text}");
+        }
+        assert!(
+            text.ends_with("\n3 statements: 1 fails, 2 make writes wait\n"),
+            "{text}"
+        );
+        // One fails and two make writes wait: 1, with --strict or without.
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+
+        args.extend(["--format", "json"]);
+        let output = kilit(&args, sql);
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let statements = json["sources"][0]["statements"].as_array().unwrap();
+        let answers: Vec<(&str, &str)> = statements
+            .iter()
+            .map(|statement| {
+                (
+                    statement["impact"].as_str().unwrap(),
+                    statement["case"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            answers,
+            [
+                ("fails", "add-column-binlog-unsafe-default"),
+                ("writes_wait", "add-functional-index"),
+                ("writes_wait", "add-column-expression-default"),
+            ]
+        );
+        assert_eq!(statements[0]["error"], 1674);
+        assert_eq!(
+            statements[2]["notes"][0],
+            "assumes the binary log is on, the MySQL default"
+        );
+        assert_eq!(output.status.code(), Some(1));
+    }
+}
+
+#[test]
 fn a_table_created_here_is_never_in_the_metadata_lock_warning() {
     // The ALTER fails, but no transaction can be using order_notes yet, so it
     // waits for nothing before it fails.

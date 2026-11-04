@@ -35,6 +35,7 @@ pub enum StatementKind {
     RenameTable { renames: Vec<Rename> },
     /// `SET` of session variables, such as `SET foreign_key_checks = 0`.
     /// They change how the following statements of the same session run.
+    /// A global `sql_log_bin` is kept too: see [`Variable::global`].
     Set { variables: Vec<Variable> },
     /// A statement kilit reads but does not analyze, such as `INSERT`, or a
     /// `SET` that does not touch the session (`SET GLOBAL`, `SET @x`).
@@ -77,13 +78,17 @@ pub struct Rename {
     pub to: String,
 }
 
-/// A session variable set by `SET`.
+/// A session variable set by `SET`, or the global `sql_log_bin`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Variable {
     /// In lowercase, without `@@session.`: `foreign_key_checks`.
     pub name: String,
     /// As written: `0`, `OFF`.
     pub value: String,
+    /// `SET GLOBAL`, kept for `sql_log_bin` only: MySQL refuses it, as
+    /// `sql_log_bin` belongs to the session, so kilit cannot tell what the
+    /// statements after it run with.
+    pub global: bool,
 }
 
 /// An `ALTER TABLE` statement.
@@ -334,6 +339,16 @@ impl fmt::Display for DataType {
             DataType::VarChar { length } => write!(f, "VARCHAR({length})"),
             DataType::Text(name) | DataType::Other(name) => f.write_str(name),
         }
+    }
+}
+
+/// `foreign_key_checks = 0`, or `GLOBAL sql_log_bin = 0`.
+impl fmt::Display for Variable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.global {
+            f.write_str("GLOBAL ")?;
+        }
+        write!(f, "{} = {}", self.name, self.value)
     }
 }
 

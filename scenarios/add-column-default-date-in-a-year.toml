@@ -1,0 +1,2 @@
+title = "Add a column with DEFAULT (CURRENT_DATE + INTERVAL 1 YEAR)"
+operation = "ADD COLUMN expires_on DATE NOT NULL DEFAULT (CURRENT_DATE + INTERVAL 1 YEAR)"

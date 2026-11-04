@@ -1,0 +1,2 @@
+title = "Add a column with DEFAULT (JSON_ARRAY())"
+operation = "ADD COLUMN tags JSON NOT NULL DEFAULT (JSON_ARRAY())"

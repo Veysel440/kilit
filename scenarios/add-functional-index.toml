@@ -1,0 +1,2 @@
+title = "Add a functional index"
+operation = "ADD INDEX idx_lower_email ((LOWER(email)))"

@@ -1,0 +1,2 @@
+title = "Add a column with DEFAULT (RAND())"
+operation = "ADD COLUMN weight DOUBLE NOT NULL DEFAULT (RAND())"

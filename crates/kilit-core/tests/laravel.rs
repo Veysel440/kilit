@@ -315,6 +315,7 @@ fn foreign_key_checks() {
             variables: vec![Variable {
                 name: "foreign_key_checks".into(),
                 value: "0".into(),
+                global: false,
             }],
         }
     );

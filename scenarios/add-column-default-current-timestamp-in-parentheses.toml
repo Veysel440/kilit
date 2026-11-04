@@ -1,0 +1,4 @@
+title = "Add a column with DEFAULT (CURRENT_TIMESTAMP), in parentheses"
+# The same column as add-column-current-timestamp, with the default in
+# parentheses and without ON UPDATE.
+operation = "ADD COLUMN seen_at TIMESTAMP NULL DEFAULT (CURRENT_TIMESTAMP)"

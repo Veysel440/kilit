@@ -143,6 +143,8 @@ Both versions behave the same in every scenario.
 | Add a column¹<br>`$table->string('coupon')->nullable()` | INSTANT | continue |
 | ↳ when the table has a FULLTEXT index | COPY, copies every row | **wait** |
 | ↳ after 64 instant column changes | INPLACE, rebuilds the table | continue |
+| ↳ with `DEFAULT (UUID())` or `DEFAULT (RAND())` | fails, error 1674 (binary log on) | – |
+| ↳ with `DEFAULT (NOW())`, `(CURRENT_TIMESTAMP)`, `(CURDATE())`, `(CURRENT_DATE + INTERVAL 1 YEAR)` or `(JSON_ARRAY())`<br>`$table->date('due_on')->useCurrent()` | COPY, copies every row | **wait** |
 | Drop a column<br>`$table->dropColumn('note')` | INSTANT | continue |
 | ↳ when the table has a FULLTEXT index | COPY, copies every row | **wait** |
 | ↳ when the column is in an index, alone or with others, or has a UNIQUE index of its own, and the table has no FULLTEXT index<br>`$table->index('amount')` | INPLACE, rebuilds the table | continue |
@@ -151,6 +153,7 @@ Both versions behave the same in every scenario.
 | Rename a column<br>`$table->renameColumn('note', 'memo')` | INSTANT | continue |
 | Set a column default<br>`ALTER COLUMN … SET DEFAULT` (raw SQL) | INSTANT | continue |
 | Add an index<br>`$table->index('amount')` | INPLACE | continue |
+| ↳ on `LOWER()` of a VARCHAR column (functional index)<br>`$table->rawIndex('(lower(email))', 'users_lower_email_index')` | INPLACE | **wait** |
 | Add a unique index<br>`$table->unique('email')` | INPLACE | continue |
 | ↳ when values repeat | fails, error 1062 | – |
 | Add a FULLTEXT index<br>`$table->fullText('note')` | INPLACE, rebuilds the table | **wait** |
