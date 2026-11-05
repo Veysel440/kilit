@@ -198,7 +198,9 @@ fn change(table: &mut Table, operation: &Operation) -> Result<(), String> {
                     .retain(|column| !same(indexed_column(column), name));
             }
             table.indexes.retain(|index| !index.columns.is_empty());
-            table.primary_key.retain(|column| !same(column, name));
+            table
+                .primary_key
+                .retain(|column| !same(indexed_column(column), name));
         }
         Operation::ModifyColumn { column, position } => {
             replace(table, &column.name, column, position.as_ref())?;
@@ -304,17 +306,15 @@ fn insert_at(table: &Table, position: Option<&Position>, default: usize) -> Resu
 }
 
 fn rename_references(table: &mut Table, from: &str, to: &str) {
-    for index in &mut table.indexes {
-        for column in &mut index.columns {
-            if same(indexed_column(column), from) {
-                // Keep a prefix length such as `(10)`.
-                *column = format!("{to}{}", &column[indexed_column(column).len()..]);
-            }
-        }
-    }
-    for column in &mut table.primary_key {
-        if same(column, from) {
-            to.clone_into(column);
+    let entries = table
+        .indexes
+        .iter_mut()
+        .flat_map(|index| &mut index.columns)
+        .chain(&mut table.primary_key);
+    for entry in entries {
+        if same(indexed_column(entry), from) {
+            // Keep a prefix length such as `(10)`.
+            *entry = format!("{to}{}", &entry[indexed_column(entry).len()..]);
         }
     }
     for key in &mut table.foreign_keys {
@@ -327,15 +327,12 @@ fn rename_references(table: &mut Table, from: &str, to: &str) {
 }
 
 /// MySQL indexes a foreign key's columns when no index starts with them,
-/// and names the index after the constraint.
+/// and names the index after the constraint. A prefix such as `note(10)`
+/// does not count: MySQL adds its own index then.
 fn index_foreign_key(table: &mut Table, key: &ForeignKey) {
     let starts_with_key = |columns: &[String]| {
         columns.len() >= key.columns.len()
-            && key
-                .columns
-                .iter()
-                .zip(columns)
-                .all(|(a, b)| same(a, indexed_column(b)))
+            && key.columns.iter().zip(columns).all(|(a, b)| same(a, b))
     };
     let indexed = starts_with_key(&table.primary_key)
         || table.indexes.iter().any(|index| {
@@ -425,8 +422,11 @@ impl Table {
             .unwrap_or_else(|| !self.in_primary_key(&column.name))
     }
 
+    /// Whether `column` is in the primary key, also with a prefix length.
     pub(crate) fn in_primary_key(&self, column: &str) -> bool {
-        self.primary_key.iter().any(|key| same(key, column))
+        self.primary_key
+            .iter()
+            .any(|entry| same(indexed_column(entry), column))
     }
 
     /// The table's FULLTEXT index, if it has one.
@@ -502,6 +502,30 @@ impl Table {
 /// Whether the column definition names a character set or a collation.
 pub(crate) fn names_text_settings(column: &Column) -> bool {
     column.charset.is_some() || column.collation.is_some()
+}
+
+/// `template` written three ways, with each `{name}` in it as it is, in
+/// backticks as mysqldump writes it, and in capitals: the same tables for
+/// MySQL, which compares column and index names without regard to case.
+#[cfg(test)]
+pub(crate) fn three_ways(template: &str) -> [String; 3] {
+    let write = |name: fn(&str) -> String| {
+        let mut written = String::new();
+        let mut rest = template;
+        while let Some((before, after)) = rest.split_once('{') {
+            let (inside, after) = after.split_once('}').expect("a closing brace");
+            written.push_str(before);
+            written.push_str(&name(inside));
+            rest = after;
+        }
+        written.push_str(rest);
+        written
+    };
+    [
+        write(str::to_owned),
+        write(|name| format!("`{name}`")),
+        write(str::to_uppercase),
+    ]
 }
 
 #[cfg(test)]
@@ -735,5 +759,137 @@ mod tests {
         let table = known(&schema, "t");
         let nullable: Vec<bool> = table.columns.iter().map(|c| table.is_nullable(c)).collect();
         assert_eq!(nullable, [false, true, false]);
+    }
+
+    /// Hand-written tables with a prefix index, a prefix primary key and a
+    /// foreign key, for [`three_ways`].
+    const PREFIXES: &str = "
+        CREATE TABLE parents ({code} VARCHAR(50) NOT NULL, PRIMARY KEY ({code}));
+        CREATE TABLE orders (
+            {id} BIGINT UNSIGNED NOT NULL,
+            {user_id} BIGINT UNSIGNED NOT NULL,
+            {amount} INT NOT NULL,
+            {note} VARCHAR(50) NULL,
+            PRIMARY KEY ({id}),
+            KEY {note} ({note}(10)),
+            KEY {ix_amount} ({amount}),
+            CONSTRAINT {fk_user} FOREIGN KEY ({user_id}) REFERENCES parents ({code})
+        );
+        CREATE TABLE codes (
+            {code} VARCHAR(50) NOT NULL,
+            {label} VARCHAR(20) NULL,
+            PRIMARY KEY ({code}(10))
+        );";
+
+    /// Index names in lowercase, to compare the three ways.
+    fn index_names(table: &Table) -> Vec<String> {
+        table
+            .indexes
+            .iter()
+            .map(|index| index.name.clone().unwrap_or_default().to_lowercase())
+            .collect()
+    }
+
+    #[test]
+    fn a_schema_dump_gives_the_same_tables_in_any_quotes_or_case() {
+        for dump in three_ways(PREFIXES) {
+            let schema = Schema::from_sql(&dump);
+            let orders = known(&schema, "orders");
+            let codes = known(&schema, "codes");
+            // A prefix names its column without quotes.
+            let entries: Vec<String> = orders.indexes[0]
+                .columns
+                .iter()
+                .map(|entry| entry.to_lowercase())
+                .collect();
+            assert_eq!(entries, ["note(10)"], "{dump}");
+            assert!(orders.column("note").is_some(), "{dump}");
+            assert_eq!(
+                orders.index_on("note").map(|name| name.to_lowercase()),
+                Some("note".to_owned()),
+                "{dump}"
+            );
+            assert_eq!(
+                orders.index_on("amount").map(|name| name.to_lowercase()),
+                Some("ix_amount".to_owned()),
+                "{dump}"
+            );
+            assert_eq!(orders.index_on("id").as_deref(), Some("PRIMARY"), "{dump}");
+            assert!(orders.foreign_key_on("user_id").is_some(), "{dump}");
+            // MySQL made an index for the foreign key.
+            assert_eq!(
+                index_names(&orders),
+                ["note", "ix_amount", "fk_user"],
+                "{dump}"
+            );
+            // A prefix of the primary key: the column is in it, and NOT NULL.
+            assert!(codes.in_primary_key("code"), "{dump}");
+            assert_eq!(codes.index_on("code").as_deref(), Some("PRIMARY"), "{dump}");
+            assert!(!codes.is_nullable(codes.column("code").unwrap()), "{dump}");
+            assert!(codes.is_nullable(codes.column("label").unwrap()), "{dump}");
+        }
+    }
+
+    #[test]
+    fn changes_find_the_names_of_a_schema_dump_in_any_quotes_or_case() {
+        // Each change names the columns and indexes in lowercase, without
+        // quotes. MySQL 8.0.46 and 8.4.13 name an index added without a name
+        // after its first column, prefix or not, and add their own index
+        // for a foreign key that only a prefix covers (run by hand).
+        let changes = "
+            ALTER TABLE orders ADD INDEX (note(5));
+            ALTER TABLE orders DROP INDEX note;
+            ALTER TABLE orders RENAME COLUMN note TO memo;
+            ALTER TABLE orders DROP FOREIGN KEY fk_user;
+            ALTER TABLE orders ADD CONSTRAINT fk_amount FOREIGN KEY (amount) REFERENCES parents (code);
+            ALTER TABLE orders ADD CONSTRAINT fk_memo FOREIGN KEY (memo) REFERENCES parents (code);
+            ALTER TABLE codes RENAME COLUMN code TO sku;";
+        for dump in three_ways(PREFIXES) {
+            let mut schema = Schema::from_sql(&dump);
+            for statement in parse(changes) {
+                schema.apply(&statement);
+            }
+            assert_eq!(schema.lost().count(), 0, "{dump}");
+            let orders = known(&schema, "orders");
+            assert_eq!(
+                index_names(&orders),
+                ["ix_amount", "fk_user", "note_2", "fk_memo"],
+                "{dump}"
+            );
+            assert_eq!(orders.indexes[2].columns, ["memo(5)"], "{dump}");
+            let keys: Vec<String> = orders
+                .foreign_keys
+                .iter()
+                .map(|key| key.name.clone().unwrap_or_default())
+                .collect();
+            assert_eq!(keys, ["fk_amount", "fk_memo"], "{dump}");
+            let codes = known(&schema, "codes");
+            assert_eq!(codes.primary_key, ["sku(10)"], "{dump}");
+            assert!(codes.in_primary_key("sku"), "{dump}");
+
+            // Dropping the columns takes them out of the indexes and keys.
+            for statement in
+                parse("ALTER TABLE orders DROP COLUMN memo; ALTER TABLE codes DROP COLUMN sku;")
+            {
+                schema.apply(&statement);
+            }
+            assert_eq!(
+                index_names(&known(&schema, "orders")),
+                ["ix_amount", "fk_user"],
+                "{dump}"
+            );
+            assert!(known(&schema, "codes").primary_key.is_empty(), "{dump}");
+        }
+    }
+
+    #[test]
+    fn a_table_name_in_another_case_is_the_same_table() {
+        // Pinned as it is: kilit compares table names in lowercase, as MySQL
+        // does with lower_case_table_names = 1 or 2. With 0, the default on
+        // Linux, MySQL 8.0.46 and 8.4.13 refuse ALTER TABLE ORDERS on orders
+        // with error 1146 (run by hand). Table name case is a later step.
+        let schema = after("ALTER TABLE ORDERS ADD COLUMN coupon INT NULL");
+        assert!(known(&schema, "orders").column("coupon").is_some());
+        assert!(matches!(schema.table("Orders"), TableState::Known(_)));
     }
 }

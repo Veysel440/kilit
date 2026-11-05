@@ -1444,6 +1444,7 @@ mod tests {
     use crate::knowledge::Knowledge;
     use crate::parse::parse;
     use crate::results::Writes;
+    use crate::schema::three_ways;
     use crate::statement::Algorithm;
 
     /// Laravel's tables, as `php artisan schema:dump` writes them.
@@ -3019,6 +3020,138 @@ mod tests {
                 .collect();
             assert!(told[0].starts_with("fails with error 1845"), "{server}");
             assert_eq!(told[1], "COPY, copies every row, writes wait", "{server}");
+        }
+    }
+
+    #[test]
+    fn a_prefix_index_in_a_schema_dump_counts_for_its_column() {
+        // As mysqldump and SHOW CREATE TABLE write it, with backticks.
+        let dump = "CREATE TABLE `orders` (
+              `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+              `note` varchar(50) DEFAULT NULL,
+              PRIMARY KEY (`id`),
+              KEY `orders_note_index` (`note`(10))
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;";
+        let on_dump = |sql| predictions_with(dump, sql).pop().unwrap();
+        let (case, verdict, notes) = measured(on_dump("ALTER TABLE orders DROP COLUMN note"));
+        assert_eq!(
+            (case, verdict.as_str()),
+            (
+                "drop-column",
+                "INPLACE, rebuilds the table, writes continue"
+            )
+        );
+        assert_eq!(notes, ["note is in the index orders_note_index"]);
+        let (case, verdict, notes) = measured(on_dump(
+            "ALTER TABLE orders MODIFY note VARCHAR(50) COLLATE utf8mb4_bin NULL",
+        ));
+        assert_eq!(
+            (case, verdict.as_str()),
+            (
+                "change-column-collation",
+                "COPY, copies every row, writes wait"
+            )
+        );
+        assert_eq!(notes[1], "note is in the index orders_note_index");
+    }
+
+    /// Hand-written tables for [`three_ways`]: a prefix index, a plain one,
+    /// a functional one, a generated column, a foreign key, a FULLTEXT index
+    /// and a prefix in a primary key.
+    const NAMES_THREE_WAYS: &str = "
+        CREATE TABLE users ({id} BIGINT UNSIGNED NOT NULL, PRIMARY KEY ({id}))
+            DEFAULT CHARSET=utf8mb4;
+        CREATE TABLE orders (
+            {id} BIGINT UNSIGNED NOT NULL,
+            {user_id} BIGINT UNSIGNED NOT NULL,
+            {amount} INT NOT NULL,
+            {amount2} INT AS ({amount} * 2) VIRTUAL,
+            {email} VARCHAR(255) NULL,
+            {note} VARCHAR(50) NULL,
+            PRIMARY KEY ({id}),
+            KEY {note} ({note}(10)),
+            KEY {ix_amount} ({amount}),
+            KEY {f_email} ((lower({email}))),
+            CONSTRAINT {fk_user} FOREIGN KEY ({user_id}) REFERENCES users ({id})
+        ) DEFAULT CHARSET=utf8mb4;
+        CREATE TABLE posts ({id} INT NOT NULL, {title} VARCHAR(100) NULL, {body} TEXT NULL,
+            PRIMARY KEY ({id}), FULLTEXT KEY {ft_body} ({body})) DEFAULT CHARSET=utf8mb4;
+        CREATE TABLE codes ({code} VARCHAR(50) NOT NULL, {label} VARCHAR(20) NULL,
+            PRIMARY KEY ({code}(10))) DEFAULT CHARSET=utf8mb4;";
+
+    #[test]
+    fn answers_do_not_depend_on_quotes_or_case_in_the_schema_dump() {
+        // Each name lookup, with the tables written as they are, in
+        // backticks and in capitals. A reason names an index or a key as
+        // the dump writes it, so the comparison ignores case.
+        for (sql, expected) in [
+            // The index a column is in: a prefix, then the collation.
+            (
+                "ALTER TABLE orders DROP COLUMN note",
+                "INPLACE, rebuilds the table, writes continue",
+            ),
+            (
+                "ALTER TABLE orders MODIFY note VARCHAR(50) COLLATE utf8mb4_bin NULL",
+                "COPY, copies every row, writes wait",
+            ),
+            // The column itself.
+            (
+                "ALTER TABLE orders MODIFY note VARCHAR(60) NULL",
+                "INPLACE, no rebuild, writes continue",
+            ),
+            // An expression in an index, and a generated column.
+            (
+                "ALTER TABLE orders DROP COLUMN email",
+                "unknown: email is used by the functional index f_email, and dropping such \
+                 a column has not been measured yet",
+            ),
+            (
+                "ALTER TABLE orders DROP COLUMN amount",
+                "unknown: the generated column amount2 uses amount, and dropping such a \
+                 column has not been measured yet",
+            ),
+            // A foreign key, from both ends.
+            (
+                "ALTER TABLE orders MODIFY user_id INT UNSIGNED NOT NULL",
+                "fails with error 3780",
+            ),
+            (
+                "ALTER TABLE users DROP COLUMN id",
+                "unknown: id is referenced by the foreign key fk_user on orders, and \
+                 dropping such a column has not been measured yet",
+            ),
+            // The column of a functional index.
+            (
+                "ALTER TABLE orders ADD INDEX f2 ((LOWER(email)))",
+                "INPLACE, no rebuild, writes wait",
+            ),
+            // A FULLTEXT index that stays, and one that goes with its column.
+            (
+                "ALTER TABLE posts ADD COLUMN c INT NULL",
+                "COPY, copies every row, writes wait",
+            ),
+            (
+                "ALTER TABLE posts DROP COLUMN body",
+                "INPLACE, rebuilds the table, writes continue",
+            ),
+            // A prefix in the primary key: the column is in it, and NOT NULL.
+            (
+                "ALTER TABLE codes DROP COLUMN code",
+                "unknown: code is the primary key, and dropping such a column has not been \
+                 measured yet",
+            ),
+            (
+                "ALTER TABLE codes MODIFY code VARCHAR(50)",
+                "INSTANT, no rebuild, writes continue",
+            ),
+        ] {
+            for dump in three_ways(NAMES_THREE_WAYS) {
+                let told = said(&predictions_with(&dump, sql).pop().unwrap());
+                assert!(
+                    told.to_lowercase().starts_with(&expected.to_lowercase()),
+                    "{sql}: {told}\n{dump}"
+                );
+            }
         }
     }
 

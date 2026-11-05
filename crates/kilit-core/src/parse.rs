@@ -1002,11 +1002,16 @@ fn position(position: MySQLColumnPosition) -> Position {
     }
 }
 
-/// A plain column keeps its name without quotes; prefixes and expressions
-/// (`email(10)`, `(lower(email))`) are kept as the parser prints them.
+/// A plain column keeps its name without quotes, and so does a prefix:
+/// `` `email`(10) ``, as a schema dump writes it, becomes `email(10)`. An
+/// expression such as `(lower(email))` is kept as the parser prints it.
 fn index_column(column: &IndexColumn) -> String {
     match &column.column.expr {
         Expr::Identifier(ident) => ident.value.clone(),
+        Expr::Function(function) => match prefix(function) {
+            Some((column, length)) => format!("{}({length})", column.value),
+            None => function.to_string(),
+        },
         other => other.to_string(),
     }
 }
@@ -1408,6 +1413,37 @@ mod tests {
             };
             assert_eq!(index.columns, columns, "{sql}");
         }
+    }
+
+    #[test]
+    fn a_prefix_names_its_column_without_quotes() {
+        // As a schema dump writes it, and in other spellings MySQL 8.0.46 and
+        // 8.4.13 accept (run by hand).
+        let Operation::AddIndex(index) =
+            operation("ALTER TABLE k ADD INDEX k7 (`note`(10), NOTE(5), note (8), `note`(010))")
+        else {
+            panic!("expected ADD INDEX");
+        };
+        assert_eq!(
+            index.columns,
+            ["note(10)", "NOTE(5)", "note(8)", "note(010)"]
+        );
+        let table = created(
+            "CREATE TABLE `codes` (
+               `code` varchar(50) NOT NULL,
+               `label` varchar(20) DEFAULT NULL,
+               PRIMARY KEY (`code`(10)),
+               KEY `codes_label_index` (`label`(5))
+             )",
+        );
+        assert_eq!(table.primary_key, ["code(10)"]);
+        assert_eq!(table.indexes[0].columns, ["label(5)"]);
+        // An expression keeps its quotes, for the words it uses.
+        let Operation::AddIndex(index) = operation("ALTER TABLE k ADD INDEX k8 ((lower(`email`)))")
+        else {
+            panic!("expected ADD INDEX");
+        };
+        assert_eq!(index.columns, ["(lower(`email`))"]);
     }
 
     #[test]
