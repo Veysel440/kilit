@@ -9,7 +9,8 @@ use std::fs;
 use std::path::Path;
 
 use kilit_core::{
-    CASES, Condition, Knowledge, Prediction, ScenarioResult, Schema, Variant, Verdict, check, parse,
+    CASES, Condition, Knowledge, Prediction, ScenarioResult, Schema, Statement, Variant, Verdict,
+    check, parse, read_pretend,
 };
 
 /// The tables every lab scenario starts from.
@@ -230,8 +231,37 @@ fn what_kilit_cannot_see_shows_up_as_a_note() {
 /// What kilit says on MySQL 8.4.13 about each statement of `sql`, with the
 /// tables of `schema`.
 fn on_mysql_84(schema: &str, sql: &str) -> Vec<String> {
+    statements_on_mysql_84(schema, &parse(sql))
+}
+
+/// The same for Laravel's `migrate --pretend` output.
+fn pretend_on_mysql_84(schema: &str, output: &str) -> Vec<String> {
+    let pretend = read_pretend(output).expect("the output of migrate --pretend");
+    assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
+    let statements: Vec<Statement> = pretend
+        .migrations
+        .into_iter()
+        .flat_map(|migration| migration.statements)
+        .collect();
+    statements_on_mysql_84(schema, &statements)
+}
+
+/// The output of `migrate --pretend` for one migration that runs `sql`,
+/// line for line as Laravel 13 prints it.
+fn pretend(migration: &str, sql: &[&str]) -> String {
+    let mut output = format!(
+        "\n   INFO  Running migrations.  \n\n  {migration} {}  \n",
+        ".".repeat(78 - migration.len())
+    );
+    for statement in sql {
+        output.push_str(&format!("  \u{21c2} {statement}  \n"));
+    }
+    output
+}
+
+fn statements_on_mysql_84(schema: &str, statements: &[Statement]) -> Vec<String> {
     let results = Knowledge::built_in().server("mysql-8.4.13").unwrap();
-    check(&parse(sql), &Schema::from_sql(schema), results)
+    check(statements, &Schema::from_sql(schema), results)
         .into_iter()
         .map(|finding| match finding.prediction {
             Prediction::Measured {
@@ -407,11 +437,110 @@ fn dropping_an_indexed_column_rebuilds_the_table() {
 }
 
 #[test]
-fn dropping_a_foreign_key_column_is_not_answered_yet() {
+fn dropping_a_foreign_key_column_fails() {
     // $table->dropColumn('user_id'); without dropForeign first
     assert_eq!(
-        on_mysql_84(LARAVEL_TABLES, "alter table `orders` drop `user_id`"),
-        ["unknown"]
+        pretend_on_mysql_84(
+            LARAVEL_TABLES,
+            &pretend(
+                "2026_11_05_100000_drop_user_from_orders_table",
+                &["alter table `orders` drop `user_id`"]
+            )
+        ),
+        ["fails with error 1828"]
+    );
+}
+
+#[test]
+fn dropping_the_foreign_key_first_lets_its_column_and_index_go() {
+    // $table->dropForeign(['user_id']); $table->dropColumn('user_id');
+    // $table->dropConstrainedForeignId('user_id') writes the same two. The
+    // index MySQL made for the key stays, and goes with its column.
+    for migration in [
+        "2026_11_05_100000_drop_user_from_orders_table",
+        "2026_11_05_100100_drop_constrained_user_from_orders_table",
+    ] {
+        assert_eq!(
+            pretend_on_mysql_84(
+                LARAVEL_TABLES,
+                &pretend(
+                    migration,
+                    &[
+                        "alter table `orders` drop foreign key `orders_user_id_foreign`",
+                        "alter table `orders` drop `user_id`"
+                    ]
+                )
+            ),
+            [
+                "INPLACE, no rebuild, writes continue",
+                "INPLACE, rebuilds the table, writes continue"
+            ]
+        );
+    }
+    // $table->dropForeign(['user_id']); $table->dropIndex(['user_id']);
+    // after $table->foreignId('user_id')->index()->constrained(), whose
+    // foreign key uses that index, so MySQL adds none of its own.
+    let indexed = LARAVEL_TABLES.replace(
+        "KEY `orders_user_id_foreign` (`user_id`)",
+        "KEY `orders_user_id_index` (`user_id`)",
+    );
+    assert_eq!(
+        pretend_on_mysql_84(
+            &indexed,
+            &pretend(
+                "2026_11_05_100200_drop_user_index_from_orders_table",
+                &[
+                    "alter table `orders` drop foreign key `orders_user_id_foreign`",
+                    "alter table `orders` drop index `orders_user_id_index`"
+                ]
+            )
+        ),
+        [
+            "INPLACE, no rebuild, writes continue",
+            "INPLACE, no rebuild, writes continue"
+        ]
+    );
+}
+
+#[test]
+fn an_index_on_a_text_column_without_a_length_fails() {
+    // $table->text('body')->index(); $table->text('summary')->unique();
+    assert_eq!(
+        pretend_on_mysql_84(
+            LARAVEL_TABLES,
+            &pretend(
+                "2026_11_05_100300_add_body_to_orders_table",
+                &[
+                    "alter table `orders` add `body` text not null",
+                    "alter table `orders` add `summary` text not null",
+                    "alter table `orders` add index `orders_body_index`(`body`)",
+                    "alter table `orders` add unique `orders_summary_unique`(`summary`)"
+                ]
+            )
+        ),
+        [
+            "INSTANT, no rebuild, writes continue",
+            "INSTANT, no rebuild, writes continue",
+            "fails with error 1170",
+            "fails with error 1170"
+        ]
+    );
+    // Schema::create('tags', ...) with $table->id() and
+    // $table->text('name')->unique(): the index comes in its own statement.
+    assert_eq!(
+        pretend_on_mysql_84(
+            LARAVEL_TABLES,
+            &pretend(
+                "2026_11_05_100400_create_tags_table",
+                &[
+                    "create table `tags` (`id` bigint unsigned not null auto_increment primary \
+                     key, `name` text not null) default character set utf8mb4 collate \
+                     'utf8mb4_unicode_ci'",
+                    "alter table `tags` add unique `tags_name_unique`(`name`)"
+                ]
+            )
+        ),
+        ["not checked", "fails with error 1170"]
     );
 }
 

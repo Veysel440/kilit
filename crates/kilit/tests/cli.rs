@@ -185,7 +185,7 @@ fn indexes_on_the_table_change_the_answer() {
     for answer in [
         "  line 1: alter table `orders` drop `status`\n\
          \x20   INPLACE, rebuilds the table, writes continue\n\
-         \x20   measured as drop-column (6 lab scenarios)\n\
+         \x20   measured as drop-column (7 lab scenarios)\n\
          \x20   - status is in the index orders_status_index\n",
         "    INPLACE, rebuilds the table, writes wait\n\
          \x20   measured as add-fulltext-index (1 lab scenario)\n\
@@ -223,7 +223,7 @@ fn indexes_on_the_table_change_the_answer() {
             ("writes_wait", false, "add-second-fulltext-index"),
         ]
     );
-    assert_eq!(statements[0]["evidence"].as_array().unwrap().len(), 6);
+    assert_eq!(statements[0]["evidence"].as_array().unwrap().len(), 7);
     assert_eq!(output.status.code(), Some(1));
 }
 

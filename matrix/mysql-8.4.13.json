@@ -1924,6 +1924,426 @@
       ]
     },
     {
+      "id": "add-index-on-blob",
+      "title": "Index a BLOB column without a prefix length",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN body BLOB NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD INDEX idx_body (body)",
+      "verdict": {
+        "result": "fails",
+        "code": 1170,
+        "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        }
+      ]
+    },
+    {
+      "id": "add-index-on-longtext",
+      "title": "Index a LONGTEXT column without a prefix length",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN body LONGTEXT NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD INDEX idx_body (body)",
+      "verdict": {
+        "result": "fails",
+        "code": 1170,
+        "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        }
+      ]
+    },
+    {
+      "id": "add-index-on-mediumtext",
+      "title": "Index a MEDIUMTEXT column without a prefix length",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN body MEDIUMTEXT NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD INDEX idx_body (body)",
+      "verdict": {
+        "result": "fails",
+        "code": 1170,
+        "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        }
+      ]
+    },
+    {
+      "id": "add-index-on-text",
+      "title": "Index a TEXT column without a prefix length",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN body TEXT NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD INDEX idx_body (body)",
+      "verdict": {
+        "result": "fails",
+        "code": 1170,
+        "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        }
+      ]
+    },
+    {
+      "id": "add-index-on-text-second-of-two",
+      "title": "Index a column and a TEXT column without a prefix length",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN body TEXT NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD INDEX idx_user_body (user_id, body)",
+      "verdict": {
+        "result": "fails",
+        "code": 1170,
+        "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        }
+      ]
+    },
+    {
+      "id": "add-index-on-tinytext",
+      "title": "Index a TINYTEXT column without a prefix length",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN body TINYTEXT NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD INDEX idx_body (body)",
+      "verdict": {
+        "result": "fails",
+        "code": 1170,
+        "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        }
+      ]
+    },
+    {
       "id": "add-nullable-column",
       "title": "Add a nullable column at the end of the table",
       "session": [],
@@ -2256,6 +2676,356 @@
           "result": "rejected",
           "code": 1062,
           "message": "Duplicate entry '<value>' for key 'orders.uq_orders_user'"
+        }
+      ]
+    },
+    {
+      "id": "add-unique-index-on-blob",
+      "title": "Add a unique index on a BLOB column without a prefix length",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN body BLOB NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_body (body)",
+      "verdict": {
+        "result": "fails",
+        "code": 1170,
+        "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        }
+      ]
+    },
+    {
+      "id": "add-unique-index-on-longtext",
+      "title": "Add a unique index on a LONGTEXT column without a prefix length",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN body LONGTEXT NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_body (body)",
+      "verdict": {
+        "result": "fails",
+        "code": 1170,
+        "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        }
+      ]
+    },
+    {
+      "id": "add-unique-index-on-mediumtext",
+      "title": "Add a unique index on a MEDIUMTEXT column without a prefix length",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN body MEDIUMTEXT NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_body (body)",
+      "verdict": {
+        "result": "fails",
+        "code": 1170,
+        "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        }
+      ]
+    },
+    {
+      "id": "add-unique-index-on-text",
+      "title": "Add a unique index on a TEXT column without a prefix length",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN body TEXT NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_body (body)",
+      "verdict": {
+        "result": "fails",
+        "code": 1170,
+        "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        }
+      ]
+    },
+    {
+      "id": "add-unique-index-on-tinytext",
+      "title": "Add a unique index on a TINYTEXT column without a prefix length",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN body TINYTEXT NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_body (body)",
+      "verdict": {
+        "result": "fails",
+        "code": 1170,
+        "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1170,
+          "message": "BLOB/TEXT column 'body' used in key specification without a key length"
         }
       ]
     },
@@ -2693,6 +3463,170 @@
             0,
             1
           ]
+        }
+      ]
+    },
+    {
+      "id": "drop-column-after-dropping-its-foreign-key",
+      "title": "Drop a column after dropping its foreign key",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)",
+        "ALTER TABLE orders DROP FOREIGN KEY fk_orders_user"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN user_id",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": true,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-column-in-foreign-key",
+      "title": "Drop a column in a foreign key",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN user_id",
+      "verdict": {
+        "result": "fails",
+        "code": 1828,
+        "message": "Cannot drop column 'user_id': needed in a foreign key constraint 'fk_orders_user'"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1828,
+          "message": "Cannot drop column 'user_id': needed in a foreign key constraint 'fk_orders_user'"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1828,
+          "message": "Cannot drop column 'user_id': needed in a foreign key constraint 'fk_orders_user'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1828,
+          "message": "Cannot drop column 'user_id': needed in a foreign key constraint 'fk_orders_user'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1828,
+          "message": "Cannot drop column 'user_id': needed in a foreign key constraint 'fk_orders_user'"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1828,
+          "message": "Cannot drop column 'user_id': needed in a foreign key constraint 'fk_orders_user'"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1828,
+          "message": "Cannot drop column 'user_id': needed in a foreign key constraint 'fk_orders_user'"
         }
       ]
     },
@@ -4009,6 +4943,101 @@
       ],
       "session": [],
       "statement": "ALTER TABLE orders DROP INDEX idx_orders_amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-index-after-dropping-its-foreign-key",
+      "title": "Drop the index of a foreign key after dropping the key",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_orders_user (user_id)",
+        "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)",
+        "ALTER TABLE orders DROP FOREIGN KEY fk_orders_user"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP INDEX idx_orders_user",
       "verdict": {
         "result": "runs",
         "algorithm": "INPLACE",

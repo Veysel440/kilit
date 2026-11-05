@@ -1,0 +1,3 @@
+title = "Index a LONGTEXT column without a prefix length"
+setup = ["ALTER TABLE orders ADD COLUMN body LONGTEXT NULL"]
+operation = "ADD INDEX idx_body (body)"

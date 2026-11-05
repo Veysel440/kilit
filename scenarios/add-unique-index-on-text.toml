@@ -1,0 +1,3 @@
+title = "Add a unique index on a TEXT column without a prefix length"
+setup = ["ALTER TABLE orders ADD COLUMN body TEXT NULL"]
+operation = "ADD UNIQUE INDEX uq_body (body)"

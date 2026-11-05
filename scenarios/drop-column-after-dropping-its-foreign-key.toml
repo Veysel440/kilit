@@ -1,0 +1,6 @@
+title = "Drop a column after dropping its foreign key"
+setup = [
+    "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)",
+    "ALTER TABLE orders DROP FOREIGN KEY fk_orders_user",
+]
+operation = "DROP COLUMN user_id"

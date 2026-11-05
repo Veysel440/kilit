@@ -1,0 +1,3 @@
+title = "Index a column and a TEXT column without a prefix length"
+setup = ["ALTER TABLE orders ADD COLUMN body TEXT NULL"]
+operation = "ADD INDEX idx_user_body (user_id, body)"

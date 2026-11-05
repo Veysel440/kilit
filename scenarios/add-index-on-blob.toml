@@ -1,0 +1,3 @@
+title = "Index a BLOB column without a prefix length"
+setup = ["ALTER TABLE orders ADD COLUMN body BLOB NULL"]
+operation = "ADD INDEX idx_body (body)"

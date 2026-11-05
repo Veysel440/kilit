@@ -1,0 +1,3 @@
+title = "Add a unique index on a MEDIUMTEXT column without a prefix length"
+setup = ["ALTER TABLE orders ADD COLUMN body MEDIUMTEXT NULL"]
+operation = "ADD UNIQUE INDEX uq_body (body)"

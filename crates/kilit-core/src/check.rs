@@ -85,6 +85,10 @@ pub enum Condition {
     IndexedColumn,
     /// The changed column is in one of the table's foreign keys.
     ForeignKeyColumn,
+    /// The new index takes a TEXT or BLOB column whole, without a prefix
+    /// length. Only those types count: CHAR, ENUM and SET are not TEXT,
+    /// and JSON is not BLOB.
+    BlobOrTextWithoutPrefix,
     /// Something no schema shows: the rows, or the table's history.
     Hidden,
 }
@@ -153,8 +157,9 @@ const EXPRESSION_DEFAULTS: [(&str, &Case); 7] = [
     ("(RAND())", &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT),
 ];
 
-/// Shapes the lab has not measured, such as a column in a foreign key or
-/// the primary key, are unknown: see [`check_dropped_column`].
+/// Shapes the lab has not measured, such as a column in a foreign key of
+/// several columns or in the primary key, are unknown: see
+/// [`check_dropped_column`].
 const DROP_COLUMN: Case = Case {
     id: "drop-column",
     scenarios: &["drop-column"],
@@ -165,6 +170,7 @@ const DROP_COLUMN: Case = Case {
             conditions: &[Condition::FulltextIndex],
         },
         Exception {
+            // The last one: the index a dropped foreign key left behind.
             scenarios: &[
                 "drop-column-indexed",
                 "drop-column-indexed-first-of-two",
@@ -172,6 +178,7 @@ const DROP_COLUMN: Case = Case {
                 "drop-column-indexed-unique",
                 "drop-column-indexed-prefix",
                 "drop-column-indexed-fulltext",
+                "drop-column-after-dropping-its-foreign-key",
             ],
             when: "if the column is in a plain or FULLTEXT index, or has a UNIQUE index of its own",
             conditions: &[Condition::IndexedColumn],
@@ -188,6 +195,14 @@ const DROP_COLUMN: Case = Case {
             ],
             when: "if the column is in an index and the table keeps a FULLTEXT index",
             conditions: &[Condition::FulltextIndex, Condition::IndexedColumn],
+        },
+        // A foreign key's columns are always in an index, so the exception
+        // for an indexed column holds too. This one was measured with both
+        // conditions, so it decides: see [`deciding`].
+        Exception {
+            scenarios: &["drop-column-in-foreign-key"],
+            when: "if the column is in a foreign key",
+            conditions: &[Condition::IndexedColumn, Condition::ForeignKeyColumn],
         },
     ],
 };
@@ -303,11 +318,26 @@ const MODIFY_SAME_DEFINITION: Case = Case {
     exceptions: &[],
 };
 
+/// An index on a JSON column is unknown: see [`check_json_columns`].
 const ADD_INDEX: Case = Case {
     id: "add-index",
     scenarios: &["add-index"],
-    exceptions: &[],
+    exceptions: &[Exception {
+        scenarios: &[
+            "add-index-on-text",
+            "add-index-on-tinytext",
+            "add-index-on-mediumtext",
+            "add-index-on-longtext",
+            "add-index-on-blob",
+            "add-index-on-text-second-of-two",
+        ],
+        when: BLOB_OR_TEXT_WITHOUT_PREFIX,
+        conditions: &[Condition::BlobOrTextWithoutPrefix],
+    }],
 };
+
+const BLOB_OR_TEXT_WITHOUT_PREFIX: &str =
+    "if the index takes a TEXT or BLOB column without a prefix length";
 
 /// The one functional index the lab measured, on `LOWER()` of a VARCHAR
 /// column: see [`check_functional_index`].
@@ -320,11 +350,24 @@ const ADD_FUNCTIONAL_INDEX: Case = Case {
 const ADD_UNIQUE_INDEX: Case = Case {
     id: "add-unique-index",
     scenarios: &["add-unique-index"],
-    exceptions: &[Exception {
-        scenarios: &["add-unique-index-duplicates"],
-        when: "if the columns hold duplicate values",
-        conditions: &[Condition::Hidden],
-    }],
+    exceptions: &[
+        Exception {
+            scenarios: &["add-unique-index-duplicates"],
+            when: "if the columns hold duplicate values",
+            conditions: &[Condition::Hidden],
+        },
+        Exception {
+            scenarios: &[
+                "add-unique-index-on-text",
+                "add-unique-index-on-tinytext",
+                "add-unique-index-on-mediumtext",
+                "add-unique-index-on-longtext",
+                "add-unique-index-on-blob",
+            ],
+            when: BLOB_OR_TEXT_WITHOUT_PREFIX,
+            conditions: &[Condition::BlobOrTextWithoutPrefix],
+        },
+    ],
 };
 
 const ADD_FULLTEXT_INDEX: Case = Case {
@@ -339,7 +382,8 @@ const ADD_FULLTEXT_INDEX: Case = Case {
 
 const DROP_INDEX: Case = Case {
     id: "drop-index",
-    scenarios: &["drop-index"],
+    // The second: the index of a foreign key, after dropping the key.
+    scenarios: &["drop-index", "drop-index-after-dropping-its-foreign-key"],
     exceptions: &[],
 };
 
@@ -612,6 +656,10 @@ fn predict(
             Operation::DropColumn { name } => Some(name),
             _ => None,
         },
+        index: match operation {
+            Operation::AddIndex(index) => Some(index),
+            _ => None,
+        },
         session,
         schema,
     };
@@ -721,23 +769,23 @@ fn scenario_list(scenarios: &[&str]) -> String {
     }
 }
 
-/// When several exceptions hold, the one whose conditions include all of
-/// theirs decides: the lab measured that very combination. Without one,
-/// kilit does not pick.
+/// When several exceptions hold, the one whose conditions include the
+/// conditions of every other one that holds decides: the lab measured that
+/// very combination. A column in a foreign key, for one, is in an index
+/// too, so dropping it makes the exceptions for an indexed column and for
+/// a foreign key column hold; the second was measured with both
+/// conditions, and decides. No two exceptions of a case have the same
+/// conditions (a test checks), so at most one includes all the others,
+/// and the order of the list never picks. Without one, kilit does not
+/// pick: the answer is unknown.
 fn deciding(
     mut holding: Vec<(&'static Exception, Vec<String>)>,
 ) -> Result<(&'static Exception, Vec<String>), String> {
-    let covers_all = |exception: &Exception| {
-        holding.iter().all(|(other, _)| {
-            other
-                .conditions
-                .iter()
-                .all(|condition| exception.conditions.contains(condition))
-        })
-    };
+    let includes_every_other =
+        |exception: &Exception| holding.iter().all(|(other, _)| includes(exception, other));
     if let Some(at) = holding
         .iter()
-        .position(|(exception, _)| covers_all(exception))
+        .position(|(exception, _)| includes_every_other(exception))
     {
         return Ok(holding.swap_remove(at));
     }
@@ -759,6 +807,15 @@ fn deciding(
     ))
 }
 
+/// Whether `exception` was measured in `other`'s situation, and maybe in
+/// more: its conditions include all of `other`'s.
+fn includes(exception: &Exception, other: &Exception) -> bool {
+    other
+        .conditions
+        .iter()
+        .all(|condition| exception.conditions.contains(condition))
+}
+
 /// What the conditions of an exception are checked against.
 struct Situation<'a> {
     table: TableState<'a>,
@@ -766,6 +823,8 @@ struct Situation<'a> {
     column: Option<&'a str>,
     /// The column the statement drops, which takes its indexes with it.
     dropped: Option<&'a str>,
+    /// The index the statement adds.
+    index: Option<&'a Index>,
     session: &'a Session,
     schema: &'a Schema,
 }
@@ -813,6 +872,9 @@ fn applies(condition: Condition, situation: &Situation<'_>) -> Applies {
         (Condition::Hidden, _) | (Condition::IndexedColumn | Condition::ForeignKeyColumn, None) => {
             Applies::Maybe
         }
+        (Condition::BlobOrTextWithoutPrefix, _) => situation.index.map_or(Applies::No, |index| {
+            blob_or_text_without_prefix(table, index)
+        }),
         (Condition::FulltextIndex, _) => match kept_fulltext_index(table, situation.dropped) {
             Some(index) => Applies::Yes(vec![format!(
                 "{} has the FULLTEXT index {}",
@@ -900,6 +962,118 @@ fn referenced_by(schema: &Schema, table: &Table, column: &str) -> Option<(String
             })
             .map(|key| (other.name.clone(), key.name.clone().unwrap_or_default()))
     })
+}
+
+/// The TEXT and BLOB types the lab measured an index on, without a prefix
+/// length: MySQL refuses each with error 1170, in a plain and in a unique
+/// index. The names are kilit's: [`DataType`] as it prints.
+const MEASURED_BLOB_OR_TEXT: [&str; 5] = ["TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT", "BLOB"];
+
+/// Whether a column of this type is TEXT or BLOB, by the name of the type:
+/// `TEXT`, `TINYBLOB`, `TEXT(1000)`, or `LONG`, MySQL's other name for
+/// MEDIUMTEXT. CHAR, ENUM and SET are kept with TEXT, and JSON with BLOB,
+/// but none of them is one.
+fn is_blob_or_text(data_type: &DataType) -> bool {
+    let (DataType::Text(name) | DataType::Other(name)) = data_type else {
+        return false;
+    };
+    let base = name.split('(').next().unwrap_or_default().trim();
+    [
+        "TEXT",
+        "TINYTEXT",
+        "MEDIUMTEXT",
+        "LONGTEXT",
+        "BLOB",
+        "TINYBLOB",
+        "MEDIUMBLOB",
+        "LONGBLOB",
+        "LONG",
+    ]
+    .iter()
+    .any(|blob_or_text| base.eq_ignore_ascii_case(blob_or_text))
+}
+
+/// Whether an index entry takes a prefix of its column, as `note(10)`
+/// does.
+fn has_prefix(entry: &str) -> bool {
+    !is_expression(entry) && entry.contains('(')
+}
+
+/// Whether the index takes a TEXT or BLOB column of `table` whole, in a
+/// shape the lab measured: such a column of a type in
+/// [`MEASURED_BLOB_OR_TEXT`] alone in a plain or a unique index, or a TEXT
+/// column after one other column in a plain index. Every other index that
+/// takes such a column whole is unmeasured, so it gets no answer rather
+/// than the one for an index MySQL accepts, or an error by inference.
+fn blob_or_text_without_prefix(table: &Table, index: &Index) -> Applies {
+    // The entries that take a TEXT or BLOB column whole, with its type.
+    let whole: Vec<(&str, &DataType)> = index
+        .columns
+        .iter()
+        .filter(|entry| !has_prefix(entry))
+        .filter_map(|entry| {
+            let column = table.column(entry_column(entry)?)?;
+            is_blob_or_text(&column.data_type).then_some((entry.as_str(), &column.data_type))
+        })
+        .collect();
+    let Some(&(column, data_type)) = whole.first() else {
+        return Applies::No;
+    };
+    let named = |data_type: &DataType, names: &[&str]| {
+        let name = data_type.to_string();
+        names
+            .iter()
+            .any(|measured| name.eq_ignore_ascii_case(measured))
+    };
+    let measured = match (index.kind, index.columns.as_slice()) {
+        (IndexKind::Plain | IndexKind::Unique, [_]) => named(data_type, &MEASURED_BLOB_OR_TEXT),
+        // The first column is one kilit knows and not TEXT or BLOB, so the
+        // column taken whole is the second.
+        (IndexKind::Plain, [first, _]) => {
+            named(data_type, &["TEXT"])
+                && entry_column(first)
+                    .and_then(|first| table.column(first))
+                    .is_some_and(|first| !is_blob_or_text(&first.data_type))
+        }
+        _ => false,
+    };
+    if measured {
+        Applies::Yes(vec![format!(
+            "{column} is {data_type}, and the index takes it without a prefix length"
+        )])
+    } else if index.columns.len() == 1 {
+        Applies::Unmeasured(format!(
+            "{column} is {data_type}, and an index on such a column without a prefix length has \
+             not been measured yet"
+        ))
+    } else {
+        Applies::Unmeasured(format!(
+            "{column} is {data_type}, and an index of several columns that takes it without a \
+             prefix length has not been measured yet; the lab measured a TEXT column after one \
+             other column, in a plain index"
+        ))
+    }
+}
+
+/// The lab has not measured an index on a JSON column. MySQL's manual says
+/// it refuses one with error 3152, not the error 1170 of TEXT and BLOB
+/// columns, so on a table kilit knows such an index gets no answer.
+fn check_json_columns(index: &Index, table: TableState<'_>) -> Result<(), String> {
+    let TableState::Known(table) = table else {
+        return Ok(());
+    };
+    for entry in &index.columns {
+        let Some(column) = entry_column(entry).and_then(|name| table.column(name)) else {
+            continue;
+        };
+        if matches!(&column.data_type, DataType::Other(name) if name.eq_ignore_ascii_case("JSON")) {
+            return Err(format!(
+                "{} is a JSON column, and an index on a JSON column has not been measured yet",
+                column.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The case an operation belongs to, with what kilit worked out on the way.
@@ -999,8 +1173,14 @@ fn classify(
             &ADD_FUNCTIONAL_INDEX
         }
         Operation::AddIndex(index) => match index.kind {
-            IndexKind::Plain => &ADD_INDEX,
-            IndexKind::Unique => &ADD_UNIQUE_INDEX,
+            IndexKind::Plain => {
+                check_json_columns(index, table)?;
+                &ADD_INDEX
+            }
+            IndexKind::Unique => {
+                check_json_columns(index, table)?;
+                &ADD_UNIQUE_INDEX
+            }
             IndexKind::Fulltext => &ADD_FULLTEXT_INDEX,
             IndexKind::Spatial => return Err(SPATIAL_NOT_MEASURED.into()),
         },
@@ -1170,10 +1350,11 @@ fn lowered_column(entry: &str) -> Option<&str> {
 const DROPPING_NOT_MEASURED: &str = "dropping such a column has not been measured yet";
 
 /// The lab measured dropping a column that is in no index, or in plain or
-/// FULLTEXT indexes, or that has a UNIQUE index of its own. Other shapes
-/// it has not measured, so the answer the lab gave for indexed columns
-/// must not reach them. Without the table kilit cannot see the shape; the
-/// notes say what the lab measured.
+/// FULLTEXT indexes, or that has a UNIQUE index of its own, or that is the
+/// only column of a foreign key (MySQL refuses that one). Other shapes it
+/// has not measured, so the answer the lab gave for indexed columns must
+/// not reach them. Without the table kilit cannot see the shape; the notes
+/// say what the lab measured.
 fn check_dropped_column(
     table: TableState<'_>,
     column: &str,
@@ -1182,11 +1363,26 @@ fn check_dropped_column(
     let TableState::Known(table) = table else {
         return Ok(());
     };
-    if let Some(key) = table.foreign_key_on(column) {
-        return Err(format!(
-            "{column} is in the foreign key {}, and {DROPPING_NOT_MEASURED}",
-            key.name.as_deref().unwrap_or_default()
-        ));
+    for key in &table.foreign_keys {
+        if !key.columns.iter().any(|c| c.eq_ignore_ascii_case(column)) {
+            continue;
+        }
+        let name = key.name.as_deref().unwrap_or_default();
+        if key.columns.len() > 1 {
+            return Err(format!(
+                "{column} is in the foreign key {name} with other columns, and \
+                 {DROPPING_NOT_MEASURED}"
+            ));
+        }
+        // MySQL keeps an index on a foreign key's columns, and the lab
+        // measured the key with its index; kilit can lose that index only
+        // by following a statement MySQL refuses.
+        if table.index_on(column).is_none() {
+            return Err(format!(
+                "{column} is in the foreign key {name} but in no index kilit knows of, and \
+                 {DROPPING_NOT_MEASURED}"
+            ));
+        }
     }
     // One look at each index: the first that uses the column in an
     // expression, and the first of a shape the lab has not measured.
@@ -2223,16 +2419,10 @@ mod tests {
 
     #[test]
     fn dropping_a_column_mysql_may_refuse_to_drop_is_unknown() {
+        // A column in a foreign key of its own fails with error 1828: see
+        // dropping_a_column_in_a_foreign_key_fails.
         let foreign_key = "ALTER TABLE orders ADD CONSTRAINT orders_user \
                            FOREIGN KEY (user_id) REFERENCES users (id);";
-        assert_eq!(
-            reason(on_shop(
-                foreign_key,
-                "ALTER TABLE orders DROP COLUMN user_id"
-            )),
-            "user_id is in the foreign key orders_user, and dropping such a column has not \
-             been measured yet"
-        );
         assert_eq!(
             reason(on_shop(foreign_key, "ALTER TABLE users DROP COLUMN id")),
             "id is referenced by the foreign key orders_user on orders, and dropping such a \
@@ -2371,11 +2561,13 @@ mod tests {
                 "if the table keeps a FULLTEXT index: COPY, copies every row, writes wait \
                  (drop-column-with-fulltext)",
                 "if the column is in a plain or FULLTEXT index, or has a UNIQUE index of its \
-                 own: INPLACE, rebuilds the table, writes continue (drop-column-indexed and 5 \
+                 own: INPLACE, rebuilds the table, writes continue (drop-column-indexed and 6 \
                  more lab scenarios)",
                 "if the column is in an index and the table keeps a FULLTEXT index: COPY, \
                  copies every row, writes wait (drop-column-indexed-with-fulltext and 6 more \
                  lab scenarios)",
+                "if the column is in a foreign key: fails with error 1828 \
+                 (drop-column-in-foreign-key)",
             ]
         );
     }
@@ -3153,6 +3345,499 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// [`SHOP`]'s orders with a column of each TEXT and BLOB type, and of
+    /// the types kilit keeps next to them.
+    const TEXT_COLUMNS: &str = "
+        ALTER TABLE orders ADD COLUMN body TEXT NULL;
+        ALTER TABLE orders ADD COLUMN tiny TINYTEXT NULL;
+        ALTER TABLE orders ADD COLUMN medium MEDIUMTEXT NULL;
+        ALTER TABLE orders ADD COLUMN long_text LONGTEXT NULL;
+        ALTER TABLE orders ADD COLUMN data BLOB NULL;
+        ALTER TABLE orders ADD COLUMN tiny_data TINYBLOB NULL;
+        ALTER TABLE orders ADD COLUMN medium_data MEDIUMBLOB NULL;
+        ALTER TABLE orders ADD COLUMN long_data LONGBLOB NULL;
+        ALTER TABLE orders ADD COLUMN sized TEXT(1000) NULL;
+        ALTER TABLE orders ADD COLUMN sized_data BLOB(100) NULL;
+        ALTER TABLE orders ADD COLUMN old_text LONG NULL;
+        ALTER TABLE orders ADD COLUMN code CHAR(36) NULL;
+        ALTER TABLE orders ADD COLUMN state ENUM('new', 'paid') NULL;
+        ALTER TABLE orders ADD COLUMN flags SET('gift', 'rush') NULL;
+        ALTER TABLE orders ADD COLUMN raw VARBINARY(100) NULL;
+        ALTER TABLE orders ADD COLUMN doc JSON NULL;";
+
+    /// The error of a measured failure, or what else the prediction is.
+    fn fails_with(prediction: &Prediction) -> Result<u16, String> {
+        match prediction {
+            Prediction::Measured {
+                verdict: Verdict::Fails { code, .. },
+                ..
+            } => Ok(*code),
+            other => Err(said(other)),
+        }
+    }
+
+    #[test]
+    fn an_index_that_takes_a_text_or_blob_column_whole_fails() {
+        for column in ["body", "tiny", "medium", "long_text", "data"] {
+            for (index, case) in [("INDEX", &ADD_INDEX), ("UNIQUE INDEX", &ADD_UNIQUE_INDEX)] {
+                let sql = format!("ALTER TABLE orders ADD {index} i ({column})");
+                let prediction = on_shop(TEXT_COLUMNS, &sql);
+                assert_eq!(fails_with(&prediction), Ok(1170), "{sql}");
+                let Prediction::Measured {
+                    case: found,
+                    evidence,
+                    notes,
+                    ..
+                } = prediction
+                else {
+                    unreachable!();
+                };
+                assert_eq!(found, case.id, "{sql}");
+                assert_eq!(evidence, case.exceptions.last().unwrap().scenarios, "{sql}");
+                assert_eq!(notes.len(), 1, "{sql}");
+                assert!(
+                    notes[0].starts_with(&format!("{column} is ")),
+                    "{sql}: {notes:?}"
+                );
+            }
+        }
+        // A TEXT column after another one, as the lab measured it.
+        let prediction = on_shop(
+            TEXT_COLUMNS,
+            "ALTER TABLE orders ADD INDEX i (user_id, body)",
+        );
+        assert_eq!(fails_with(&prediction), Ok(1170));
+        let (_, _, notes) = measured(prediction);
+        assert_eq!(
+            notes,
+            ["body is TEXT, and the index takes it without a prefix length"]
+        );
+        // MySQL refuses it before it looks at the algorithm.
+        assert_eq!(
+            fails_with(&on_shop(
+                TEXT_COLUMNS,
+                "ALTER TABLE orders ADD INDEX i (body), ALGORITHM=INSTANT"
+            )),
+            Ok(1170)
+        );
+    }
+
+    #[test]
+    fn text_and_blob_index_shapes_the_lab_has_not_measured_are_unknown() {
+        for (column, data_type) in [
+            ("tiny_data", "TINYBLOB"),
+            ("medium_data", "MEDIUMBLOB"),
+            ("long_data", "LONGBLOB"),
+            ("sized", "TEXT(1000)"),
+            ("sized_data", "BLOB(100)"),
+            ("old_text", "LONG"),
+        ] {
+            for index in ["INDEX", "UNIQUE INDEX"] {
+                let sql = format!("ALTER TABLE orders ADD {index} i ({column})");
+                assert_eq!(
+                    reason(on_shop(TEXT_COLUMNS, &sql)),
+                    format!(
+                        "{column} is {data_type}, and an index on such a column without a \
+                         prefix length has not been measured yet"
+                    ),
+                    "{sql}"
+                );
+            }
+        }
+        for index in [
+            "UNIQUE INDEX i (user_id, body)",
+            "INDEX i (body, user_id)",
+            "INDEX i (amount, user_id, body)",
+            "INDEX i (body, long_text)",
+            "INDEX i (long_text(10), body)",
+            "INDEX i (missing, body)",
+        ] {
+            let sql = format!("ALTER TABLE orders ADD {index}");
+            assert_eq!(
+                reason(on_shop(TEXT_COLUMNS, &sql)),
+                "body is TEXT, and an index of several columns that takes it without a prefix \
+                 length has not been measured yet; the lab measured a TEXT column after one \
+                 other column, in a plain index",
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn indexes_on_other_types_and_prefixes_keep_their_answer() {
+        // CHAR, ENUM and SET are kept with TEXT, and VARBINARY with BLOB,
+        // but they are none of them; a prefix length is what MySQL asks for.
+        for columns in [
+            "code",
+            "state",
+            "flags",
+            "raw",
+            "email",
+            "body(10)",
+            "data(10)",
+            "user_id, body(10)",
+            "missing",
+        ] {
+            let index = on_shop(
+                TEXT_COLUMNS,
+                &format!("ALTER TABLE orders ADD INDEX i ({columns})"),
+            );
+            assert_eq!(
+                on_shop("", "ALTER TABLE orders ADD INDEX i (amount)"),
+                index
+            );
+            let unique = on_shop(
+                TEXT_COLUMNS,
+                &format!("ALTER TABLE orders ADD UNIQUE INDEX i ({columns})"),
+            );
+            assert_eq!(
+                on_shop("", "ALTER TABLE orders ADD UNIQUE INDEX i (amount)"),
+                unique,
+                "{columns}"
+            );
+        }
+        // FULLTEXT takes TEXT whole, and LOWER() of a VARCHAR column keeps
+        // the answer of step 4.
+        assert_eq!(
+            said(&on_shop(
+                TEXT_COLUMNS,
+                "ALTER TABLE orders ADD FULLTEXT INDEX ft (body)"
+            )),
+            "INPLACE, rebuilds the table, writes wait"
+        );
+        let (case, ..) = measured(on_shop(
+            TEXT_COLUMNS,
+            "ALTER TABLE orders ADD INDEX i ((LOWER(email)))",
+        ));
+        assert_eq!(case, "add-functional-index");
+    }
+
+    #[test]
+    fn an_index_on_a_json_column_is_unknown() {
+        // MySQL refuses it with error 3152, which the lab has not measured:
+        // neither the answer of an index it accepts, nor the error 1170.
+        for index in [
+            "INDEX i (doc)",
+            "UNIQUE INDEX i (doc)",
+            "INDEX i (user_id, doc)",
+        ] {
+            assert_eq!(
+                reason(on_shop(
+                    TEXT_COLUMNS,
+                    &format!("ALTER TABLE orders ADD {index}")
+                )),
+                "doc is a JSON column, and an index on a JSON column has not been measured yet",
+                "{index}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_the_table_an_index_on_text_is_a_note() {
+        let note = |case: &Case| {
+            format!(
+                "{BLOB_OR_TEXT_WITHOUT_PREFIX}: fails with error 1170 ({} and {} more lab \
+                 scenarios)",
+                case.exceptions.last().unwrap().scenarios[0],
+                case.exceptions.last().unwrap().scenarios.len() - 1
+            )
+        };
+        let (_, verdict, notes) = measured(only("ALTER TABLE posts ADD INDEX i (body)"));
+        assert_eq!(verdict, "INPLACE, no rebuild, writes continue");
+        assert_eq!(notes, [note(&ADD_INDEX)]);
+        let (_, verdict, notes) = measured(only("ALTER TABLE posts ADD UNIQUE INDEX i (body)"));
+        assert_eq!(verdict, "INPLACE, no rebuild, writes continue");
+        assert_eq!(
+            notes,
+            [
+                "if the columns hold duplicate values: fails with error 1062 \
+                 (add-unique-index-duplicates)"
+                    .to_owned(),
+                note(&ADD_UNIQUE_INDEX)
+            ]
+        );
+        // Nor on a table kilit lost track of.
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{TEXT_COLUMNS}"),
+            "ALTER TABLE orders CONVERT TO CHARACTER SET latin1;
+             ALTER TABLE orders ADD INDEX i (body);",
+        );
+        let (_, verdict, notes) = measured(predictions[1].clone());
+        assert_eq!(verdict, "INPLACE, no rebuild, writes continue");
+        assert_eq!(notes, [note(&ADD_INDEX)]);
+    }
+
+    #[test]
+    fn a_text_index_fails_on_a_table_created_in_the_same_input() {
+        // Schema::create('tags', ...) with $table->text('name')->unique():
+        // Laravel adds the index in its own statement.
+        let statements = parse(
+            "create table `tags` (`id` bigint unsigned not null auto_increment primary key, \
+             `name` text not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci';
+             alter table `tags` add unique `tags_name_unique`(`name`);",
+        );
+        let findings = check(&statements, &Schema::new(), results());
+        assert_eq!(fails_with(&findings[1].prediction), Ok(1170));
+        assert_eq!(
+            crate::impact::impacts(&statements, &findings),
+            [
+                crate::impact::Impact::NotChecked,
+                crate::impact::Impact::Fails
+            ]
+        );
+    }
+
+    #[test]
+    fn dropping_a_column_in_a_foreign_key_fails() {
+        let foreign_key = "ALTER TABLE orders ADD CONSTRAINT orders_user \
+                           FOREIGN KEY (user_id) REFERENCES users (id);";
+        let prediction = on_shop(foreign_key, "ALTER TABLE orders DROP COLUMN user_id");
+        assert_eq!(fails_with(&prediction), Ok(1828));
+        let Prediction::Measured {
+            case,
+            evidence,
+            notes,
+            ..
+        } = prediction
+        else {
+            unreachable!();
+        };
+        assert_eq!(case, "drop-column");
+        assert_eq!(evidence, ["drop-column-in-foreign-key"]);
+        assert_eq!(
+            notes,
+            [
+                "user_id is in the index orders_user".to_owned(),
+                format!("user_id is in the foreign key orders_user; {ASSUMES_FOREIGN_KEY_CHECKS}")
+            ]
+        );
+        // With the checks on as the lab ran them, and in any variant.
+        for (session, sql) in [
+            (
+                "SET foreign_key_checks = 1;",
+                "ALTER TABLE orders DROP COLUMN user_id",
+            ),
+            (
+                "SET foreign_key_checks = ON;",
+                "ALTER TABLE orders DROP COLUMN user_id",
+            ),
+            (
+                "",
+                "ALTER TABLE orders DROP COLUMN user_id, ALGORITHM=INSTANT",
+            ),
+            ("", "ALTER TABLE orders DROP COLUMN user_id, ALGORITHM=COPY"),
+        ] {
+            let predictions = predictions_with(
+                &format!("{SHOP}\n{foreign_key}"),
+                &format!("{session}\n{sql}"),
+            );
+            assert_eq!(
+                fails_with(predictions.last().unwrap()),
+                Ok(1828),
+                "{session} {sql}"
+            );
+        }
+        // On a table kilit lost track of, the failure is a note.
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{foreign_key}"),
+            "ALTER TABLE orders CONVERT TO CHARACTER SET latin1;
+             ALTER TABLE orders DROP COLUMN user_id;",
+        );
+        let (_, verdict, notes) = measured(predictions[1].clone());
+        assert_eq!(verdict, "INSTANT, no rebuild, writes continue");
+        assert!(
+            notes.contains(
+                &"if the column is in a foreign key: fails with error 1828 \
+                  (drop-column-in-foreign-key)"
+                    .to_owned()
+            ),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn dropping_a_foreign_key_column_the_lab_has_not_measured_is_unknown() {
+        let foreign_key = "ALTER TABLE orders ADD CONSTRAINT orders_user \
+                           FOREIGN KEY (user_id) REFERENCES users (id);";
+        let drop = "ALTER TABLE orders DROP COLUMN user_id";
+        let checks_off = "user_id is in the foreign key orders_user, and the lab has not \
+                          measured changing such a column with foreign_key_checks off";
+        for session in [
+            "SET foreign_key_checks = 0;",
+            "SET FOREIGN_KEY_CHECKS=0;",
+            "SET foreign_key_checks = OFF;",
+            "SET foreign_key_checks = 'maybe';",
+        ] {
+            let predictions = predictions_with(
+                &format!("{SHOP}\n{foreign_key}"),
+                &format!("{session}\n{drop}"),
+            );
+            assert_eq!(
+                reason(predictions.last().unwrap().clone()),
+                checks_off,
+                "{session}"
+            );
+        }
+        // A foreign key of two columns, on either of them.
+        let pair = "CREATE TABLE pairs (a BIGINT UNSIGNED NOT NULL, b INT NOT NULL, \
+                    PRIMARY KEY (a, b));
+                    ALTER TABLE orders ADD CONSTRAINT orders_pair \
+                    FOREIGN KEY (user_id, amount) REFERENCES pairs (a, b);";
+        for column in ["user_id", "amount"] {
+            assert_eq!(
+                reason(on_shop(
+                    pair,
+                    &format!("ALTER TABLE orders DROP COLUMN {column}")
+                )),
+                format!(
+                    "{column} is in the foreign key orders_pair with other columns, and dropping \
+                     such a column has not been measured yet"
+                )
+            );
+        }
+        // The column another table's foreign key points at.
+        assert_eq!(
+            reason(on_shop(foreign_key, "ALTER TABLE users DROP COLUMN id")),
+            "id is referenced by the foreign key orders_user on orders, and dropping such a \
+             column has not been measured yet"
+        );
+        // The foreign key and its column in one statement.
+        assert!(
+            reason(on_shop(
+                foreign_key,
+                "ALTER TABLE orders DROP FOREIGN KEY orders_user, DROP COLUMN user_id"
+            ))
+            .starts_with("2 changes in one statement.")
+        );
+        // A FULLTEXT index on the table too: measured apart, not together.
+        assert!(
+            reason(on_shop(
+                &format!("{foreign_key} ALTER TABLE orders ADD FULLTEXT INDEX ft (note);"),
+                drop
+            ))
+            .ends_with(": 4 measured situations apply, and the lab has not measured them together")
+        );
+        // kilit follows a DROP INDEX that MySQL refuses for the foreign
+        // key's index (error 1553, not measured yet), so it no longer knows
+        // the index the lab measured the key with.
+        assert_eq!(
+            reason(on_shop(
+                &format!("{foreign_key} ALTER TABLE orders DROP INDEX orders_user;"),
+                drop
+            )),
+            "user_id is in the foreign key orders_user but in no index kilit knows of, and \
+             dropping such a column has not been measured yet"
+        );
+    }
+
+    #[test]
+    fn the_exception_that_includes_the_others_decides_in_any_order() {
+        // Dropping a column in a foreign key: the exceptions for an indexed
+        // column and for a foreign key column both hold, and the second was
+        // measured with the first's condition too.
+        let indexed = &DROP_COLUMN.exceptions[1];
+        let foreign_key = &DROP_COLUMN.exceptions[3];
+        assert_eq!(indexed.conditions, [Condition::IndexedColumn]);
+        assert!(includes(foreign_key, indexed) && !includes(indexed, foreign_key));
+        for holding in [
+            vec![
+                (indexed, vec!["i".to_owned()]),
+                (foreign_key, vec!["f".to_owned()]),
+            ],
+            vec![
+                (foreign_key, vec!["f".to_owned()]),
+                (indexed, vec!["i".to_owned()]),
+            ],
+        ] {
+            let (decides, why) = deciding(holding).unwrap();
+            assert_eq!(decides.scenarios, ["drop-column-in-foreign-key"]);
+            assert_eq!(why, ["f"]);
+        }
+        // Both ways in the tables: the foreign key column fails, and an
+        // indexed column outside any foreign key gets the indexed answer.
+        let foreign_key = "ALTER TABLE orders ADD CONSTRAINT orders_user \
+                           FOREIGN KEY (user_id) REFERENCES users (id);
+                           ALTER TABLE orders ADD INDEX idx_amount (amount);";
+        assert_eq!(
+            fails_with(&on_shop(
+                foreign_key,
+                "ALTER TABLE orders DROP COLUMN user_id"
+            )),
+            Ok(1828)
+        );
+        let Prediction::Measured {
+            verdict, evidence, ..
+        } = on_shop(foreign_key, "ALTER TABLE orders DROP COLUMN amount")
+        else {
+            panic!("expected a measured prediction");
+        };
+        assert_eq!(
+            verdict.to_string(),
+            "INPLACE, rebuilds the table, writes continue"
+        );
+        assert_eq!(evidence, DROP_COLUMN.exceptions[1].scenarios);
+    }
+
+    #[test]
+    fn after_dropping_its_foreign_key_a_column_and_its_index_drop_as_measured() {
+        let foreign_key = "ALTER TABLE orders ADD CONSTRAINT orders_user \
+                           FOREIGN KEY (user_id) REFERENCES users (id);";
+        // The index MySQL made for the key stays, and goes with its column.
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{foreign_key}"),
+            "ALTER TABLE orders DROP FOREIGN KEY orders_user;
+             ALTER TABLE orders DROP COLUMN user_id;",
+        );
+        let Prediction::Measured {
+            verdict, evidence, ..
+        } = &predictions[1]
+        else {
+            panic!("expected a measured prediction: {predictions:?}");
+        };
+        assert_eq!(
+            verdict.to_string(),
+            "INPLACE, rebuilds the table, writes continue"
+        );
+        assert!(evidence.contains(&"drop-column-after-dropping-its-foreign-key"));
+        // Or the index goes on its own.
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{foreign_key}"),
+            "ALTER TABLE orders DROP FOREIGN KEY orders_user;
+             ALTER TABLE orders DROP INDEX orders_user;",
+        );
+        let (case, verdict, _) = measured(predictions[1].clone());
+        assert_eq!(case, "drop-index");
+        assert_eq!(verdict, "INPLACE, no rebuild, writes continue");
+    }
+
+    #[test]
+    fn failing_index_and_column_drops_leave_the_tables_as_they_were() {
+        // The TEXT index is not there afterwards: dropping its column does
+        // not rebuild the table.
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{TEXT_COLUMNS}"),
+            "ALTER TABLE orders ADD INDEX i (body);
+             ALTER TABLE orders DROP COLUMN body;",
+        );
+        assert_eq!(fails_with(&predictions[0]), Ok(1170));
+        assert_eq!(
+            said(&predictions[1]),
+            "INSTANT, no rebuild, writes continue"
+        );
+        // The column and its foreign key are still there: changing the
+        // column's type fails as for any foreign key column.
+        let predictions = predictions_with(
+            &format!(
+                "{SHOP}\nALTER TABLE orders ADD CONSTRAINT orders_user \
+                 FOREIGN KEY (user_id) REFERENCES users (id);"
+            ),
+            "ALTER TABLE orders DROP COLUMN user_id;
+             ALTER TABLE orders MODIFY user_id INT UNSIGNED NOT NULL;",
+        );
+        assert_eq!(fails_with(&predictions[0]), Ok(1828));
+        assert_eq!(fails_with(&predictions[1]), Ok(3780));
     }
 
     #[test]

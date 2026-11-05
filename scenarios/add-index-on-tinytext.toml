@@ -1,0 +1,3 @@
+title = "Index a TINYTEXT column without a prefix length"
+setup = ["ALTER TABLE orders ADD COLUMN body TINYTEXT NULL"]
+operation = "ADD INDEX idx_body (body)"
