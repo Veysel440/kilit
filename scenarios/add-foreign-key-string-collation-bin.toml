@@ -1,0 +1,9 @@
+# The column is named user_name and the constraint fk_orders_user_name in
+# each of the text scenarios so that they give the same message, which names both.
+title = "Add a foreign key from a utf8mb4_bin VARCHAR column to a VARCHAR column with another collation"
+setup = [
+    "ALTER TABLE users ADD UNIQUE INDEX uq_users_name (name)",
+    "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) COLLATE utf8mb4_bin NULL",
+]
+session = ["SET foreign_key_checks = 1"]
+operation = "ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)"

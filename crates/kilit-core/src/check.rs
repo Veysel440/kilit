@@ -17,8 +17,8 @@ use crate::modify::{Change, changes};
 use crate::results::{Variant, Verdict};
 use crate::schema::{ConstraintKind, Schema, TableState};
 use crate::statement::{
-    Alter, Check, CheckColumns, Column, DataType, ForeignKey, Index, IndexKind, Lock, Operation,
-    Position, Statement, StatementKind, Table, Variable,
+    Alter, Check, CheckColumns, Column, DataType, ForeignKey, ForeignKeyAction, Index, IndexKind,
+    IntegerSize, Lock, Operation, Position, Statement, StatementKind, Table, Variable,
 };
 
 /// What kilit says about one statement of the input.
@@ -54,8 +54,9 @@ pub enum Prediction {
 #[derive(Debug)]
 pub struct Case {
     pub id: &'static str,
-    /// Scenarios that measure this change. They must give the same result
-    /// on every server, or kilit refuses to answer; a test checks it.
+    /// Scenarios that measure this change. On each server they must give
+    /// the same result as each other, or kilit refuses to answer; a test
+    /// checks it. Two servers may give different results.
     pub scenarios: &'static [&'static str],
     /// The same change measured in a situation where the answer differs.
     pub exceptions: &'static [Exception],
@@ -64,7 +65,7 @@ pub struct Case {
 #[derive(Debug)]
 pub struct Exception {
     /// Scenarios that measure this situation, in each shape the lab tried.
-    /// Like a case's, they must give the same result on every server.
+    /// Like a case's, they must give the same result on each server.
     pub scenarios: &'static [&'static str],
     /// When this result applies, e.g. "if the table has a FULLTEXT index".
     pub when: &'static str,
@@ -102,8 +103,35 @@ pub enum Condition {
     /// A CHECK constraint of the table uses the changed column, with other
     /// columns or alone, in a plain expression.
     CheckUsesColumn,
+    /// What the schema shows about the foreign key the statement adds, when
+    /// both tables are known: see [`KeyProblem`].
+    NewForeignKey(KeyProblem),
     /// Something no schema shows: the rows, or the table's history.
     Hidden,
+}
+
+/// Why MySQL refuses a new foreign key, for a reason the schema shows. Each
+/// counts only for a key of one column on another table, in the exact shape
+/// the lab measured. Any other difference gets no answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyProblem {
+    /// The column is INT, INT UNSIGNED, BIGINT, or a SMALLINT, TINYINT or
+    /// MEDIUMINT that is unsigned, and the column it points at is BIGINT
+    /// UNSIGNED.
+    IntegerMismatch,
+    /// The column is BIGINT UNSIGNED and the column it points at INT UNSIGNED.
+    NarrowerParent,
+    /// Two VARCHAR columns of one length: the column it points at is utf8mb4
+    /// with the default collation, and the other is latin1 with the default
+    /// collation or utf8mb4_bin.
+    TextMismatch,
+    /// No index of the parent table starts with the column, or only an index
+    /// on a part of it, such as `name(10)`. A column second in an index does
+    /// not count.
+    NoIndex,
+    /// The one index that starts with the column is a plain index of it, or
+    /// an index of it and one more column.
+    NonUniqueIndex,
 }
 
 const ADD_COLUMN: Case = Case {
@@ -482,12 +510,79 @@ const DROP_INDEX: Case = Case {
 
 const ADD_FOREIGN_KEY: Case = Case {
     id: "add-foreign-key",
-    scenarios: &["add-foreign-key"],
-    exceptions: &[Exception {
-        scenarios: &["add-foreign-key-orphans"],
-        when: "if a row points to a parent row that does not exist",
-        conditions: &[Condition::Hidden],
-    }],
+    scenarios: &[
+        "add-foreign-key",
+        "add-foreign-key-new-column",
+        "add-foreign-key-parent-unique-index",
+        "add-foreign-key-string-shorter",
+        "add-foreign-key-string-longer",
+        "add-foreign-key-parent-unique-desc-index",
+        "add-foreign-key-parent-nullable-unique-index",
+        "add-foreign-key-parent-unique-and-plain-index",
+        "add-foreign-key-parent-unique-and-longer-index",
+        "add-foreign-key-parent-unique-and-second-column-index",
+        "add-foreign-key-two-columns",
+        "add-foreign-key-char-to-varchar",
+        "add-foreign-key-shorter-char-to-varchar",
+        "add-foreign-key-varchar-to-char",
+        "add-foreign-key-char-to-char",
+        "add-foreign-key-self-reference",
+    ],
+    exceptions: &[
+        Exception {
+            scenarios: &["add-foreign-key-orphans"],
+            when: "if a row points to a parent row that does not exist",
+            conditions: &[Condition::Hidden],
+        },
+        Exception {
+            scenarios: &[
+                "add-foreign-key-type-int",
+                "add-foreign-key-type-int-unsigned",
+                "add-foreign-key-type-bigint",
+                "add-foreign-key-type-smallint-unsigned",
+                "add-foreign-key-type-tinyint-unsigned",
+                "add-foreign-key-type-mediumint-unsigned",
+            ],
+            when: "if the parent column is BIGINT UNSIGNED and this one is INT, INT UNSIGNED, \
+                   BIGINT or a smaller unsigned integer",
+            conditions: &[Condition::NewForeignKey(KeyProblem::IntegerMismatch)],
+        },
+        Exception {
+            scenarios: &["add-foreign-key-type-parent-int-unsigned"],
+            when: "if the parent column is INT UNSIGNED and this one BIGINT UNSIGNED",
+            conditions: &[Condition::NewForeignKey(KeyProblem::NarrowerParent)],
+        },
+        Exception {
+            scenarios: &[
+                "add-foreign-key-string-latin1",
+                "add-foreign-key-string-collation-bin",
+            ],
+            when: "if the parent column is utf8mb4 with the default collation and this one \
+                   latin1 or utf8mb4_bin",
+            conditions: &[Condition::NewForeignKey(KeyProblem::TextMismatch)],
+        },
+        Exception {
+            scenarios: &[
+                "add-foreign-key-no-parent-index",
+                "add-foreign-key-parent-second-column-index",
+                "add-foreign-key-parent-column-prefix-index",
+                "add-foreign-key-parent-unique-column-prefix-index",
+            ],
+            when: "if no index of the parent table starts with the whole parent column",
+            conditions: &[Condition::NewForeignKey(KeyProblem::NoIndex)],
+        },
+        Exception {
+            scenarios: &[
+                "add-foreign-key-parent-plain-index",
+                "add-foreign-key-parent-longer-index",
+                "add-foreign-key-parent-longer-unique-index",
+                "add-foreign-key-parent-plain-desc-index",
+            ],
+            when: "if the index that starts with the parent column is not unique on that \
+                   column alone",
+            conditions: &[Condition::NewForeignKey(KeyProblem::NonUniqueIndex)],
+        },
+    ],
 };
 
 const ADD_FOREIGN_KEY_CHECKS_OFF: Case = Case {
@@ -592,6 +687,16 @@ pub fn check(statements: &[Statement], schema: &Schema, results: &ServerResults)
     let mut session = Session::default();
     let mut findings = Vec::with_capacity(statements.len());
     for statement in statements {
+        if matches!(
+            statement.kind,
+            StatementKind::Set { .. } | StatementKind::Other | StatementKind::Unparsed { .. }
+        ) && statement
+            .sql
+            .to_ascii_lowercase()
+            .contains("restrict_fk_on_non_standard_key")
+        {
+            session.restrict_fk_set = true;
+        }
         let prediction = match &statement.kind {
             StatementKind::Alter(alter) => predict(alter, &session, &schema, results),
             StatementKind::Set { variables } => {
@@ -665,6 +770,10 @@ struct Session {
     /// `sql_log_bin`, which decides whether MySQL refuses some expression
     /// defaults.
     binary_log: BinaryLog,
+    /// The input names `restrict_fk_on_non_standard_key`, in any form kilit
+    /// can see, read or not. Its value changes which foreign keys MySQL 8.4
+    /// accepts and with which error, and the lab measured the default only.
+    restrict_fk_set: bool,
 }
 
 /// Whether the session's statements go to the binary log, as far as the
@@ -786,6 +895,10 @@ fn predict(
         },
         dropped_index: match operation {
             Operation::DropIndex { name } => Some(name),
+            _ => None,
+        },
+        foreign_key: match operation {
+            Operation::AddForeignKey(key) => Some(key),
             _ => None,
         },
         session,
@@ -955,6 +1068,8 @@ struct Situation<'a> {
     index: Option<&'a Index>,
     /// The name of the index the statement drops.
     dropped_index: Option<&'a str>,
+    /// The foreign key the statement adds.
+    foreign_key: Option<&'a ForeignKey>,
     session: &'a Session,
     schema: &'a Schema,
 }
@@ -996,9 +1111,13 @@ fn holds(exception: &Exception, situation: &Situation<'_>) -> Applies {
 
 fn applies(condition: Condition, situation: &Situation<'_>) -> Applies {
     let TableState::Known(table) = situation.table else {
-        return Applies::Maybe;
+        return match condition {
+            Condition::NewForeignKey(problem) => new_foreign_key(problem, situation),
+            _ => Applies::Maybe,
+        };
     };
     match (condition, situation.column) {
+        (Condition::NewForeignKey(problem), _) => new_foreign_key(problem, situation),
         (Condition::Hidden, _)
         | (
             Condition::IndexedColumn
@@ -1122,6 +1241,580 @@ fn serves(entries: &[String], key: &ForeignKey) -> bool {
             .iter()
             .zip(entries)
             .all(|(column, entry)| column.eq_ignore_ascii_case(entry))
+}
+
+/// What the lab measured against a BIGINT UNSIGNED column, with MySQL's
+/// refusal: the size and whether it is unsigned.
+const MEASURED_AGAINST_BIGINT_UNSIGNED: [(IntegerSize, bool); 6] = [
+    (IntegerSize::Int, false),
+    (IntegerSize::Int, true),
+    (IntegerSize::Big, false),
+    (IntegerSize::Small, true),
+    (IntegerSize::Tiny, true),
+    (IntegerSize::Medium, true),
+];
+
+/// The most bytes an InnoDB index can take from its columns in MySQL's default
+/// row format. Past it, MySQL refuses the index a foreign key needs.
+const MAX_INDEX_BYTES: u64 = 3072;
+
+/// How the column of a new foreign key compares with the column it points at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyColumns {
+    Fit,
+    IntegerMismatch,
+    NarrowerParent,
+    TextMismatch,
+}
+
+/// What the parent table's indexes do for a new foreign key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParentIndex {
+    Serves,
+    Missing,
+    NonUnique,
+}
+
+/// What the schema shows about a new foreign key, in shapes the lab measured.
+struct KeySeen {
+    columns: KeyColumns,
+    why_columns: String,
+    index: ParentIndex,
+    why_index: String,
+    self_reference: bool,
+}
+
+impl KeySeen {
+    fn fits(self_reference: bool) -> KeySeen {
+        KeySeen {
+            columns: KeyColumns::Fit,
+            why_columns: String::new(),
+            index: ParentIndex::Serves,
+            why_index: String::new(),
+            self_reference,
+        }
+    }
+}
+
+/// Whether a problem of the new foreign key holds. A value of
+/// `restrict_fk_on_non_standard_key` the lab did not measure leaves the index
+/// rules without an answer, also when kilit cannot see the tables.
+fn new_foreign_key(problem: KeyProblem, situation: &Situation<'_>) -> Applies {
+    let Some(key) = situation.foreign_key else {
+        return Applies::No;
+    };
+    let about_index = matches!(problem, KeyProblem::NoIndex | KeyProblem::NonUniqueIndex);
+    let restricted = about_index && situation.session.restrict_fk_set;
+    let restrict_set = "restrict_fk_on_non_standard_key is set earlier in the input, and the lab \
+                        measured MySQL's default only";
+    let seen = match foreign_key_seen(key, situation.table, situation.schema) {
+        Err(reason) => return Applies::Unmeasured(reason),
+        Ok(None) if restricted => {
+            return Applies::Unmeasured(format!(
+                "kilit cannot see the indexes of both tables, and {restrict_set}"
+            ));
+        }
+        Ok(None) => return Applies::Maybe,
+        Ok(Some(seen)) => seen,
+    };
+    let holding = match problem {
+        KeyProblem::IntegerMismatch => seen.columns == KeyColumns::IntegerMismatch,
+        KeyProblem::NarrowerParent => seen.columns == KeyColumns::NarrowerParent,
+        KeyProblem::TextMismatch => seen.columns == KeyColumns::TextMismatch,
+        KeyProblem::NoIndex => seen.index == ParentIndex::Missing,
+        KeyProblem::NonUniqueIndex => seen.index == ParentIndex::NonUnique,
+    };
+    if !holding {
+        return Applies::No;
+    }
+    let why = if about_index {
+        seen.why_index
+    } else {
+        seen.why_columns
+    };
+    if restricted {
+        Applies::Unmeasured(format!("{why}, and {restrict_set}"))
+    } else {
+        Applies::Yes(vec![why])
+    }
+}
+
+/// What the schema shows about the new foreign key: `None` when it does not
+/// show both tables, an error when it shows a shape the lab has not measured.
+fn foreign_key_seen(
+    key: &ForeignKey,
+    table: TableState<'_>,
+    schema: &Schema,
+) -> Result<Option<KeySeen>, String> {
+    let TableState::Known(child) = table else {
+        return Ok(None);
+    };
+    let TableState::Known(parent) = schema.table(&key.referenced_table) else {
+        return Ok(None);
+    };
+    let name = key.name.as_deref().unwrap_or("without a name");
+    if key.referenced_columns.is_empty() {
+        return Err(format!(
+            "the foreign key {name} names no column of {}, and the lab has not measured that",
+            parent.name
+        ));
+    }
+    if key.columns.len() != key.referenced_columns.len() {
+        return Err(format!(
+            "the foreign key {name} has {} columns and points at {}, and the lab has not \
+             measured that",
+            key.columns.len(),
+            key.referenced_columns.len()
+        ));
+    }
+    let self_reference = std::ptr::eq(child, parent);
+    let mut pairs = Vec::with_capacity(key.columns.len());
+    for (column, referenced) in key.columns.iter().zip(&key.referenced_columns) {
+        pairs.push((key_column(child, column)?, key_column(parent, referenced)?));
+    }
+    // MySQL makes an index on the child's columns, which has its own limit
+    // and comes before everything else below, as does this action.
+    let mut bytes = 0;
+    for &(column, _) in &pairs {
+        if let Some(length) = declared_length(&column.data_type) {
+            let per_character = if column.data_type.is_text() {
+                child.text_settings(column)?.charset.max_bytes
+            } else {
+                1
+            };
+            bytes += length * per_character;
+        }
+    }
+    if bytes > MAX_INDEX_BYTES {
+        return Err(format!(
+            "the foreign key {name} takes up to {bytes} bytes in an index of {}, and the lab has \
+             not measured a key past the index limit of {MAX_INDEX_BYTES}",
+            child.name
+        ));
+    }
+    let sets_null = key.on_delete == Some(ForeignKeyAction::SetNull)
+        || key.on_update == Some(ForeignKeyAction::SetNull);
+    if let Some((column, _)) = pairs
+        .iter()
+        .find(|(column, _)| sets_null && !child.is_nullable(column))
+    {
+        return Err(format!(
+            "the foreign key {name} sets {} to NULL, which is NOT NULL, and the lab has not \
+             measured that",
+            column.name
+        ));
+    }
+    let &[(column, referenced)] = pairs.as_slice() else {
+        if self_reference {
+            return Err(format!(
+                "the foreign key {name} has several columns and points at its own table, and \
+                 the lab has not measured that"
+            ));
+        }
+        for &(column, referenced) in &pairs {
+            if !identical(child, column, parent, referenced)? {
+                return Err(format!(
+                    "{}, in a foreign key of several columns, and the lab measured identical \
+                     columns only",
+                    differ(child, column, parent, referenced)
+                ));
+            }
+        }
+        if !unique_on_exactly(parent, &key.referenced_columns) {
+            return Err(format!(
+                "no unique index of {} consists of exactly the columns of the foreign key \
+                 {name}, and the lab has measured only that for several columns",
+                parent.name
+            ));
+        }
+        return Ok(Some(KeySeen::fits(false)));
+    };
+    if self_reference {
+        let alone_in_primary_key = matches!(parent.primary_key.as_slice(), [only]
+            if only.eq_ignore_ascii_case(&referenced.name));
+        if column.name.eq_ignore_ascii_case(&referenced.name)
+            || !alone_in_primary_key
+            || !identical(child, column, parent, referenced)?
+        {
+            return Err(format!(
+                "the foreign key {name} points at its own table, and the lab measured that only \
+                 from a column of the same type to the primary key"
+            ));
+        }
+        return Ok(Some(KeySeen::fits(true)));
+    }
+    let (columns, why_columns) = compare_key_columns(child, column, parent, referenced)?;
+    let (index, why_index) = parent_index(parent, referenced)?;
+    Ok(Some(KeySeen {
+        columns,
+        why_columns,
+        index,
+        why_index,
+        self_reference,
+    }))
+}
+
+/// A column of a foreign key, if the lab can have measured it: it exists and
+/// is no generated, TEXT, BLOB, JSON or spatial column, no SERIAL, which comes
+/// with a unique index no schema names, and kilit follows its options.
+fn key_column<'a>(table: &'a Table, name: &str) -> Result<&'a Column, String> {
+    let Some(column) = table.column(name) else {
+        return Err(format!(
+            "{}.{name} does not exist, and the lab has not measured a foreign key on a missing \
+             column",
+            table.name
+        ));
+    };
+    let kind = if column.generated.is_some() {
+        "a generated column"
+    } else if is_blob_or_text(&column.data_type) {
+        "a TEXT or BLOB column"
+    } else if column.data_type.to_string().eq_ignore_ascii_case("JSON") {
+        "a JSON column"
+    } else if column.data_type.to_string().eq_ignore_ascii_case("SERIAL") {
+        "a SERIAL column"
+    } else if is_spatial(&column.data_type) {
+        "a spatial column"
+    } else if !column.other_options.is_empty() {
+        "a column with options kilit does not follow"
+    } else {
+        return Ok(column);
+    };
+    Err(format!(
+        "{}.{name} is {kind}, and the lab has not measured a foreign key on one",
+        table.name
+    ))
+}
+
+/// `POINT`, `GEOMETRY` and the other types of a spatial column.
+fn is_spatial(data_type: &DataType) -> bool {
+    let name = data_type.to_string();
+    [
+        "GEOMETRY",
+        "POINT",
+        "LINESTRING",
+        "POLYGON",
+        "MULTIPOINT",
+        "MULTILINESTRING",
+        "MULTIPOLYGON",
+        "GEOMETRYCOLLECTION",
+        "GEOMCOLLECTION",
+    ]
+    .iter()
+    .any(|spatial| name.eq_ignore_ascii_case(spatial))
+}
+
+/// The length written on a type whose values can fill an index: characters of
+/// `VARCHAR(10)` or `CHAR(10)`, bytes of `VARBINARY(10)` or `BINARY(10)`.
+fn declared_length(data_type: &DataType) -> Option<u64> {
+    let name = match data_type {
+        DataType::VarChar { length } => return Some(*length),
+        DataType::Text(name) if is_char_or_varchar(data_type) => name,
+        DataType::Other(name) => name,
+        _ => return None,
+    };
+    let (base, rest) = name.split_once('(')?;
+    let base = base.trim();
+    let counted = ["CHAR", "CHARACTER", "BINARY", "VARBINARY"]
+        .iter()
+        .any(|counted| base.eq_ignore_ascii_case(counted));
+    if !counted {
+        return None;
+    }
+    rest.split_once(')')?.0.trim().parse().ok()
+}
+
+fn differ(child: &Table, column: &Column, parent: &Table, referenced: &Column) -> String {
+    format!(
+        "{}.{} is {} and {}.{} is {}",
+        child.name,
+        column.name,
+        column.data_type,
+        parent.name,
+        referenced.name,
+        referenced.data_type
+    )
+}
+
+/// The same type and, for text, the same character set and collation. An
+/// unknown character set is an error, never a guess.
+fn identical(
+    child: &Table,
+    column: &Column,
+    parent: &Table,
+    referenced: &Column,
+) -> Result<bool, String> {
+    if column.data_type != referenced.data_type {
+        return Ok(false);
+    }
+    if !column.data_type.is_text() {
+        return Ok(true);
+    }
+    let (ours, theirs) = (
+        child.text_settings(column)?,
+        parent.text_settings(referenced)?,
+    );
+    Ok(ours.charset.name == theirs.charset.name && ours.collation == theirs.collation)
+}
+
+/// How the two columns of a key of one column compare, or why the lab has not
+/// measured it.
+fn compare_key_columns(
+    child: &Table,
+    column: &Column,
+    parent: &Table,
+    referenced: &Column,
+) -> Result<(KeyColumns, String), String> {
+    let why = differ(child, column, parent, referenced);
+    let (ours, theirs) = (&column.data_type, &referenced.data_type);
+    let not_measured = || {
+        Err(format!(
+            "{why}, and the lab has not measured a foreign key between those types"
+        ))
+    };
+    match (ours, theirs) {
+        (
+            DataType::Integer { size, unsigned },
+            DataType::Integer {
+                size: parent_size,
+                unsigned: parent_unsigned,
+            },
+        ) => {
+            let pair = (*parent_size, *parent_unsigned);
+            if ours == theirs {
+                Ok((KeyColumns::Fit, why))
+            } else if pair == (IntegerSize::Big, true)
+                && MEASURED_AGAINST_BIGINT_UNSIGNED.contains(&(*size, *unsigned))
+            {
+                Ok((KeyColumns::IntegerMismatch, why))
+            } else if pair == (IntegerSize::Int, true)
+                && (*size, *unsigned) == (IntegerSize::Big, true)
+            {
+                Ok((KeyColumns::NarrowerParent, why))
+            } else {
+                not_measured()
+            }
+        }
+        _ if ours.is_text() && theirs.is_text() => {
+            if ours != theirs && !(is_char_or_varchar(ours) && is_char_or_varchar(theirs)) {
+                return not_measured();
+            }
+            let our_settings = child.text_settings(column)?;
+            let their_settings = parent.text_settings(referenced)?;
+            if our_settings.charset.name == their_settings.charset.name
+                && our_settings.collation == their_settings.collation
+            {
+                return Ok((KeyColumns::Fit, why));
+            }
+            let why = format!(
+                "{}.{} uses {} and {}.{} uses {}",
+                child.name,
+                column.name,
+                our_settings.collation,
+                parent.name,
+                referenced.name,
+                their_settings.collation
+            );
+            let measured = matches!(ours, DataType::VarChar { .. })
+                && ours == theirs
+                && their_settings.collation == "utf8mb4_0900_ai_ci"
+                && (our_settings.collation == "utf8mb4_bin"
+                    || our_settings.collation == "latin1_swedish_ci");
+            if measured {
+                Ok((KeyColumns::TextMismatch, why))
+            } else {
+                Err(format!(
+                    "{why}, and the lab has not measured a foreign key between those two"
+                ))
+            }
+        }
+        _ if ours == theirs => Ok((KeyColumns::Fit, why)),
+        _ => not_measured(),
+    }
+}
+
+/// `CHAR(36)` or `VARCHAR(36)`: not TEXT, ENUM or SET.
+fn is_char_or_varchar(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::VarChar { .. } => true,
+        DataType::Text(name) => {
+            let base = name.split('(').next().unwrap_or_default().trim();
+            base.eq_ignore_ascii_case("CHAR") || base.eq_ignore_ascii_case("CHARACTER")
+        }
+        _ => false,
+    }
+}
+
+/// Whether the primary key or a unique index of the table consists of exactly
+/// these columns, in this order.
+fn unique_on_exactly(table: &Table, columns: &[String]) -> bool {
+    let exactly = |entries: &[String]| {
+        entries.len() == columns.len()
+            && entries
+                .iter()
+                .zip(columns)
+                .all(|(entry, column)| entry.eq_ignore_ascii_case(column))
+    };
+    exactly(&table.primary_key)
+        || table
+            .indexes
+            .iter()
+            .any(|index| index.kind == IndexKind::Unique && exactly(&index.columns))
+}
+
+/// What the indexes of `parent` do for a key of one column that points at
+/// `column`. Index entries count by the column they name, whatever their
+/// letter case or sort order. The lab measured a unique index or a primary key
+/// of that column alone, with plain indexes beside it or none; and without
+/// one, one plain index of the column, with or without one more column; one
+/// unique index of the column and one more; one index of a shorter part of
+/// the column; or none that starts with it. Anything else has no answer.
+fn parent_index(parent: &Table, column: &Column) -> Result<(ParentIndex, String), String> {
+    let name = column.name.as_str();
+    let not_measured = |what: String| {
+        Err(format!(
+            "{what}, and the lab has not measured a foreign key pointing at {}.{name} in that \
+             situation",
+            parent.name
+        ))
+    };
+    if parent.foreign_keys.iter().any(|key| {
+        key.columns
+            .first()
+            .is_some_and(|first| first.eq_ignore_ascii_case(name))
+    }) {
+        return not_measured(format!(
+            "{} has a foreign key on {name}, so MySQL may have made an index for it",
+            parent.name
+        ));
+    }
+    let primary_key_starts = parent.primary_key.first().is_some_and(|first| {
+        entry_column(first).is_some_and(|entry| entry.eq_ignore_ascii_case(name))
+    });
+    if primary_key_starts
+        && (parent.primary_key.len() > 1 || parent.primary_key.iter().any(|e| has_prefix(e)))
+    {
+        return not_measured(format!(
+            "the primary key of {} has more than the whole of {name}",
+            parent.name
+        ));
+    }
+    let mut unique_alone = primary_key_starts;
+    let mut whole = Vec::new();
+    let mut parts = Vec::new();
+    for index in &parent.indexes {
+        let Some(first) = index.columns.first() else {
+            continue;
+        };
+        let index_name = index.name.as_deref().unwrap_or("without a name");
+        if is_expression(first) {
+            if uses_column(first, name) {
+                return not_measured(format!("the index {index_name} is on an expression"));
+            }
+            continue;
+        }
+        if !entry_column(first).is_some_and(|entry| entry.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        if !can_serve_a_key(index) {
+            return not_measured(format!(
+                "the index {index_name} of {} is FULLTEXT or spatial",
+                parent.name
+            ));
+        }
+        if has_prefix(first) {
+            if index.columns.len() != 1 || !shorter_than_column(first, column) {
+                return not_measured(format!(
+                    "the index {index_name} of {} takes a part of {name} of this length",
+                    parent.name
+                ));
+            }
+            parts.push(index);
+        } else if index.columns.len() > 2
+            || index
+                .columns
+                .iter()
+                .any(|entry| is_expression(entry) || has_prefix(entry))
+        {
+            return not_measured(format!(
+                "the index {index_name} of {} has this shape",
+                parent.name
+            ));
+        } else if index.kind == IndexKind::Unique && index.columns.len() == 1 {
+            unique_alone = true;
+        } else {
+            whole.push(index);
+        }
+    }
+    if unique_alone {
+        if let Some(other) = parts
+            .iter()
+            .chain(whole.iter().filter(|index| index.kind == IndexKind::Unique))
+            .next()
+        {
+            return not_measured(format!(
+                "the unique index of {name} has the index {} beside it",
+                other.name.as_deref().unwrap_or("without a name")
+            ));
+        }
+        return Ok((ParentIndex::Serves, String::new()));
+    }
+    match (whole.as_slice(), parts.as_slice()) {
+        ([], [] | [_]) => Ok((
+            ParentIndex::Missing,
+            format!(
+                "no index of {} starts with the whole of {name}",
+                parent.name
+            ),
+        )),
+        ([index], []) => Ok((
+            ParentIndex::NonUnique,
+            format!(
+                "the index {} of {} starts with {name} but is not unique on it alone",
+                index.name.as_deref().unwrap_or("without a name"),
+                parent.name
+            ),
+        )),
+        _ => not_measured(format!(
+            "several indexes of {} start with {name}",
+            parent.name
+        )),
+    }
+}
+
+/// Whether an entry such as `name(10)` takes less than the whole VARCHAR
+/// column. The lab measured a part of a VARCHAR column only.
+fn shorter_than_column(entry: &str, column: &Column) -> bool {
+    let DataType::VarChar { length } = column.data_type else {
+        return false;
+    };
+    entry
+        .split_once('(')
+        .and_then(|(_, part)| part.trim_end_matches(')').trim().parse::<u64>().ok())
+        .is_some_and(|part| part < length)
+}
+
+/// The answer with foreign_key_checks off stands only for a key MySQL accepts:
+/// the lab did not measure this step's refusals with the checks off.
+fn foreign_key_with_checks_off(
+    key: &ForeignKey,
+    table: TableState<'_>,
+    schema: &Schema,
+) -> Result<(), String> {
+    let off = "and the lab has not measured this with foreign_key_checks off";
+    let Some(seen) = foreign_key_seen(key, table, schema)? else {
+        return Ok(());
+    };
+    if seen.self_reference {
+        return Err(format!("the foreign key points at its own table, {off}"));
+    }
+    if seen.columns != KeyColumns::Fit {
+        return Err(format!("{}, {off}", seen.why_columns));
+    }
+    if seen.index != ParentIndex::Serves {
+        return Err(format!("{}, {off}", seen.why_index));
+    }
+    Ok(())
 }
 
 /// Whether the index can serve a foreign key at all.
@@ -1926,9 +2619,12 @@ fn classify(
             IndexKind::Spatial => return Err(SPATIAL_NOT_MEASURED.into()),
         },
         Operation::DropIndex { .. } => &DROP_INDEX,
-        Operation::AddForeignKey(_) => match session.foreign_key_checks {
+        Operation::AddForeignKey(key) => match session.foreign_key_checks {
             Setting::On => &ADD_FOREIGN_KEY,
-            Setting::Off => &ADD_FOREIGN_KEY_CHECKS_OFF,
+            Setting::Off => {
+                foreign_key_with_checks_off(key, table, schema)?;
+                &ADD_FOREIGN_KEY_CHECKS_OFF
+            }
             Setting::ServerDefault => {
                 notes.push(ASSUMES_FOREIGN_KEY_CHECKS.to_owned());
                 &ADD_FOREIGN_KEY
@@ -4596,6 +5292,131 @@ mod tests {
                                FOREIGN KEY (user_id) REFERENCES users (id);";
     const OWN_INDEX: &str = "ALTER TABLE orders ADD INDEX idx_user (user_id);";
     const SECOND_INDEX: &str = "ALTER TABLE orders ADD INDEX idx_user_amount (user_id, amount);";
+
+    /// `users` and `orders` as the lab has them, with the column a key needs.
+    const KEY_TABLES: &str = "
+        CREATE TABLE users (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(100) NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        CREATE TABLE orders (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            user_id BIGINT UNSIGNED NOT NULL, amount INT NOT NULL,
+            user_name VARCHAR(100) NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
+
+    const NAME_KEY: &str = "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name \
+                            FOREIGN KEY (user_name) REFERENCES users (name)";
+
+    /// What each statement gets on MySQL 8.0.46 and on 8.4.13.
+    fn on_both_servers(schema: &str, sql: &str) -> [Vec<String>; 2] {
+        ["mysql-8.0.46", "mysql-8.4.13"].map(|server| {
+            let results = Knowledge::built_in().server(server).unwrap();
+            check(&parse(sql), &Schema::from_sql(schema), results)
+                .into_iter()
+                .map(|finding| said(&finding.prediction))
+                .collect()
+        })
+    }
+
+    /// The key on `users (name)` after `index`, on each server.
+    fn name_key_after(index: &str) -> [String; 2] {
+        let schema = format!("{KEY_TABLES} {index}");
+        on_both_servers(&schema, NAME_KEY).map(|mut said| said.remove(0))
+    }
+
+    #[test]
+    fn a_unique_descending_index_serves_a_new_foreign_key_on_both_servers() {
+        for index in [
+            "ALTER TABLE users ADD UNIQUE INDEX uq (name DESC);",
+            "ALTER TABLE users ADD UNIQUE INDEX uq (`name` DESC);",
+            "ALTER TABLE users ADD UNIQUE INDEX uq (`NAME` DESC);",
+            "CREATE UNIQUE INDEX uq ON users (NAME DESC);",
+            "ALTER TABLE users ADD UNIQUE INDEX uq (name ASC);",
+        ] {
+            assert_eq!(name_key_after(index), [COPY_ANSWER, COPY_ANSWER], "{index}");
+        }
+    }
+
+    #[test]
+    fn a_plain_descending_index_gets_each_servers_measured_answer() {
+        for index in [
+            "ALTER TABLE users ADD INDEX i (name DESC);",
+            "ALTER TABLE users ADD INDEX i (`name` DESC);",
+            "ALTER TABLE users ADD INDEX i (`NAME` DESC);",
+            "CREATE INDEX i ON users (NAME DESC);",
+        ] {
+            let [mysql_80, mysql_84] = name_key_after(index);
+            assert_eq!(mysql_80, COPY_ANSWER, "{index}");
+            assert!(mysql_84.contains("6125"), "{index}: {mysql_84}");
+        }
+    }
+
+    #[test]
+    fn a_shorter_part_of_the_column_serves_no_foreign_key() {
+        for index in [
+            "ALTER TABLE users ADD INDEX i (name(10));",
+            "ALTER TABLE users ADD UNIQUE INDEX i (`NAME`(10) DESC);",
+        ] {
+            let [mysql_80, mysql_84] = name_key_after(index);
+            assert!(mysql_80.contains("1822"), "{index}: {mysql_80}");
+            assert!(mysql_84.contains("6125"), "{index}: {mysql_84}");
+        }
+    }
+
+    #[test]
+    fn indexes_the_lab_has_not_measured_under_a_key_get_no_answer() {
+        for index in [
+            // As long as the column, and longer than it.
+            "ALTER TABLE users ADD UNIQUE INDEX i (name(100));",
+            "ALTER TABLE users ADD INDEX i (name(200));",
+            "ALTER TABLE users ADD FULLTEXT INDEX i (name);",
+            "ALTER TABLE users ADD INDEX i ((lower(name)));",
+            "ALTER TABLE users ADD INDEX i (name, id, id);",
+            "ALTER TABLE users ADD INDEX i (name(10), id);",
+            // Several indexes without a unique one.
+            "ALTER TABLE users ADD INDEX i (name); ALTER TABLE users ADD INDEX j (name, id);",
+            "ALTER TABLE users ADD INDEX i (name); ALTER TABLE users ADD INDEX j (name(10));",
+            // Beside a unique index, only plain indexes were measured.
+            "ALTER TABLE users ADD UNIQUE INDEX i (name); ALTER TABLE users ADD INDEX j (name(10));",
+            "ALTER TABLE users ADD UNIQUE INDEX i (name); \
+             ALTER TABLE users ADD UNIQUE INDEX j (name, id);",
+        ] {
+            for answer in name_key_after(index) {
+                assert!(answer.starts_with("unknown"), "{index}: {answer}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_foreign_key_adds_no_key_and_an_accepted_one_does() {
+        let schema = format!("{KEY_TABLES} ALTER TABLE users ADD INDEX i (name);");
+        let sql = format!("{NAME_KEY}; ALTER TABLE orders DROP COLUMN user_name");
+        let [mysql_80, mysql_84] = on_both_servers(&schema, &sql);
+        // 8.0.46 accepts the key, and then refuses to drop its column.
+        assert_eq!(mysql_80[0], COPY_ANSWER);
+        assert!(mysql_80[1].contains("1828"), "{}", mysql_80[1]);
+        // 8.4.13 refuses the key, so nothing holds the column.
+        assert!(mysql_84[0].contains("6125"), "{}", mysql_84[0]);
+        assert!(!mysql_84[1].contains("1828"), "{}", mysql_84[1]);
+    }
+
+    #[test]
+    fn a_new_foreign_key_of_a_known_table_to_an_unseen_one_is_a_note_and_no_failure() {
+        let predictions = predictions_with(
+            "CREATE TABLE orders (id INT PRIMARY KEY, amount INT NOT NULL);",
+            "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (amount) REFERENCES users (id)",
+        );
+        assert_eq!(said(&predictions[0]), COPY_ANSWER);
+        let (_, _, notes) = measured(predictions[0].clone());
+        assert_eq!(notes.len(), 7, "{notes:?}");
+    }
+
+    #[test]
+    fn a_foreign_key_from_an_unknown_character_set_gets_no_answer() {
+        let predictions = predictions_with(
+            "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(10), UNIQUE KEY u (name));
+             CREATE TABLE orders (id INT PRIMARY KEY, name VARCHAR(10));",
+            "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (name) REFERENCES users (name)",
+        );
+        assert!(said(&predictions[0]).starts_with("unknown"));
+    }
 
     /// The answer for the drop of an index that kilit should treat as any
     /// other index.

@@ -1,0 +1,8 @@
+title = "Add a foreign key to a parent column with a UNIQUE index and a longer non-unique index"
+setup = [
+    "ALTER TABLE users ADD UNIQUE INDEX uq_users_name (name)",
+    "ALTER TABLE users ADD INDEX idx_users_name_id (name, id)",
+    "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL",
+]
+session = ["SET foreign_key_checks = 1"]
+operation = "ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)"

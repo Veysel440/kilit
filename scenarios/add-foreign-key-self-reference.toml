@@ -1,0 +1,6 @@
+title = "Add a foreign key from a new column to the primary key of the same table"
+setup = [
+    "ALTER TABLE orders ADD COLUMN parent_id BIGINT UNSIGNED NULL",
+]
+session = ["SET foreign_key_checks = 1"]
+operation = "ADD CONSTRAINT fk_orders_parent FOREIGN KEY (parent_id) REFERENCES orders (id)"

@@ -553,3 +553,188 @@ fn the_readme_example_is_real_output() {
         );
     }
 }
+
+// A foreign key to a parent column without an index, or with a column of
+// another type: MySQL 8.0.46 and 8.4.13 refuse it, and not always with the
+// same error.
+
+/// What a migration adds to the example's `orders`: a string column, and
+/// the foreign key from it to `users.name`, which has no index.
+const FOREIGN_KEY_TO_NAME: &str = "alter table `orders` add `user_name` varchar(255) null;
+alter table `orders` add constraint `orders_user_name_foreign` \
+foreign key (`user_name`) references `users` (`name`);";
+
+/// kilit's JSON for `sql` against the example's tables, and the exit status.
+fn json_check(server: Option<&str>, strict: bool, sql: &str) -> (serde_json::Value, Option<i32>) {
+    let schema = example("mysql-schema.sql");
+    let mut args = vec![
+        "check",
+        "--schema",
+        schema.to_str().unwrap(),
+        "--format",
+        "json",
+    ];
+    if let Some(server) = server {
+        args.extend(["--server", server]);
+    }
+    if strict {
+        args.push("--strict");
+    }
+    let output = kilit(&args, sql);
+    let json = serde_json::from_slice(&output.stdout).unwrap();
+    (json, output.status.code())
+}
+
+#[test]
+fn a_foreign_key_to_a_column_without_an_index_fails_with_the_error_of_each_server() {
+    // $table->string('user_name')->nullable();
+    // $table->foreign('user_name')->references('name')->on('users');
+    let schema = example("mysql-schema.sql");
+    let schema = schema.to_str().unwrap();
+    for (server, code, other) in [
+        (Some("mysql-8.0.46"), 1822, 6125),
+        (None, 6125, 1822),
+        (Some("mysql-8.4.13"), 6125, 1822),
+    ] {
+        let mut args = vec!["check", "--schema", schema];
+        if let Some(server) = server {
+            args.extend(["--server", server]);
+        }
+        let output = kilit(&args, FOREIGN_KEY_TO_NAME);
+        let text = stdout(&output);
+        let name = server.unwrap_or("mysql-8.4.13");
+        assert!(
+            text.starts_with(&format!("checked against {name}, ")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("    fails with error {code}\n")),
+            "{text}"
+        );
+        assert!(!text.contains(&format!("error {other}")), "{text}");
+        assert!(
+            text.ends_with("\n2 statements: 1 fails, 1 runs while writes continue\n"),
+            "{text}"
+        );
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+        // A failure is a failure with --strict too.
+        args.push("--strict");
+        assert_eq!(kilit(&args, FOREIGN_KEY_TO_NAME).status.code(), Some(1));
+
+        let (json, status) = json_check(server, false, FOREIGN_KEY_TO_NAME);
+        assert_eq!(json["server"], name);
+        let statements = json["sources"][0]["statements"].as_array().unwrap();
+        assert_eq!(statements[0]["impact"], "writes_continue");
+        assert_eq!(statements[1]["impact"], "fails");
+        assert_eq!(statements[1]["error"], code);
+        assert_eq!(json["summary"]["fails"], 1);
+        assert_eq!(json["summary"]["writes_continue"], 1);
+        assert_eq!(json["exit_code"], 1);
+        assert_eq!(status, Some(1));
+        let (json, status) = json_check(server, true, FOREIGN_KEY_TO_NAME);
+        assert_eq!(json["sources"][0]["statements"][1]["error"], code);
+        assert_eq!(json["exit_code"], 1);
+        assert_eq!(status, Some(1));
+    }
+}
+
+#[test]
+fn a_foreign_key_to_a_plain_index_is_accepted_by_mysql_80_and_fails_on_mysql_84() {
+    // $table->index('name') on the parent first: 8.0.46 takes the key and
+    // copies the table, 8.4.13 refuses it with 6125.
+    let sql =
+        format!("alter table `users` add index `users_name_index`(`name`);\n{FOREIGN_KEY_TO_NAME}");
+    let (json, status) = json_check(Some("mysql-8.0.46"), false, &sql);
+    let statement = &json["sources"][0]["statements"][2];
+    assert_eq!(statement["impact"], "writes_wait");
+    assert_eq!(statement["algorithm"], "COPY");
+    assert_eq!(statement["copies_rows"], true);
+    assert_eq!(json["summary"]["fails"], 0);
+    assert_eq!(status, Some(1));
+
+    let (json, status) = json_check(None, false, &sql);
+    let statement = &json["sources"][0]["statements"][2];
+    assert_eq!(statement["impact"], "fails");
+    assert_eq!(statement["error"], 6125);
+    assert_eq!(json["summary"]["fails"], 1);
+    assert_eq!(status, Some(1));
+}
+
+#[test]
+fn an_integer_foreign_key_column_fails_with_3780_on_both_servers() {
+    // $table->integer('user_id'); $table->foreign('user_id')->references('id')->on('users');
+    // in a migration that creates the table.
+    let sql = "create table `order_refunds` (`id` bigint unsigned not null auto_increment \
+               primary key, `user_id` int not null);
+               alter table `order_refunds` add constraint `order_refunds_user_id_foreign` \
+               foreign key (`user_id`) references `users` (`id`);";
+    for server in [Some("mysql-8.0.46"), None] {
+        for strict in [false, true] {
+            let (json, status) = json_check(server, strict, sql);
+            let statements = json["sources"][0]["statements"].as_array().unwrap();
+            assert_eq!(statements[0]["impact"], "not_checked");
+            assert_eq!(statements[1]["impact"], "fails");
+            assert_eq!(statements[1]["error"], 3780);
+            assert_eq!(json["exit_code"], 1);
+            assert_eq!(status, Some(1));
+        }
+    }
+}
+
+#[test]
+fn restrict_fk_on_non_standard_key_makes_the_index_answer_unknown_and_strict_exits_with_1() {
+    let sql = format!("SET restrict_fk_on_non_standard_key = OFF;\n{FOREIGN_KEY_TO_NAME}");
+    for server in [Some("mysql-8.0.46"), None] {
+        let (json, status) = json_check(server, false, &sql);
+        let statements = json["sources"][0]["statements"].as_array().unwrap();
+        assert_eq!(statements[2]["impact"], "unknown");
+        assert_eq!(json["summary"]["unknown"], 1);
+        assert_eq!(json["summary"]["fails"], 0);
+        // Unknown alone does not fail the run, only --strict does.
+        assert_eq!(json["exit_code"], 0);
+        assert_eq!(status, Some(0));
+        let (json, status) = json_check(server, true, &sql);
+        assert_eq!(json["exit_code"], 1);
+        assert_eq!(status, Some(1));
+    }
+}
+
+#[test]
+fn every_way_of_setting_restrict_fk_on_non_standard_key_is_unknown_for_a_foreign_key_to_a_plain_index()
+ {
+    let sql = |set: &str| {
+        format!(
+            "alter table `users` add index `users_name_index`(`name`);
+             {set};
+             {FOREIGN_KEY_TO_NAME}"
+        )
+    };
+    for set in [
+        "SET restrict_fk_on_non_standard_key := OFF",
+        "SET PERSIST restrict_fk_on_non_standard_key = 0",
+        "SET @@persist.restrict_fk_on_non_standard_key = 0",
+    ] {
+        for server in [Some("mysql-8.0.46"), None] {
+            let (json, status) = json_check(server, false, &sql(set));
+            let statements = json["sources"][0]["statements"].as_array().unwrap();
+            assert_eq!(statements[3]["impact"], "unknown", "{set}");
+            assert_eq!(status, Some(0), "{set}");
+            assert_eq!(json_check(server, true, &sql(set)).1, Some(1), "{set}");
+        }
+    }
+}
+
+#[test]
+fn null_on_delete_on_a_not_null_column_is_unknown_and_strict_exits_with_1() {
+    // $table->foreignId('user_id')->constrained()->nullOnDelete(); on a column
+    // that is not nullable.
+    let sql = "alter table `orders` add `store_id` bigint unsigned not null;
+               alter table `orders` add constraint `orders_store_id_foreign` \
+               foreign key (`store_id`) references `users` (`id`) on delete set null;";
+    for server in [Some("mysql-8.0.46"), None] {
+        let (json, status) = json_check(server, false, sql);
+        assert_eq!(json["sources"][0]["statements"][1]["impact"], "unknown");
+        assert_eq!(status, Some(0));
+        assert_eq!(json_check(server, true, sql).1, Some(1));
+    }
+}

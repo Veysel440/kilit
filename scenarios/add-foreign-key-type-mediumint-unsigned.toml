@@ -1,0 +1,8 @@
+# The column is named ref and the constraint fk_orders_ref in each of the
+# integer scenarios so that they give the same message, which names both.
+title = "Add a foreign key from a MEDIUMINT UNSIGNED column to a BIGINT UNSIGNED column"
+setup = [
+    "ALTER TABLE orders ADD COLUMN ref MEDIUMINT UNSIGNED NULL",
+]
+session = ["SET foreign_key_checks = 1"]
+operation = "ADD CONSTRAINT fk_orders_ref FOREIGN KEY (ref) REFERENCES users (id)"

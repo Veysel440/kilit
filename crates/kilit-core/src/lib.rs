@@ -35,7 +35,7 @@ mod split;
 mod statement;
 
 pub use charset::{CHARSETS, Charset};
-pub use check::{CASES, Case, Condition, Exception, Finding, Prediction, check};
+pub use check::{CASES, Case, Condition, Exception, Finding, KeyProblem, Prediction, check};
 pub use impact::{Impact, impacts, on_new_tables};
 pub use knowledge::{Knowledge, ScenarioResult, ServerResults};
 pub use metadata_lock::{

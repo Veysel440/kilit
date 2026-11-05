@@ -69,7 +69,7 @@ tables from database/schema/mysql-schema.sql: 4 (migrations, orders, shops, user
     - if the table has had 64 instant column changes since it was last rebuilt: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)
   alter table `orders` add constraint `orders_shop_id_foreign` foreign key (`shop_id`) references `shops` (`id`)
     COPY, copies every row, writes wait
-    measured as add-foreign-key (1 lab scenario)
+    measured as add-foreign-key (16 lab scenarios)
     - assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it
     - if a row points to a parent row that does not exist: fails with error 1452 (add-foreign-key-orphans)
 
@@ -78,7 +78,7 @@ tables from database/schema/mysql-schema.sql: 4 (migrations, orders, shops, user
     not checked: creates a new table; no existing rows are touched
   alter table `order_events` add constraint `order_events_order_id_foreign` foreign key (`order_id`) references `orders` (`id`) on delete cascade
     COPY, copies every row, writes wait
-    measured as add-foreign-key (1 lab scenario)
+    measured as add-foreign-key (16 lab scenarios)
     - assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it
     - if a row points to a parent row that does not exist: fails with error 1452 (add-foreign-key-orphans)
     - order_events is created earlier in these migrations: nothing else uses it yet, so nothing waits for it
@@ -134,7 +134,8 @@ Every statement gets one of three answers:
 ## What MySQL does with common changes
 
 Measured with kilit-lab on MySQL 8.0.46 and 8.4.13, on a table of 1,000 rows.
-Both versions behave the same in every scenario.
+The two versions mostly behave the same. Where they differ, the table says
+which one does what.
 
 ### Columns, indexes and foreign keys
 
@@ -169,7 +170,13 @@ Both versions behave the same in every scenario.
 | ↳ when a foreign key needs it<br>`$table->dropIndex('orders_user_id_foreign')` before `$table->dropForeign(['user_id'])` | fails, error 1553 | – |
 | Add a foreign key<br>`$table->foreign('user_id')->references('id')->on('users')` | COPY, copies every row | **wait** |
 | ↳ when a row points to a missing parent | fails, error 1452 | – |
+| ↳ when the parent column is BIGINT UNSIGNED and the column is an INT, INT UNSIGNED, BIGINT or smaller unsigned integer, or the parent is INT UNSIGNED and the column BIGINT UNSIGNED | fails, error 3780 | – |
+| ↳ when the parent column is utf8mb4 with its default collation and the column is a VARCHAR of the same length in latin1 or utf8mb4_bin | fails, error 3780 | – |
+| ↳ when no index of the parent table starts with the parent column, the column is only second in an index, or the index covers only a shorter prefix such as `name(10)` | fails, error 1822 on 8.0.46, 6125 on 8.4.13 | – |
+| ↳ when the only index that starts with the parent column is a plain one, a plain DESC one, or a longer one | COPY, copies every row on 8.0.46; fails, error 6125 on 8.4.13 | **wait** on 8.0.46, – on 8.4.13 |
+| ↳ when the two columns differ in a way not measured, the key has several columns without a matching UNIQUE index or primary key, or the parent index has a prefix as long as the column or longer, is FULLTEXT only, or part of a longer primary key, or the parent column has a foreign key of its own | not answered yet | – |
 | ↳ with the checks off²<br>`Schema::disableForeignKeyConstraints()` | INPLACE | continue |
+| ↳ with the checks off, when the two columns visibly differ, the parent has no fitting index, the key points at its own table or the shape is not measured | not answered yet | – |
 | Drop a foreign key<br>`$table->dropForeign(['user_id'])` | INPLACE | continue |
 | Add a CHECK constraint<br>`ADD CONSTRAINT … CHECK (…)` (raw SQL) | COPY, copies every row | **wait** |
 | ↳ when a row breaks it | fails, error 3819 | – |
@@ -349,7 +356,9 @@ trusting what it knew about that table instead of guessing.
 the lab scenarios that measured it. For a `MODIFY` or `CHANGE`, kilit compares
 the new definition with the column's current one, character set and collation
 included, and the one thing that changes decides the case. The scenarios of a
-case must agree on every server, or kilit refuses to answer. A case can also
+case must agree on each server, or kilit refuses to answer. The two servers
+may give different answers; kilit answers for the server you pick with
+`--server`. A case can also
 have *exceptions*: the same change measured in a situation where the answer
 differs. When the situation shows in the schema, such as a FULLTEXT index on the
 table or a foreign key on the column, it decides the answer; when it does not,

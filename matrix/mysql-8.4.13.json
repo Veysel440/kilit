@@ -1790,6 +1790,175 @@
       ]
     },
     {
+      "id": "add-foreign-key-char-to-char",
+      "title": "Add a foreign key from a CHAR column to a CHAR column of the same length",
+      "setup": [
+        "ALTER TABLE users ADD COLUMN code CHAR(100) NULL",
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_code (code)",
+        "ALTER TABLE orders ADD COLUMN user_name CHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (code)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-char-to-varchar",
+      "title": "Add a foreign key from a CHAR column to a VARCHAR column of the same length",
+      "setup": [
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_name (name)",
+        "ALTER TABLE orders ADD COLUMN user_name CHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
       "id": "add-foreign-key-checks-off",
       "title": "Add a foreign key with foreign_key_checks off",
       "session": [
@@ -1977,6 +2146,161 @@
       ]
     },
     {
+      "id": "add-foreign-key-new-column",
+      "title": "Add a foreign key on a new column of the same type as the parent column",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN ref BIGINT UNSIGNED NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_ref FOREIGN KEY (ref) REFERENCES users (id)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-no-parent-index",
+      "title": "Add a foreign key to a parent column with no index",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "fails",
+        "code": 6125,
+        "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        }
+      ]
+    },
+    {
       "id": "add-foreign-key-orphans",
       "title": "Add a foreign key when a row points to a missing parent",
       "setup": [
@@ -2036,6 +2360,2182 @@
           "result": "rejected",
           "code": 1452,
           "message": "Cannot add or update a child row: a foreign key constraint fails (`kilit_lab`.`#sql-<temporary>`, CONSTRAINT `fk_orders_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`))"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-parent-column-prefix-index",
+      "title": "Add a foreign key to a parent column whose only index covers its first 10 characters",
+      "setup": [
+        "ALTER TABLE users ADD INDEX idx_users_name_10 (name(10))",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "fails",
+        "code": 6125,
+        "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-parent-longer-index",
+      "title": "Add a foreign key to a parent column that is first in a longer non-unique index",
+      "setup": [
+        "ALTER TABLE users ADD INDEX idx_users_name_id (name, id)",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "fails",
+        "code": 6125,
+        "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-parent-longer-unique-index",
+      "title": "Add a foreign key to a parent column that is first in a longer UNIQUE index",
+      "setup": [
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_name_id (name, id)",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "fails",
+        "code": 6125,
+        "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-parent-nullable-unique-index",
+      "title": "Add a foreign key to a nullable parent column with a UNIQUE index",
+      "setup": [
+        "ALTER TABLE users ADD COLUMN code VARCHAR(100) NULL",
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_code (code)",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (code)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-parent-plain-desc-index",
+      "title": "Add a foreign key to a parent column with only a non-unique descending index",
+      "setup": [
+        "ALTER TABLE users ADD INDEX idx_users_name_desc (name DESC)",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "fails",
+        "code": 6125,
+        "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-parent-plain-index",
+      "title": "Add a foreign key to a parent column with only a non-unique index",
+      "setup": [
+        "ALTER TABLE users ADD INDEX idx_users_name (name)",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "fails",
+        "code": 6125,
+        "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-parent-second-column-index",
+      "title": "Add a foreign key to a parent column that is second in its only index",
+      "setup": [
+        "ALTER TABLE users ADD INDEX idx_users_id_name (id, name)",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "fails",
+        "code": 6125,
+        "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-parent-unique-and-longer-index",
+      "title": "Add a foreign key to a parent column with a UNIQUE index and a longer non-unique index",
+      "setup": [
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_name (name)",
+        "ALTER TABLE users ADD INDEX idx_users_name_id (name, id)",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-parent-unique-and-plain-index",
+      "title": "Add a foreign key to a parent column with a UNIQUE index and a non-unique index",
+      "setup": [
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_name (name)",
+        "ALTER TABLE users ADD INDEX idx_users_name (name)",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-parent-unique-and-second-column-index",
+      "title": "Add a foreign key to a parent column with a UNIQUE index and an index where it comes second",
+      "setup": [
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_name (name)",
+        "ALTER TABLE users ADD INDEX idx_users_id_name (id, name)",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-parent-unique-column-prefix-index",
+      "title": "Add a foreign key to a parent column whose only index is UNIQUE on its first 10 characters",
+      "setup": [
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_name_10 (name(10))",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "fails",
+        "code": 6125,
+        "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 6125,
+          "message": "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_orders_user_name' in the referenced table 'users'"
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-parent-unique-desc-index",
+      "title": "Add a foreign key to a parent column with a descending UNIQUE index",
+      "setup": [
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_name_desc (name DESC)",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-parent-unique-index",
+      "title": "Add a foreign key to a parent column with a UNIQUE index",
+      "setup": [
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_name (name)",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-self-reference",
+      "title": "Add a foreign key from a new column to the primary key of the same table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN parent_id BIGINT UNSIGNED NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_parent FOREIGN KEY (parent_id) REFERENCES orders (id)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-shorter-char-to-varchar",
+      "title": "Add a foreign key from a CHAR column to a longer VARCHAR column",
+      "setup": [
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_name (name)",
+        "ALTER TABLE orders ADD COLUMN user_name CHAR(50) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-string-collation-bin",
+      "title": "Add a foreign key from a utf8mb4_bin VARCHAR column to a VARCHAR column with another collation",
+      "setup": [
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_name (name)",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) COLLATE utf8mb4_bin NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "fails",
+        "code": 3780,
+        "message": "Referencing column 'user_name' and referenced column 'name' in foreign key constraint 'fk_orders_user_name' are incompatible."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'user_name' and referenced column 'name' in foreign key constraint 'fk_orders_user_name' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'user_name' and referenced column 'name' in foreign key constraint 'fk_orders_user_name' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'user_name' and referenced column 'name' in foreign key constraint 'fk_orders_user_name' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'user_name' and referenced column 'name' in foreign key constraint 'fk_orders_user_name' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'user_name' and referenced column 'name' in foreign key constraint 'fk_orders_user_name' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'user_name' and referenced column 'name' in foreign key constraint 'fk_orders_user_name' are incompatible."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-string-latin1",
+      "title": "Add a foreign key from a latin1 VARCHAR column to a utf8mb4 VARCHAR column",
+      "setup": [
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_name (name)",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) CHARACTER SET latin1 NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "fails",
+        "code": 3780,
+        "message": "Referencing column 'user_name' and referenced column 'name' in foreign key constraint 'fk_orders_user_name' are incompatible."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'user_name' and referenced column 'name' in foreign key constraint 'fk_orders_user_name' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'user_name' and referenced column 'name' in foreign key constraint 'fk_orders_user_name' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'user_name' and referenced column 'name' in foreign key constraint 'fk_orders_user_name' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'user_name' and referenced column 'name' in foreign key constraint 'fk_orders_user_name' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'user_name' and referenced column 'name' in foreign key constraint 'fk_orders_user_name' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'user_name' and referenced column 'name' in foreign key constraint 'fk_orders_user_name' are incompatible."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-string-longer",
+      "title": "Add a foreign key from a VARCHAR column longer than the parent column",
+      "setup": [
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_name (name)",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(200) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-string-shorter",
+      "title": "Add a foreign key from a VARCHAR column shorter than the parent column",
+      "setup": [
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_name (name)",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(50) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-two-columns",
+      "title": "Add a two-column foreign key to a UNIQUE index on exactly those columns",
+      "setup": [
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_id_name (id, name)",
+        "ALTER TABLE orders ADD COLUMN ref BIGINT UNSIGNED NULL",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_two FOREIGN KEY (ref, user_name) REFERENCES users (id, name)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            2,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            2,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-type-bigint",
+      "title": "Add a foreign key from a BIGINT column to a BIGINT UNSIGNED column",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN ref BIGINT NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_ref FOREIGN KEY (ref) REFERENCES users (id)",
+      "verdict": {
+        "result": "fails",
+        "code": 3780,
+        "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-type-int",
+      "title": "Add a foreign key from an INT column to a BIGINT UNSIGNED column",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN ref INT NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_ref FOREIGN KEY (ref) REFERENCES users (id)",
+      "verdict": {
+        "result": "fails",
+        "code": 3780,
+        "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-type-int-unsigned",
+      "title": "Add a foreign key from an INT UNSIGNED column to a BIGINT UNSIGNED column",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN ref INT UNSIGNED NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_ref FOREIGN KEY (ref) REFERENCES users (id)",
+      "verdict": {
+        "result": "fails",
+        "code": 3780,
+        "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-type-mediumint-unsigned",
+      "title": "Add a foreign key from a MEDIUMINT UNSIGNED column to a BIGINT UNSIGNED column",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN ref MEDIUMINT UNSIGNED NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_ref FOREIGN KEY (ref) REFERENCES users (id)",
+      "verdict": {
+        "result": "fails",
+        "code": 3780,
+        "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-type-parent-int-unsigned",
+      "title": "Add a foreign key from a BIGINT UNSIGNED column to an INT UNSIGNED column",
+      "setup": [
+        "ALTER TABLE users ADD COLUMN code INT UNSIGNED NULL",
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_code (code)",
+        "ALTER TABLE orders ADD COLUMN ref BIGINT UNSIGNED NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_ref FOREIGN KEY (ref) REFERENCES users (code)",
+      "verdict": {
+        "result": "fails",
+        "code": 3780,
+        "message": "Referencing column 'ref' and referenced column 'code' in foreign key constraint 'fk_orders_ref' are incompatible."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'code' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'code' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'code' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'code' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'code' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'code' in foreign key constraint 'fk_orders_ref' are incompatible."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-type-smallint-unsigned",
+      "title": "Add a foreign key from a SMALLINT UNSIGNED column to a BIGINT UNSIGNED column",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN ref SMALLINT UNSIGNED NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_ref FOREIGN KEY (ref) REFERENCES users (id)",
+      "verdict": {
+        "result": "fails",
+        "code": 3780,
+        "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-type-tinyint-unsigned",
+      "title": "Add a foreign key from a TINYINT UNSIGNED column to a BIGINT UNSIGNED column",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN ref TINYINT UNSIGNED NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_ref FOREIGN KEY (ref) REFERENCES users (id)",
+      "verdict": {
+        "result": "fails",
+        "code": 3780,
+        "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3780,
+          "message": "Referencing column 'ref' and referenced column 'id' in foreign key constraint 'fk_orders_ref' are incompatible."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-varchar-to-char",
+      "title": "Add a foreign key from a VARCHAR column to a CHAR column of the same length",
+      "setup": [
+        "ALTER TABLE users ADD COLUMN code CHAR(100) NULL",
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_code (code)",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (code)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
         },
         {
           "variant": {
