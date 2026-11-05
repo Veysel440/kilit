@@ -46,6 +46,7 @@ pub use pretend::{LaravelMigration, Pretend, UnreadableLine, read_pretend};
 pub use results::{Observation, Outcome, Server, Variant, Verdict, Writes};
 pub use schema::{Schema, TableState};
 pub use statement::{
-    Algorithm, Alter, Column, DataType, ForeignKey, ForeignKeyAction, Generated, Index, IndexKind,
-    IntegerSize, Lock, Operation, Position, Rename, Statement, StatementKind, Table, Variable,
+    Algorithm, Alter, Check, CheckColumns, Column, DataType, ForeignKey, ForeignKeyAction,
+    Generated, Index, IndexKind, IntegerSize, Lock, Operation, Position, Rename, Statement,
+    StatementKind, Table, Variable,
 };

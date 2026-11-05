@@ -8,20 +8,22 @@
 
 use sqlparser::ast::{
     self, AlterColumnOperation, AlterTableAlgorithm, AlterTableLock, AlterTableOperation,
-    CharacterLength, ColumnOption, ContextModifier, CreateTableOptions, Expr, ForeignKeyConstraint,
-    Function, FunctionArg, FunctionArgExpr, FunctionArguments, GeneratedExpressionMode, Ident,
-    IndexColumn, MySQLColumnPosition, ObjectName, ObjectNamePart, ObjectType, ReferentialAction,
-    RenameTableNameKind, SqlOption, TableConstraint, UnaryOperator, Value,
+    BinaryOperator, CharacterLength, CheckConstraint, ColumnOption, ContextModifier,
+    CreateTableOptions, Expr, ForeignKeyConstraint, Function, FunctionArg, FunctionArgExpr,
+    FunctionArguments, GeneratedExpressionMode, Ident, IndexColumn, MySQLColumnPosition,
+    ObjectName, ObjectNamePart, ObjectType, ReferentialAction, RenameTableNameKind, Spanned,
+    SqlOption, TableConstraint, UnaryOperator, Value,
 };
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
-use sqlparser::tokenizer::{Token, Tokenizer};
+use sqlparser::tokenizer::{Location, Token, Tokenizer};
 
 use crate::split::split;
 use crate::statement::{
-    Algorithm, Alter, Column, DataType, ForeignKey, ForeignKeyAction, Generated, Index, IndexKind,
-    IntegerSize, Lock, Operation, Position, Rename, Statement, StatementKind, Table, Variable,
+    Algorithm, Alter, Check, CheckColumns, Column, DataType, ForeignKey, ForeignKeyAction,
+    Generated, Index, IndexKind, IntegerSize, Lock, Operation, Position, Rename, Statement,
+    StatementKind, Table, Variable,
 };
 
 /// Reads every statement in `sql`, in order.
@@ -702,6 +704,8 @@ fn create_table(create: ast::CreateTable) -> StatementKind {
         name,
         ..Table::default()
     };
+    // With where each one is written: see below.
+    let mut checks = Vec::new();
     for column_def in create.columns {
         let column_name = column_def.name.value.clone();
         let mut options = Vec::new();
@@ -717,7 +721,11 @@ fn create_table(create: ast::CreateTable) -> StatementKind {
                 }),
                 // MySQL ignores an inline REFERENCES, and keeps a CHECK as a
                 // table constraint that a later MODIFY leaves alone.
-                ColumnOption::ForeignKey(_) | ColumnOption::Check(_) => {}
+                ColumnOption::ForeignKey(_) => {}
+                ColumnOption::Check(check) => checks.push(written_check(CheckConstraint {
+                    name: option.name,
+                    ..check
+                })),
                 other => options.push(other),
             }
         }
@@ -731,6 +739,7 @@ fn create_table(create: ast::CreateTable) -> StatementKind {
                 table.primary_key = key.columns.iter().map(index_column).collect();
             }
             TableConstraint::ForeignKey(key) => table.foreign_keys.push(foreign_key(key)),
+            TableConstraint::Check(check) => checks.push(written_check(check)),
             other => {
                 if let Operation::AddIndex(index) = added_constraint(other) {
                     table.indexes.push(index);
@@ -738,6 +747,10 @@ fn create_table(create: ast::CreateTable) -> StatementKind {
             }
         }
     }
+    // MySQL numbers the CHECKs it names in the order they are written, and the
+    // parser keeps the ones on columns apart from the others.
+    checks.sort_by_key(|(written_at, _)| *written_at);
+    table.checks = checks.into_iter().map(|(_, check)| check).collect();
     (table.charset, table.collation) = table_charset(&create.table_options);
     StatementKind::CreateTable {
         table,
@@ -857,6 +870,13 @@ fn operation_of(operation: AlterTableOperation) -> Operation {
             Operation::DropForeignKey { name: name.value }
         }
         AlterTableOperation::DropPrimaryKey { .. } => Operation::DropPrimaryKey,
+        // MySQL 8.0.46 and 8.4.13 do not accept the other forms: IF EXISTS,
+        // CASCADE and RESTRICT stay something kilit does not understand.
+        AlterTableOperation::DropConstraint {
+            if_exists: false,
+            name,
+            drop_behavior: None,
+        } => Operation::DropConstraint { name: name.value },
         AlterTableOperation::RenameTable { table_name } => {
             let (RenameTableNameKind::As(name) | RenameTableNameKind::To(name)) = table_name;
             Operation::RenameTable {
@@ -897,9 +917,136 @@ fn added_constraint(constraint: TableConstraint) -> Operation {
             columns: key.columns.iter().map(index_column).collect(),
         },
         TableConstraint::ForeignKey(key) => Operation::AddForeignKey(foreign_key(key)),
+        // MySQL 8.0.46 and 8.4.13 do not accept NO INHERIT, which stays
+        // something kilit does not understand.
+        TableConstraint::Check(check) if !check.no_inherit => {
+            Operation::AddCheck(check_constraint(check))
+        }
         other => Operation::Other {
             sql: format!("ADD {other}"),
         },
+    }
+}
+
+fn check_constraint(check: CheckConstraint) -> Check {
+    let expression = check.expr.to_string();
+    Check {
+        name: check.name.map(|name| name.value),
+        columns: check_columns(&check.expr, &expression),
+        expression,
+        enforced: check.enforced != Some(false),
+    }
+}
+
+/// A CHECK of a `CREATE TABLE`, with where it starts in the statement.
+fn written_check(check: CheckConstraint) -> (Location, Check) {
+    (check.expr.span().start, check_constraint(check))
+}
+
+/// The columns a CHECK's expression uses, or else every name it has outside a
+/// string: in MySQL a column has to be named to be used.
+fn check_columns(expression: &Expr, printed: &str) -> CheckColumns {
+    let mut columns = Vec::new();
+    if boolean_expression(expression) && plain_expression(expression, &mut columns) {
+        CheckColumns::Plain(columns)
+    } else {
+        CheckColumns::Other(names_outside_strings(printed))
+    }
+}
+
+/// Every name in `printed`, an expression as the parser prints it. Without
+/// ANSI_QUOTES a double-quoted word is a string, with it a name, and kilit does
+/// not know the server's sql_mode. The parser prints a string without its
+/// escapes, so `'a\\'` does not read back the same way: when one may be in there,
+/// every word counts, in a string too, and every name in backticks.
+fn names_outside_strings(printed: &str) -> Vec<String> {
+    let tokens = if printed.contains('\\') {
+        None
+    } else {
+        Tokenizer::new(&MySqlDialect {}, printed).tokenize().ok()
+    };
+    let Some(tokens) = tokens else {
+        let words = printed.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'));
+        let quoted = printed.split('`').skip(1).step_by(2);
+        return words
+            .chain(quoted)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect();
+    };
+    tokens
+        .into_iter()
+        .filter_map(|token| match token {
+            Token::Word(word) => Some(word.value),
+            Token::DoubleQuotedString(text) => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether the expression gives a truth value at its top: MySQL refuses
+/// `CHECK (amount)` with error 3812, run by hand on 8.0.46 and 8.4.13.
+fn boolean_expression(expression: &Expr) -> bool {
+    match expression {
+        Expr::Nested(inner) => boolean_expression(inner),
+        Expr::IsNull(_)
+        | Expr::IsNotNull(_)
+        | Expr::UnaryOp {
+            op: UnaryOperator::Not,
+            ..
+        } => true,
+        Expr::BinaryOp { op, .. } => matches!(
+            op,
+            BinaryOperator::And
+                | BinaryOperator::Or
+                | BinaryOperator::Eq
+                | BinaryOperator::NotEq
+                | BinaryOperator::Lt
+                | BinaryOperator::LtEq
+                | BinaryOperator::Gt
+                | BinaryOperator::GtEq
+        ),
+        _ => false,
+    }
+}
+
+/// Whether the expression has nothing but column names, numbers, arithmetic
+/// and comparison operators, `AND`, `OR`, `NOT`, `IS [NOT] NULL` and
+/// parentheses. Adds the columns it names to `columns`.
+fn plain_expression(expression: &Expr, columns: &mut Vec<String>) -> bool {
+    match expression {
+        Expr::Identifier(column) => {
+            columns.push(column.value.clone());
+            true
+        }
+        Expr::Value(value) => matches!(value.value, Value::Number(..)),
+        Expr::Nested(inner) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            plain_expression(inner, columns)
+        }
+        Expr::UnaryOp {
+            op: UnaryOperator::Not | UnaryOperator::Plus | UnaryOperator::Minus,
+            expr,
+        } => plain_expression(expr, columns),
+        Expr::BinaryOp { left, op, right } => {
+            matches!(
+                op,
+                BinaryOperator::Plus
+                    | BinaryOperator::Minus
+                    | BinaryOperator::Multiply
+                    | BinaryOperator::Divide
+                    | BinaryOperator::Modulo
+                    | BinaryOperator::And
+                    | BinaryOperator::Or
+                    | BinaryOperator::Eq
+                    | BinaryOperator::NotEq
+                    | BinaryOperator::Lt
+                    | BinaryOperator::LtEq
+                    | BinaryOperator::Gt
+                    | BinaryOperator::GtEq
+            ) && plain_expression(left, columns)
+                && plain_expression(right, columns)
+        }
+        _ => false,
     }
 }
 
@@ -1645,10 +1792,260 @@ mod tests {
                 sql: "AUTO_INCREMENT = 1000".into()
             }
         );
-        assert!(matches!(
-            operation("ALTER TABLE t ADD CHECK (a > 0)"),
-            Operation::Other { ref sql } if sql.starts_with("ADD CHECK")
-        ));
+        // MySQL 8.0.46 and 8.4.13 do not accept these forms (run by hand).
+        for (sql, printed) in [
+            (
+                "ALTER TABLE t ADD CHECK (a > 0) NO INHERIT",
+                "ADD CHECK (a > 0) NO INHERIT",
+            ),
+            (
+                "ALTER TABLE t DROP CONSTRAINT IF EXISTS c",
+                "DROP CONSTRAINT IF EXISTS c",
+            ),
+            (
+                "ALTER TABLE t DROP CONSTRAINT c CASCADE",
+                "DROP CONSTRAINT c CASCADE",
+            ),
+            (
+                "ALTER TABLE t DROP CONSTRAINT c RESTRICT",
+                "DROP CONSTRAINT c RESTRICT",
+            ),
+        ] {
+            assert_eq!(
+                operation(sql),
+                Operation::Other {
+                    sql: printed.into()
+                },
+                "{sql}"
+            );
+        }
+    }
+
+    /// The CHECK constraints of a `CREATE TABLE`, in the order MySQL numbers them.
+    fn checks_of(sql: &str) -> Vec<Check> {
+        match kind(sql) {
+            StatementKind::CreateTable { table, .. } => table.checks,
+            other => panic!("{sql}: expected a CREATE TABLE, got {other:?}"),
+        }
+    }
+
+    fn plain(columns: &[&str]) -> CheckColumns {
+        CheckColumns::Plain(columns.iter().map(|&column| column.to_owned()).collect())
+    }
+
+    #[test]
+    fn reads_check_constraints_in_alter_table() {
+        let check = |sql: &str| match operation(sql) {
+            Operation::AddCheck(check) => check,
+            other => panic!("{sql}: expected ADD CHECK, got {other:?}"),
+        };
+        assert_eq!(
+            check("ALTER TABLE t ADD CONSTRAINT `c` CHECK (a > 0)"),
+            Check {
+                name: Some("c".into()),
+                expression: "a > 0".into(),
+                enforced: true,
+                columns: plain(&["a"]),
+            }
+        );
+        // Without a name, in both spellings, and with ENFORCED written.
+        for sql in [
+            "ALTER TABLE t ADD CHECK (a > 0)",
+            "ALTER TABLE t ADD CONSTRAINT CHECK (a > 0)",
+            "ALTER TABLE t ADD CHECK (a > 0) ENFORCED",
+        ] {
+            let found = check(sql);
+            assert_eq!(found.name, None, "{sql}");
+            assert!(found.enforced, "{sql}");
+        }
+        assert!(!check("ALTER TABLE t ADD CHECK (a > 0) NOT ENFORCED").enforced);
+        assert_eq!(
+            operation("ALTER TABLE t DROP CONSTRAINT `c`"),
+            Operation::DropConstraint { name: "c".into() }
+        );
+    }
+
+    #[test]
+    fn check_constraints_sqlparser_cannot_read_stay_unparsed() {
+        // All valid MySQL 8.0.46 and 8.4.13 (run by hand). sqlparser 0.63 takes
+        // the word after DROP or ALTER for a column's name.
+        for sql in [
+            "ALTER TABLE t DROP CHECK c",
+            "ALTER TABLE t ALTER CHECK c NOT ENFORCED",
+            "ALTER TABLE t ALTER CONSTRAINT c ENFORCED",
+        ] {
+            assert!(
+                matches!(
+                    kind(sql),
+                    StatementKind::Unparsed { ref table, .. } if table.as_deref() == Some("t")
+                ),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_keeps_its_check_constraints_as_a_schema_dump_writes_them() {
+        let checks = checks_of(
+            "CREATE TABLE `orders` (
+               `id` bigint unsigned NOT NULL,
+               `AMOUNT` int NOT NULL,
+               `note` varchar(50) DEFAULT NULL,
+               CONSTRAINT `orders_chk_1` CHECK ((`AMOUNT` > `id`)),
+               CONSTRAINT `orders_chk_2` CHECK ((`amount` > 0)) /*!80016 NOT ENFORCED */,
+               CONSTRAINT `orders_chk_3` CHECK ((`note` <> _utf8mb4'x'))
+             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        );
+        assert_eq!(
+            checks,
+            [
+                Check {
+                    name: Some("orders_chk_1".into()),
+                    expression: "(`AMOUNT` > `id`)".into(),
+                    enforced: true,
+                    columns: plain(&["AMOUNT", "id"]),
+                },
+                Check {
+                    name: Some("orders_chk_2".into()),
+                    expression: "(`amount` > 0)".into(),
+                    enforced: false,
+                    columns: plain(&["amount"]),
+                },
+                Check {
+                    name: Some("orders_chk_3".into()),
+                    expression: "(`note` <> _utf8mb4 'x')".into(),
+                    enforced: true,
+                    columns: CheckColumns::Other(vec!["note".into(), "_utf8mb4".into()]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn check_constraints_stay_in_the_order_written() {
+        // MySQL 8.0.46 and 8.4.13 number them in this order (run by hand), and
+        // the parser keeps the ones on columns apart from the others.
+        let checks = checks_of(
+            "CREATE TABLE t (
+               a INT, CHECK (a > 1),
+               b INT CHECK (b > 2),
+               c INT CONSTRAINT named CHECK (c > 3) NOT ENFORCED,
+               d INT, CONSTRAINT CHECK (d > 4),
+               e INT CHECK (char_length(e) > 5),
+               CONSTRAINT last CHECK (a > b)
+             )",
+        );
+        let found: Vec<(Option<&str>, &str, bool)> = checks
+            .iter()
+            .map(|check| {
+                (
+                    check.name.as_deref(),
+                    check.expression.as_str(),
+                    check.enforced,
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (None, "a > 1", true),
+                (None, "b > 2", true),
+                (Some("named"), "c > 3", false),
+                (None, "d > 4", true),
+                (None, "char_length(e) > 5", true),
+                (Some("last"), "a > b", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_check_is_plain_with_column_names_numbers_and_the_listed_operators() {
+        for (expression, columns) in [
+            ("a > 0", &["a"][..]),
+            ("a = 1", &["a"]),
+            ("a <> 1", &["a"]),
+            ("a != 1", &["a"]),
+            ("a < 1", &["a"]),
+            ("a <= 1", &["a"]),
+            ("a >= 1", &["a"]),
+            ("1.5 < a", &["a"]),
+            ("a > 0 AND b > 0", &["a", "b"]),
+            ("a > 0 OR b > 0", &["a", "b"]),
+            ("NOT (a > b)", &["a", "b"]),
+            ("a IS NULL", &["a"]),
+            ("a IS NOT NULL", &["a"]),
+            ("a IS NULL OR b > 0", &["a", "b"]),
+            ("a + b * 2 - 1 > 0", &["a", "b"]),
+            ("a / 2 % 3 > 0", &["a"]),
+            ("-a < +b", &["a", "b"]),
+            ("((`a` > `b`))", &["a", "b"]),
+            // As SHOW CREATE TABLE writes them on MySQL 8.0.46 and 8.4.13.
+            ("(`a` >= -(1))", &["a"]),
+            ("((`a` is null) or (`b` > 0))", &["a", "b"]),
+            (
+                "((`a` is not null) and ((`a` + (`b` * 2)) >= -(1)))",
+                &["a", "a", "b"],
+            ),
+            ("(((`a` <> 0) and (`a` <> 1)))", &["a", "a"]),
+            ("(not(`a`))", &["a"]),
+            // Capitals stay as written; a comparison looks past them.
+            ("`AMOUNT` > User_Id", &["AMOUNT", "User_Id"]),
+            ("a > 0 AND a < 9", &["a", "a"]),
+            ("1 > 0", &[]),
+        ] {
+            let checks = checks_of(&format!(
+                "CREATE TABLE t (a INT, b INT, CHECK ({expression}))"
+            ));
+            assert_eq!(checks[0].columns, plain(columns), "{expression}");
+        }
+    }
+
+    #[test]
+    fn any_other_check_lists_the_names_it_has_outside_strings() {
+        let names = |expression: &str| {
+            let checks = checks_of(&format!(
+                "CREATE TABLE t (a INT, b INT, CHECK ({expression}))"
+            ));
+            match checks[0].columns.clone() {
+                CheckColumns::Other(names) => names,
+                CheckColumns::Plain(columns) => panic!("{expression} is plain: {columns:?}"),
+            }
+        };
+        assert_eq!(names("a IN ('a', 'b')"), ["a", "IN"]);
+        assert_eq!(names("a IN (b, 2)"), ["a", "IN", "b"]);
+        assert_eq!(names("char_length(`a`) > 0"), ["char_length", "a"]);
+        assert_eq!(names("a LIKE 'b%'"), ["a", "LIKE"]);
+        assert_eq!(names("a NOT LIKE 'b%'"), ["a", "NOT", "LIKE"]);
+        assert_eq!(names("a BETWEEN 1 AND 2"), ["a", "BETWEEN", "AND"]);
+        // A column named only in a string is not among them.
+        assert_eq!(names("a <> 'b'"), ["a"]);
+        assert_eq!(names("`a` <> _utf8mb4'b'"), ["a", "_utf8mb4"]);
+        // With ANSI_QUOTES this one is a column's name.
+        assert_eq!(names("\"a\" > 0"), ["a"]);
+        // A string with a backslash may not read back the same way: every word
+        // counts then, in a string too, and every name in backticks.
+        assert_eq!(names(r"a <> 'b\\'"), ["a", "b"]);
+        assert_eq!(
+            names(r"`a b` <> 'c\\' OR d <> 'e\\'"),
+            ["a", "b", "c", "OR", "d", "e", "a b"]
+        );
+        // Not a truth value, which MySQL refuses, and operators left out.
+        assert_eq!(names("a"), ["a"]);
+        assert_eq!(names("a + 1"), ["a"]);
+        assert_eq!(names("a <=> b"), ["a", "b"]);
+        assert_eq!(names("a DIV 2 > 0"), ["a", "DIV"]);
+        assert_eq!(names("a > 0 XOR b > 0"), ["a", "XOR", "b"]);
+        assert_eq!(names("a > 0 || b > 0"), ["a", "b"]);
+        assert_eq!(names("a > 0 IS TRUE"), ["a", "IS", "TRUE"]);
+        assert_eq!(names("a <> NULL"), ["a", "NULL"]);
+        assert_eq!(names("t.a > 0"), ["t", "a"]);
+        assert_eq!(names("a > CURRENT_TIMESTAMP"), ["a", "CURRENT_TIMESTAMP"]);
+    }
+
+    #[test]
+    fn a_check_written_on_a_column_of_alter_table_stays_an_option_kilit_does_not_follow() {
+        let added = added_column("ALTER TABLE t ADD c INT CHECK (c > 0)");
+        assert_eq!(added.other_options, ["CHECK (c > 0)"]);
     }
 
     #[test]

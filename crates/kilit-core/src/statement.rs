@@ -66,6 +66,9 @@ pub struct Table {
     /// Plain, unique, FULLTEXT and spatial indexes.
     pub indexes: Vec<Index>,
     pub foreign_keys: Vec<ForeignKey>,
+    /// CHECK constraints, also the ones written on a column: MySQL keeps
+    /// those as the table's too.
+    pub checks: Vec<Check>,
     /// `DEFAULT CHARSET=...`: what a column gets when it names none.
     pub charset: Option<String>,
     /// `COLLATE=...`
@@ -147,6 +150,13 @@ pub enum Operation {
     DropPrimaryKey,
     AddForeignKey(ForeignKey),
     DropForeignKey {
+        name: String,
+    },
+    /// `ADD [CONSTRAINT [name]] CHECK (expression)`
+    AddCheck(Check),
+    /// `DROP CONSTRAINT name`. The name says what it drops: a CHECK constraint,
+    /// a foreign key, a unique index or the primary key.
+    DropConstraint {
         name: String,
     },
     /// `RENAME TO new_name`
@@ -276,6 +286,32 @@ pub struct ForeignKey {
     pub on_update: Option<ForeignKeyAction>,
 }
 
+/// A CHECK constraint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Check {
+    /// `None` when the statement lets MySQL pick the name.
+    pub name: Option<String>,
+    /// The expression as the parser prints it, as the statement wrote it: a
+    /// later rename of a column changes [`Check::columns`] only.
+    pub expression: String,
+    /// `NOT ENFORCED` gives `false`.
+    pub enforced: bool,
+    pub columns: CheckColumns,
+}
+
+/// What kilit can tell about the columns a CHECK constraint uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckColumns {
+    /// A plain boolean expression, of column names, numbers, arithmetic and
+    /// comparison operators, `AND`, `OR`, `NOT`, `IS [NOT] NULL` and
+    /// parentheses. It uses exactly these columns.
+    Plain(Vec<String>),
+    /// Any other expression, with every name it has outside a string. A
+    /// column it uses is among them, but a name may be no column at all, such
+    /// as a function's, so kilit cannot tell which of them it uses.
+    Other(Vec<String>),
+}
+
 /// What happens to referencing rows when the referenced row is deleted or updated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForeignKeyAction {
@@ -395,6 +431,8 @@ impl fmt::Display for Operation {
             Operation::DropPrimaryKey => f.write_str("drop primary key"),
             Operation::AddForeignKey(key) => write!(f, "add {key}"),
             Operation::DropForeignKey { name } => write!(f, "drop foreign key {name}"),
+            Operation::AddCheck(check) => write!(f, "add {check}"),
+            Operation::DropConstraint { name } => write!(f, "drop constraint {name}"),
             Operation::RenameTable { new_name } => write!(f, "rename table to {new_name}"),
             Operation::Other { sql } => write!(f, "not understood: {sql}"),
         }
@@ -492,6 +530,22 @@ impl fmt::Display for ForeignKey {
     }
 }
 
+/// `check constraint chk_amount (amount > 0) NOT ENFORCED`, or `check
+/// constraint (amount > 0)` without a name.
+impl fmt::Display for Check {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("check constraint")?;
+        if let Some(name) = &self.name {
+            write!(f, " {name}")?;
+        }
+        write!(f, " ({})", self.expression)?;
+        if !self.enforced {
+            f.write_str(" NOT ENFORCED")?;
+        }
+        Ok(())
+    }
+}
+
 impl fmt::Display for ForeignKeyAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -566,6 +620,36 @@ mod tests {
         assert_eq!(
             Operation::AddForeignKey(key).to_string(),
             "add foreign key fk_orders_user (user_id) references users (id) ON DELETE CASCADE"
+        );
+    }
+
+    #[test]
+    fn check_constraints_show_their_name_and_enforcement() {
+        let check = Check {
+            name: Some("chk_amount".into()),
+            expression: "amount > 0".into(),
+            enforced: true,
+            columns: CheckColumns::Plain(vec!["amount".into()]),
+        };
+        assert_eq!(
+            Operation::AddCheck(check.clone()).to_string(),
+            "add check constraint chk_amount (amount > 0)"
+        );
+        let unnamed = Check {
+            name: None,
+            enforced: false,
+            ..check
+        };
+        assert_eq!(
+            Operation::AddCheck(unnamed).to_string(),
+            "add check constraint (amount > 0) NOT ENFORCED"
+        );
+        assert_eq!(
+            Operation::DropConstraint {
+                name: "chk_amount".into()
+            }
+            .to_string(),
+            "drop constraint chk_amount"
         );
     }
 

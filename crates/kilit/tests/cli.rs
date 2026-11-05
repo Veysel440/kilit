@@ -185,7 +185,7 @@ fn indexes_on_the_table_change_the_answer() {
     for answer in [
         "  line 1: alter table `orders` drop `status`\n\
          \x20   INPLACE, rebuilds the table, writes continue\n\
-         \x20   measured as drop-column (7 lab scenarios)\n\
+         \x20   measured as drop-column (8 lab scenarios)\n\
          \x20   - status is in the index orders_status_index\n",
         "    INPLACE, rebuilds the table, writes wait\n\
          \x20   measured as add-fulltext-index (1 lab scenario)\n\
@@ -223,7 +223,7 @@ fn indexes_on_the_table_change_the_answer() {
             ("writes_wait", false, "add-second-fulltext-index"),
         ]
     );
-    assert_eq!(statements[0]["evidence"].as_array().unwrap().len(), 7);
+    assert_eq!(statements[0]["evidence"].as_array().unwrap().len(), 8);
     assert_eq!(output.status.code(), Some(1));
 }
 
@@ -339,6 +339,65 @@ fn a_statement_that_fails_changes_no_table_on_either_server() {
     );
     assert_eq!(default_server[3]["algorithm"], "INSTANT");
     assert_eq!(answers(Some("mysql-8.0.46")), default_server);
+}
+
+#[test]
+fn a_check_constraint_in_the_schema_keeps_its_columns() {
+    // The form SHOW CREATE TABLE writes, in a schema dump. The first statement
+    // fails, so the column and the constraint stay for the second.
+    let schema = Path::new(env!("CARGO_TARGET_TMPDIR")).join("schema-with-a-check.sql");
+    std::fs::write(
+        &schema,
+        "CREATE TABLE `orders` (
+           `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+           `user_id` bigint unsigned NOT NULL,
+           `amount` int NOT NULL,
+           PRIMARY KEY (`id`),
+           CONSTRAINT `orders_chk_1` CHECK (((`amount` + `user_id`) > 0))
+         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
+    )
+    .unwrap();
+    let schema = schema.to_str().unwrap();
+    let sql = "ALTER TABLE orders DROP COLUMN amount;
+               ALTER TABLE orders RENAME COLUMN amount TO total;
+               ALTER TABLE orders DROP CONSTRAINT orders_chk_1;
+               ALTER TABLE orders DROP COLUMN amount;";
+    let output = kilit(&["check", "--schema", schema, "--format", "json"], sql);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let statements = json["sources"][0]["statements"].as_array().unwrap();
+    let answers: Vec<(&str, &str)> = statements
+        .iter()
+        .map(|statement| {
+            (
+                statement["impact"].as_str().unwrap(),
+                statement["case"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        answers,
+        [
+            ("fails", "drop-column"),
+            ("fails", "rename-column"),
+            ("writes_continue", "drop-check-constraint"),
+            ("writes_continue", "drop-column"),
+        ]
+    );
+    assert_eq!(statements[0]["error"], 3959);
+    assert_eq!(statements[1]["error"], 3959);
+
+    let output = kilit(&["check", "--schema", schema], sql);
+    let text = stdout(&output);
+    assert!(
+        text.contains(
+            "  line 1: ALTER TABLE orders DROP COLUMN amount\n\
+             \x20   fails with error 3959\n\
+             \x20   measured as drop-column (2 lab scenarios)\n\
+             \x20   - the CHECK constraint orders_chk_1 uses amount and user_id\n"
+        ),
+        "{text}"
+    );
 }
 
 #[test]

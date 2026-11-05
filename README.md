@@ -152,8 +152,10 @@ Both versions behave the same in every scenario.
 | ↳ when the column is in a foreign key<br>`$table->dropColumn('user_id')` before `$table->dropForeign(['user_id'])` | fails, error 1828 | – |
 | ↳ when the column is in a foreign key of several columns or with the checks off, the primary key, a functional index or a UNIQUE index with other columns | not answered yet | – |
 | ↳ when a generated column uses it | fails, error 3108 | – |
+| ↳ when a CHECK constraint uses it and another column | fails, error 3959 | – |
 | Rename a column<br>`$table->renameColumn('note', 'memo')` | INSTANT | continue |
 | ↳ when a generated column uses it | fails, error 3108 | – |
+| ↳ when a CHECK constraint uses it, with other columns or alone | fails, error 3959 | – |
 | Set a column default<br>`ALTER COLUMN … SET DEFAULT` (raw SQL) | INSTANT | continue |
 | Add an index<br>`$table->index('amount')` | INPLACE | continue |
 | ↳ on `LOWER()` of a VARCHAR column (functional index)<br>`$table->rawIndex('(lower(email))', 'users_lower_email_index')` | INPLACE | **wait** |
@@ -169,6 +171,11 @@ Both versions behave the same in every scenario.
 | ↳ when a row points to a missing parent | fails, error 1452 | – |
 | ↳ with the checks off²<br>`Schema::disableForeignKeyConstraints()` | INPLACE | continue |
 | Drop a foreign key<br>`$table->dropForeign(['user_id'])` | INPLACE | continue |
+| Add a CHECK constraint<br>`ADD CONSTRAINT … CHECK (…)` (raw SQL) | COPY, copies every row | **wait** |
+| ↳ when a row breaks it | fails, error 3819 | – |
+| ↳ when its expression has a string, a function call, `IN`, `BETWEEN` or `LIKE`, or it is `NOT ENFORCED` | not answered yet | – |
+| Drop a CHECK constraint<br>`DROP CONSTRAINT …` (raw SQL) | INSTANT | continue |
+| ↳ with `DROP CHECK …`, which kilit cannot read yet | not answered yet | – |
 
 ¹ Seven ways of adding a column were measured, and all are INSTANT: nullable,
 `NOT NULL` with and without a default, `AFTER`, `FIRST`, with a character set,

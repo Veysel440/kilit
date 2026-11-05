@@ -1,0 +1,3 @@
+title = "Drop a column a CHECK constraint names only in a string"
+setup = ["ALTER TABLE orders ADD CONSTRAINT chk_email CHECK (email <> 'note')"]
+operation = "DROP COLUMN note"

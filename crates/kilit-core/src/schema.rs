@@ -6,13 +6,13 @@
 //! statement changes a table in a way kilit cannot follow, kilit stops
 //! trusting what it knew about that table instead of guessing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::charset::{Charset, canonical};
 use crate::parse::parse;
 use crate::statement::{
-    Alter, Column, ForeignKey, Index, IndexKind, Operation, Position, Statement, StatementKind,
-    Table,
+    Alter, Check, CheckColumns, Column, ForeignKey, Index, IndexKind, Operation, Position,
+    Statement, StatementKind, Table,
 };
 
 /// The tables kilit knows at one point of the input.
@@ -20,6 +20,10 @@ use crate::statement::{
 pub struct Schema {
     /// By lowercase name.
     tables: BTreeMap<String, Entry>,
+    /// The lowercase name of every table a foreign key has pointed at. It may
+    /// hold more than the keys of today, never less: it only saves looking
+    /// through every table for a key that points at one.
+    pointed_at: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +74,11 @@ impl Schema {
         }
     }
 
+    /// Whether a foreign key may point at the table `name`. If not, none does.
+    pub(crate) fn may_be_pointed_at(&self, name: &str) -> bool {
+        self.pointed_at.contains(&key(name))
+    }
+
     /// The tables kilit knows, by name.
     pub fn tables(&self) -> impl Iterator<Item = &Table> {
         self.tables.values().filter_map(|entry| match entry {
@@ -100,7 +109,9 @@ impl Schema {
                 let mut table = table.clone();
                 for foreign_key in table.foreign_keys.clone() {
                     index_foreign_key(&mut table, &foreign_key);
+                    self.pointed_at.insert(key(&foreign_key.referenced_table));
                 }
+                name_new_checks(&mut table);
                 self.tables.insert(key(&table.name), Entry::Known(table));
             }
             StatementKind::DropTable { tables } => {
@@ -132,6 +143,7 @@ impl Schema {
     fn rename(&mut self, from: &str, to: &str) {
         if let Some(mut entry) = self.tables.remove(&key(from)) {
             if let Entry::Known(table) = &mut entry {
+                rename_generated_checks(table, to);
                 to.clone_into(&mut table.name);
             }
             self.tables.insert(key(to), entry);
@@ -160,6 +172,9 @@ impl Schema {
             if let Err(reason) = changed {
                 self.lose(&alter.table, format!("line {line}: {reason}"));
                 return;
+            }
+            if let Operation::AddForeignKey(foreign_key) = operation {
+                self.pointed_at.insert(key(&foreign_key.referenced_table));
             }
         }
         self.tables.insert(key(&alter.table), Entry::Known(table));
@@ -201,6 +216,10 @@ fn change(table: &mut Table, operation: &Operation) -> Result<(), String> {
             table
                 .primary_key
                 .retain(|column| !same(indexed_column(column), name));
+            // And a CHECK constraint that uses no other column. One that does
+            // makes MySQL refuse the statement, which kilit may follow anyway
+            // when it gives no answer: such a constraint stays.
+            table.checks.retain(|check| !uses_only(check, name));
         }
         Operation::ModifyColumn { column, position } => {
             replace(table, &column.name, column, position.as_ref())?;
@@ -251,6 +270,40 @@ fn change(table: &mut Table, operation: &Operation) -> Result<(), String> {
             // The index MySQL made for the key stays.
             table.foreign_keys.remove(at);
         }
+        Operation::AddCheck(check) => {
+            let mut check = check.clone();
+            match &check.name {
+                Some(name) if has_name(table.checks.iter().map(|c| &c.name), name) => {
+                    return Err(format!(
+                        "adds the CHECK constraint {name}, which the table already has"
+                    ));
+                }
+                Some(_) => {}
+                None => check.name = Some(generated_check_name(table)),
+            }
+            table.checks.push(check);
+        }
+        Operation::DropConstraint { name } => match table.constraints_named(name).as_slice() {
+            [ConstraintKind::Check] => table.checks.retain(|check| !has_name([&check.name], name)),
+            // The index MySQL made for the key stays.
+            [ConstraintKind::ForeignKey] => table
+                .foreign_keys
+                .retain(|key| !has_name([&key.name], name)),
+            [ConstraintKind::UniqueIndex] => table
+                .indexes
+                .retain(|index| index.kind != IndexKind::Unique || !has_name([&index.name], name)),
+            [ConstraintKind::PrimaryKey] => table.primary_key.clear(),
+            [] => {
+                return Err(format!(
+                    "drops the constraint {name}, which kilit does not know"
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "drops the constraint {name}, a name that several of its constraints have"
+                ));
+            }
+        },
         // The caller moves the table to its new name.
         Operation::RenameTable { .. } => {}
         Operation::Other { sql } => return Err(format!("kilit does not follow `{sql}`")),
@@ -324,6 +377,88 @@ fn rename_references(table: &mut Table, from: &str, to: &str) {
             }
         }
     }
+    // MySQL refuses to rename a column a CHECK constraint uses, but kilit may
+    // follow the statement anyway when it gives no answer.
+    for check in &mut table.checks {
+        let (CheckColumns::Plain(names) | CheckColumns::Other(names)) = &mut check.columns;
+        for name in names {
+            if same(name, from) {
+                to.clone_into(name);
+            }
+        }
+    }
+}
+
+/// Whether a plain CHECK constraint uses `column` and no other column. Of any
+/// other expression kilit cannot tell.
+fn uses_only(check: &Check, column: &str) -> bool {
+    match &check.columns {
+        CheckColumns::Plain(columns) => {
+            !columns.is_empty() && columns.iter().all(|c| same(c, column))
+        }
+        CheckColumns::Other(_) => false,
+    }
+}
+
+/// Whether one of `names` is `name`, in any case.
+fn has_name<'a>(names: impl IntoIterator<Item = &'a Option<String>>, name: &str) -> bool {
+    names
+        .into_iter()
+        .any(|found| found.as_deref().is_some_and(|found| same(found, name)))
+}
+
+/// The start of the name MySQL gives a CHECK constraint of `table`, without
+/// its database: `orders_chk_` for `shop.orders`.
+fn generated_check_prefix(table: &str) -> String {
+    let table = table.rsplit('.').next().unwrap_or(table);
+    format!("{table}_chk_")
+}
+
+/// The number in a name that `prefix` starts, such as `2` in `orders_chk_2`.
+/// MySQL 8.0.46 and 8.4.13 compare the letters of the prefix exactly: they do
+/// not take `ORDERS_CHK_9` for the automatic name of a CHECK of `orders`.
+fn generated_check_number<'a>(prefix: &str, name: &'a str) -> Option<&'a str> {
+    name.strip_prefix(prefix)
+        .filter(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// In a new table, MySQL names the CHECK constraints left without a name
+/// `<table>_chk_1`, `<table>_chk_2` and so on, in the order written, whatever
+/// names the others have.
+fn name_new_checks(table: &mut Table) {
+    let prefix = generated_check_prefix(&table.name);
+    let unnamed = table.checks.iter_mut().filter(|check| check.name.is_none());
+    for (number, check) in (1..).zip(unnamed) {
+        check.name = Some(format!("{prefix}{number}"));
+    }
+}
+
+/// The name MySQL gives a CHECK constraint added to a table without one: the
+/// number after the largest automatic one the table has.
+fn generated_check_name(table: &Table) -> String {
+    let prefix = generated_check_prefix(&table.name);
+    let largest = table
+        .checks
+        .iter()
+        .filter_map(|check| generated_check_number(&prefix, check.name.as_deref()?))
+        .filter_map(|number| number.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0);
+    format!("{prefix}{}", largest + 1)
+}
+
+/// MySQL renames a table's automatic CHECK names along with the table.
+fn rename_generated_checks(table: &mut Table, to: &str) {
+    let from = generated_check_prefix(&table.name);
+    let to = generated_check_prefix(to);
+    for check in &mut table.checks {
+        let Some(name) = &mut check.name else {
+            continue;
+        };
+        if let Some(number) = generated_check_number(&from, name) {
+            *name = format!("{to}{number}");
+        }
+    }
 }
 
 /// MySQL indexes a foreign key's columns when no index starts with them,
@@ -393,6 +528,15 @@ fn no_column(name: &str) -> String {
     format!("names the column {name}, which kilit does not know")
 }
 
+/// What `DROP CONSTRAINT` can drop. A plain index is no constraint for MySQL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConstraintKind {
+    Check,
+    ForeignKey,
+    UniqueIndex,
+    PrimaryKey,
+}
+
 /// A text column's character set and collation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TextSettings {
@@ -457,6 +601,30 @@ impl Table {
         self.foreign_keys
             .iter()
             .find(|key| key.columns.iter().any(|c| same(c, column)))
+    }
+
+    /// Every constraint of the table with this name, in any case. MySQL 8.0.46
+    /// and 8.4.13 refuse `DROP CONSTRAINT` when there are several: a foreign
+    /// key and a plain index count as one, as Laravel's tables have them.
+    pub(crate) fn constraints_named(&self, name: &str) -> Vec<ConstraintKind> {
+        let mut kinds = Vec::new();
+        if has_name(self.checks.iter().map(|check| &check.name), name) {
+            kinds.push(ConstraintKind::Check);
+        }
+        if has_name(self.foreign_keys.iter().map(|key| &key.name), name) {
+            kinds.push(ConstraintKind::ForeignKey);
+        }
+        let unique = self
+            .indexes
+            .iter()
+            .filter(|index| index.kind == IndexKind::Unique);
+        if has_name(unique.map(|index| &index.name), name) {
+            kinds.push(ConstraintKind::UniqueIndex);
+        }
+        if same(name, "PRIMARY") && !self.primary_key.is_empty() {
+            kinds.push(ConstraintKind::PrimaryKey);
+        }
+        kinds
     }
 
     /// The character set and collation of a text column: the column's own,
@@ -879,6 +1047,271 @@ mod tests {
                 "{dump}"
             );
             assert!(known(&schema, "codes").primary_key.is_empty(), "{dump}");
+        }
+    }
+
+    /// The table's CHECK constraints as `name: expression`, in its order.
+    fn checks(table: &Table) -> Vec<String> {
+        table
+            .checks
+            .iter()
+            .map(|check| {
+                format!(
+                    "{}: {}",
+                    check.name.as_deref().unwrap_or("?"),
+                    check.expression
+                )
+            })
+            .collect()
+    }
+
+    /// The tables after `sql`, from nothing.
+    fn from_sql(sql: &str) -> Schema {
+        Schema::from_sql(sql)
+    }
+
+    #[test]
+    fn a_new_table_names_its_checks_in_the_order_written() {
+        // MySQL 8.0.46 and 8.4.13 do the same (run by hand).
+        let schema = from_sql(
+            "CREATE TABLE t (
+                 a INT CHECK (a > 0),
+                 b INT CONSTRAINT b_pos CHECK (b > 0) NOT ENFORCED,
+                 c INT, CHECK (c > 0),
+                 CONSTRAINT named CHECK (a > b),
+                 d INT CHECK (d > 0),
+                 CONSTRAINT CHECK (b < 100),
+                 CONSTRAINT t_chk_9 CHECK (a < 9)
+             );",
+        );
+        assert_eq!(
+            checks(&known(&schema, "t")),
+            [
+                "t_chk_1: a > 0",
+                "b_pos: b > 0",
+                "t_chk_2: c > 0",
+                "named: a > b",
+                "t_chk_3: d > 0",
+                "t_chk_4: b < 100",
+                "t_chk_9: a < 9",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_added_check_takes_the_number_after_the_largest() {
+        // MySQL 8.0.46 and 8.4.13 do the same (run by hand). They compare the
+        // letters of an automatic name exactly, so capitals do not count.
+        let schema = from_sql(
+            "CREATE TABLE orders (amount INT);
+             ALTER TABLE orders ADD CHECK (amount > 0);
+             ALTER TABLE orders ADD CONSTRAINT CHECK (amount > 1);
+             ALTER TABLE orders ADD CONSTRAINT orders_chk_7 CHECK (amount > 2);
+             ALTER TABLE orders ADD CHECK (amount > 3);
+             ALTER TABLE orders DROP CONSTRAINT orders_chk_8;
+             ALTER TABLE orders DROP CONSTRAINT orders_chk_7;
+             ALTER TABLE orders ADD CHECK (amount > 4);
+             ALTER TABLE orders ADD CONSTRAINT ORDERS_CHK_9 CHECK (amount > 5);
+             ALTER TABLE orders ADD CONSTRAINT orders_chk_x CHECK (amount > 6);
+             ALTER TABLE orders ADD CHECK (amount > 7);",
+        );
+        assert_eq!(schema.lost().count(), 0);
+        assert_eq!(
+            checks(&known(&schema, "orders")),
+            [
+                "orders_chk_1: amount > 0",
+                "orders_chk_2: amount > 1",
+                "orders_chk_3: amount > 4",
+                "ORDERS_CHK_9: amount > 5",
+                "orders_chk_x: amount > 6",
+                "orders_chk_4: amount > 7",
+            ]
+        );
+    }
+
+    #[test]
+    fn automatic_check_names_leave_out_the_database() {
+        let schema = from_sql(
+            "CREATE TABLE shop.orders (amount INT, CHECK (amount > 0));
+             ALTER TABLE shop.orders ADD CHECK (amount > 1);",
+        );
+        assert_eq!(
+            checks(&known(&schema, "shop.orders")),
+            ["orders_chk_1: amount > 0", "orders_chk_2: amount > 1"]
+        );
+    }
+
+    #[test]
+    fn renaming_a_table_renames_its_automatic_check_names() {
+        // MySQL 8.0.46 and 8.4.13 do the same (run by hand), in both spellings.
+        let schema = from_sql(
+            "CREATE TABLE orders (amount INT, CHECK (amount > 0),
+                 CONSTRAINT c_one CHECK (amount > 1), CONSTRAINT orders_chk_x CHECK (amount > 2));
+             RENAME TABLE orders TO sales;",
+        );
+        let renamed = [
+            "sales_chk_1: amount > 0",
+            "c_one: amount > 1",
+            "orders_chk_x: amount > 2",
+        ];
+        assert_eq!(checks(&known(&schema, "sales")), renamed);
+        let schema = from_sql(
+            "CREATE TABLE orders (amount INT, CHECK (amount > 0),
+                 CONSTRAINT c_one CHECK (amount > 1), CONSTRAINT orders_chk_x CHECK (amount > 2));
+             ALTER TABLE orders RENAME TO sales;",
+        );
+        assert_eq!(checks(&known(&schema, "sales")), renamed);
+    }
+
+    #[test]
+    fn dropping_a_column_drops_a_check_that_uses_no_other_column() {
+        let schema = from_sql(
+            "CREATE TABLE t (a INT, b INT, c VARCHAR(9),
+                 CONSTRAINT alone CHECK (a > 0),
+                 CONSTRAINT twice CHECK (`A` > 0 AND a < 9),
+                 CONSTRAINT two CHECK (a > b),
+                 CONSTRAINT other_column CHECK (b > 0),
+                 CONSTRAINT not_plain CHECK (char_length(c) > a),
+                 CONSTRAINT no_column CHECK (1 > 0));
+             ALTER TABLE t DROP COLUMN a;",
+        );
+        // kilit follows a statement it gives no answer for: `two` makes MySQL
+        // refuse this one, and `not_plain` keeps a name it may not use.
+        assert_eq!(
+            checks(&known(&schema, "t")),
+            [
+                "two: a > b",
+                "other_column: b > 0",
+                "not_plain: char_length(c) > a",
+                "no_column: 1 > 0",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_column_of_a_new_name_is_the_one_a_check_uses() {
+        let schema = from_sql(
+            "CREATE TABLE t (a INT, b INT, c VARCHAR(9),
+                 CONSTRAINT plain CHECK (`a` > b),
+                 CONSTRAINT other CHECK (char_length(A) > 0));
+             ALTER TABLE t RENAME COLUMN a TO x;
+             ALTER TABLE t CHANGE b y INT;",
+        );
+        let table = known(&schema, "t");
+        assert_eq!(
+            table.checks[0].columns,
+            CheckColumns::Plain(vec!["x".into(), "y".into()])
+        );
+        assert_eq!(
+            table.checks[1].columns,
+            CheckColumns::Other(vec!["char_length".into(), "x".into()])
+        );
+        // The expression stays as written.
+        assert_eq!(table.checks[0].expression, "`a` > b");
+    }
+
+    #[test]
+    fn drop_constraint_finds_the_right_kind_of_constraint() {
+        let dump = "CREATE TABLE users (id INT PRIMARY KEY);
+            CREATE TABLE orders (
+                id INT NOT NULL, user_id INT NOT NULL, email VARCHAR(50), note VARCHAR(50),
+                PRIMARY KEY (id),
+                UNIQUE KEY uq_email (email),
+                KEY fk_user (user_id),
+                KEY i_note (note),
+                CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users (id),
+                CONSTRAINT chk_note CHECK (note IS NULL)
+            );";
+        let after = |change: &str| {
+            let mut schema = Schema::from_sql(dump);
+            for statement in parse(change) {
+                schema.apply(&statement);
+            }
+            schema
+        };
+        // A CHECK constraint, in any case.
+        let orders = known(
+            &after("ALTER TABLE orders DROP CONSTRAINT CHK_NOTE"),
+            "orders",
+        );
+        assert!(orders.checks.is_empty());
+        assert_eq!(orders.foreign_keys.len(), 1);
+        // A foreign key goes, and its plain index of the same name stays.
+        let orders = known(
+            &after("ALTER TABLE orders DROP CONSTRAINT fk_user"),
+            "orders",
+        );
+        assert!(orders.foreign_keys.is_empty());
+        assert_eq!(orders.index_on("user_id").as_deref(), Some("fk_user"));
+        assert_eq!(orders.checks.len(), 1);
+        // A unique index.
+        let orders = known(
+            &after("ALTER TABLE orders DROP CONSTRAINT uq_email"),
+            "orders",
+        );
+        assert!(orders.index_on("email").is_none());
+        // The primary key.
+        let orders = known(
+            &after("ALTER TABLE orders DROP CONSTRAINT `PRIMARY`"),
+            "orders",
+        );
+        assert!(orders.primary_key.is_empty());
+        // No constraint of that name: a plain index is none.
+        for (name, reason) in [
+            (
+                "nosuch",
+                "line 1: drops the constraint nosuch, which kilit does not know",
+            ),
+            (
+                "i_note",
+                "line 1: drops the constraint i_note, which kilit does not know",
+            ),
+        ] {
+            let schema = after(&format!("ALTER TABLE orders DROP CONSTRAINT {name}"));
+            assert_eq!(schema.lost().collect::<Vec<_>>(), [("orders", reason)]);
+        }
+        // A name two kinds share: MySQL refuses it.
+        let schema = after(
+            "ALTER TABLE orders ADD CONSTRAINT fk_user CHECK (note IS NULL);
+ALTER TABLE orders DROP CONSTRAINT fk_user",
+        );
+        assert_eq!(
+            schema.lost().collect::<Vec<_>>(),
+            [(
+                "orders",
+                "line 2: drops the constraint fk_user, a name that several of its constraints have"
+            )]
+        );
+    }
+
+    #[test]
+    fn adding_a_check_the_table_already_has_loses_the_table() {
+        let schema = from_sql(
+            "CREATE TABLE t (a INT, CONSTRAINT c CHECK (a > 0));
+ALTER TABLE t ADD CONSTRAINT C CHECK (a > 1);",
+        );
+        assert_eq!(
+            schema.lost().collect::<Vec<_>>(),
+            [(
+                "t",
+                "line 2: adds the CHECK constraint C, which the table already has"
+            )]
+        );
+    }
+
+    #[test]
+    fn a_change_kilit_cannot_read_on_a_check_loses_the_table() {
+        for sql in [
+            "ALTER TABLE t DROP CHECK c",
+            "ALTER TABLE t ALTER CHECK c NOT ENFORCED",
+            "ALTER TABLE t ADD CHECK (a > 0) NO INHERIT",
+            "ALTER TABLE t DROP CONSTRAINT IF EXISTS c",
+            "ALTER TABLE t ADD b INT CHECK (b > 0)",
+        ] {
+            let schema = from_sql(&format!(
+                "CREATE TABLE t (a INT, CONSTRAINT c CHECK (a > 0));\n{sql};"
+            ));
+            assert_eq!(schema.lost().count(), 1, "{sql}");
         }
     }
 

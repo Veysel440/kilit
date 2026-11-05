@@ -1,0 +1,2 @@
+title = "Add a CHECK constraint on two columns"
+operation = "ADD CONSTRAINT chk_amount CHECK (amount + user_id > 0)"

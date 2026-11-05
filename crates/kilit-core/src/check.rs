@@ -15,10 +15,10 @@ use std::fmt::Write as _;
 use crate::knowledge::ServerResults;
 use crate::modify::{Change, changes};
 use crate::results::{Variant, Verdict};
-use crate::schema::{Schema, TableState};
+use crate::schema::{ConstraintKind, Schema, TableState};
 use crate::statement::{
-    Alter, Column, DataType, ForeignKey, Index, IndexKind, Lock, Operation, Position, Statement,
-    StatementKind, Table, Variable,
+    Alter, Check, CheckColumns, Column, DataType, ForeignKey, Index, IndexKind, Lock, Operation,
+    Position, Statement, StatementKind, Table, Variable,
 };
 
 /// What kilit says about one statement of the input.
@@ -96,6 +96,12 @@ pub enum Condition {
     /// A generated column of the table uses the changed column, in an
     /// expression of column names, numbers and arithmetic operators.
     GeneratedColumnSource,
+    /// A CHECK constraint of the table uses the changed column and another
+    /// column, in a plain expression: see [`CheckColumns::Plain`].
+    CheckWithAnotherColumn,
+    /// A CHECK constraint of the table uses the changed column, with other
+    /// columns or alone, in a plain expression.
+    CheckUsesColumn,
     /// Something no schema shows: the rows, or the table's history.
     Hidden,
 }
@@ -166,10 +172,18 @@ const EXPRESSION_DEFAULTS: [(&str, &Case); 7] = [
 
 /// Shapes the lab has not measured, such as a column in a foreign key of
 /// several columns or in the primary key, are unknown: see
-/// [`check_dropped_column`] and [`generated_column_source`].
+/// [`check_dropped_column`], [`generated_column_source`] and [`check_use`].
 const DROP_COLUMN: Case = Case {
     id: "drop-column",
-    scenarios: &["drop-column"],
+    // A CHECK constraint that uses only the column goes with it, and changes
+    // nothing. Neither does one that does not use the column.
+    scenarios: &[
+        "drop-column",
+        "drop-column-in-check-alone",
+        "drop-column-in-not-enforced-check-alone",
+        "drop-column-next-to-check",
+        "drop-column-named-in-check-string",
+    ],
     exceptions: &[
         Exception {
             scenarios: &["drop-column-with-fulltext"],
@@ -186,6 +200,7 @@ const DROP_COLUMN: Case = Case {
                 "drop-column-indexed-prefix",
                 "drop-column-indexed-fulltext",
                 "drop-column-after-dropping-its-foreign-key",
+                "drop-column-indexed-in-check-alone",
             ],
             when: "if the column is in a plain or FULLTEXT index, or has a UNIQUE index of its own",
             conditions: &[Condition::IndexedColumn],
@@ -219,24 +234,57 @@ const DROP_COLUMN: Case = Case {
             when: GENERATED_COLUMN_USES_IT,
             conditions: &[Condition::GeneratedColumnSource],
         },
+        Exception {
+            scenarios: &[
+                "drop-column-in-two-column-check",
+                "drop-column-in-not-enforced-two-column-check",
+            ],
+            when: "if a CHECK constraint uses the column and another column",
+            conditions: &[Condition::CheckWithAnotherColumn],
+        },
+        Exception {
+            scenarios: &["drop-column-indexed-in-two-column-check"],
+            when: "if the column is in an index and a CHECK constraint uses it and another column",
+            conditions: &[Condition::IndexedColumn, Condition::CheckWithAnotherColumn],
+        },
     ],
 };
 
 const GENERATED_COLUMN_USES_IT: &str = "if a generated column uses the column";
 
-/// A `CHANGE` that renames a column a generated column uses has not been
-/// measured, and is unknown: see [`classify`].
+/// A `CHANGE` that renames a column a generated column or a CHECK constraint
+/// uses has not been measured, and is unknown: see [`classify`]. So are the
+/// shapes in [`check_use`].
 const RENAME_COLUMN: Case = Case {
     id: "rename-column",
-    scenarios: &["rename-column", "change-column-rename"],
-    exceptions: &[Exception {
-        scenarios: &[
-            "rename-column-generated-source",
-            "rename-column-stored-generated-source",
-        ],
-        when: GENERATED_COLUMN_USES_IT,
-        conditions: &[Condition::GeneratedColumnSource],
-    }],
+    scenarios: &[
+        "rename-column",
+        "change-column-rename",
+        "rename-column-next-to-check",
+        "rename-column-named-in-check-string",
+    ],
+    exceptions: &[
+        Exception {
+            scenarios: &[
+                "rename-column-generated-source",
+                "rename-column-stored-generated-source",
+            ],
+            when: GENERATED_COLUMN_USES_IT,
+            conditions: &[Condition::GeneratedColumnSource],
+        },
+        Exception {
+            scenarios: &[
+                "rename-column-in-two-column-check",
+                "rename-column-in-check-alone",
+                "rename-column-in-not-enforced-two-column-check",
+                "rename-column-in-not-enforced-check-alone",
+                "rename-column-indexed-in-two-column-check",
+                "rename-column-indexed-in-check-alone",
+            ],
+            when: "if a CHECK constraint uses the column",
+            conditions: &[Condition::CheckUsesColumn],
+        },
+    ],
 };
 
 const SET_COLUMN_DEFAULT: Case = Case {
@@ -458,8 +506,37 @@ const DROP_FOREIGN_KEY: Case = Case {
     exceptions: &[],
 };
 
+/// An enforced CHECK constraint with a plain expression over columns of the
+/// table: see [`check_new_constraint`].
+const ADD_CHECK_CONSTRAINT: Case = Case {
+    id: "add-check-constraint",
+    scenarios: &[
+        "add-check-constraint",
+        "add-check-constraint-enforced",
+        "add-check-constraint-without-a-name",
+        "add-check-constraint-two-columns",
+    ],
+    exceptions: &[Exception {
+        scenarios: &["add-check-constraint-rows-break-it"],
+        when: "if a row breaks the constraint",
+        conditions: &[Condition::Hidden],
+    }],
+};
+
+/// `DROP CONSTRAINT` of a CHECK constraint: see [`dropped_constraint`].
+/// `DROP CHECK` gets no answer, as the parser cannot read it.
+const DROP_CHECK_CONSTRAINT: Case = Case {
+    id: "drop-check-constraint",
+    scenarios: &[
+        "drop-constraint-check",
+        "drop-constraint-two-column-check",
+        "drop-constraint-not-enforced-check",
+    ],
+    exceptions: &[],
+};
+
 /// Every case kilit knows.
-pub const CASES: [&Case; 25] = [
+pub const CASES: [&Case; 27] = [
     &ADD_COLUMN,
     &ADD_COLUMN_EXPRESSION_DEFAULT,
     &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT,
@@ -485,6 +562,8 @@ pub const CASES: [&Case; 25] = [
     &ADD_FOREIGN_KEY,
     &ADD_FOREIGN_KEY_CHECKS_OFF,
     &DROP_FOREIGN_KEY,
+    &ADD_CHECK_CONSTRAINT,
+    &DROP_CHECK_CONSTRAINT,
 ];
 
 /// The cases a MODIFY or CHANGE can fall into, listed when kilit does not
@@ -924,7 +1003,9 @@ fn applies(condition: Condition, situation: &Situation<'_>) -> Applies {
         | (
             Condition::IndexedColumn
             | Condition::ForeignKeyColumn
-            | Condition::GeneratedColumnSource,
+            | Condition::GeneratedColumnSource
+            | Condition::CheckWithAnotherColumn
+            | Condition::CheckUsesColumn,
             None,
         ) => Applies::Maybe,
         (Condition::OnlyIndexOfForeignKey, _) => {
@@ -933,6 +1014,12 @@ fn applies(condition: Condition, situation: &Situation<'_>) -> Applies {
             })
         }
         (Condition::GeneratedColumnSource, Some(column)) => generated_column_source(table, column),
+        (Condition::CheckWithAnotherColumn, Some(column)) => {
+            check_with_another_column(table, column, situation.schema)
+        }
+        (Condition::CheckUsesColumn, Some(column)) => {
+            check_uses_column(table, column, situation.schema)
+        }
         (Condition::BlobOrTextWithoutPrefix, _) => situation.index.map_or(Applies::No, |index| {
             blob_or_text_without_prefix(table, index)
         }),
@@ -1077,22 +1164,29 @@ fn only_index_of_foreign_key(table: &Table, name: &str, situation: &Situation<'_
         return Applies::No;
     };
     let not_measured = "dropping such an index has not been measured yet";
-    let pointing_here = situation.schema.tables().find_map(|other| {
-        other
-            .foreign_keys
-            .iter()
-            .find(|key| {
-                key.referenced_table.eq_ignore_ascii_case(&table.name)
-                    && !key.referenced_columns.is_empty()
-                    && key
-                        .referenced_columns
-                        .iter()
-                        .zip(&index.columns)
-                        .all(|(column, entry)| column.eq_ignore_ascii_case(entry))
-                    && key.referenced_columns.len() <= index.columns.len()
+    // Most tables have no key pointing at them: no need to look through all.
+    let pointing_here = situation
+        .schema
+        .may_be_pointed_at(&table.name)
+        .then(|| {
+            situation.schema.tables().find_map(|other| {
+                other
+                    .foreign_keys
+                    .iter()
+                    .find(|key| {
+                        key.referenced_table.eq_ignore_ascii_case(&table.name)
+                            && !key.referenced_columns.is_empty()
+                            && key
+                                .referenced_columns
+                                .iter()
+                                .zip(&index.columns)
+                                .all(|(column, entry)| column.eq_ignore_ascii_case(entry))
+                            && key.referenced_columns.len() <= index.columns.len()
+                    })
+                    .map(|key| (other.name.as_str(), key.name.as_deref().unwrap_or_default()))
             })
-            .map(|key| (other.name.as_str(), key.name.as_deref().unwrap_or_default()))
-    });
+        })
+        .flatten();
     if let Some((other, key)) = pointing_here {
         return Applies::Unmeasured(format!(
             "{name} serves the foreign key {key} on {other}, which points at this table, and \
@@ -1327,6 +1421,270 @@ fn generated_column_source(table: &Table, column: &str) -> Applies {
     )])
 }
 
+/// How the CHECK constraints of a table use a column.
+struct CheckUse<'a> {
+    /// The first one that uses the column.
+    user: &'a Check,
+    /// The first one that also uses another column, with that column.
+    with_another: Option<(&'a Check, &'a str)>,
+}
+
+/// The name of a CHECK constraint that kilit keeps: it names the ones left
+/// without a name, as MySQL does.
+fn check_name(check: &Check) -> &str {
+    check.name.as_deref().unwrap_or_default()
+}
+
+/// How the CHECK constraints of `table` use `column`, or why kilit cannot say
+/// what the lab measured about that. MySQL's rule also holds for the other
+/// expressions that use a column (run by hand), but an expression that is not
+/// plain may name it without using it: `lower(note)` does not use a column
+/// `lower`. A word in a string is no use of a column at all. The lab measured
+/// a column in no index or in a plain one, on a table without a FULLTEXT
+/// index; the other situations are unknown, as it has not measured them
+/// together with a CHECK constraint.
+fn check_use<'a>(
+    table: &'a Table,
+    column: &str,
+    schema: &Schema,
+) -> Result<Option<CheckUse<'a>>, String> {
+    let same = |name: &String| name.eq_ignore_ascii_case(column);
+    let mut user = None;
+    let mut with_another = None;
+    for check in &table.checks {
+        let columns = match &check.columns {
+            CheckColumns::Plain(columns) => columns,
+            CheckColumns::Other(names) if names.iter().any(same) => {
+                return Err(format!(
+                    "the expression of the CHECK constraint {} names {column}, and the lab \
+                     measured expressions of column names, numbers and arithmetic, comparison \
+                     and logical operators only, not strings, function calls, IN, BETWEEN or LIKE",
+                    check_name(check)
+                ));
+            }
+            CheckColumns::Other(_) => continue,
+        };
+        if !columns.iter().any(same) {
+            continue;
+        }
+        if let Some(missing) = columns.iter().find(|name| table.column(name).is_none()) {
+            return Err(format!(
+                "the CHECK constraint {} uses {missing}, a column {} does not have, as far as \
+                 kilit can tell",
+                check_name(check),
+                table.name
+            ));
+        }
+        user.get_or_insert(check);
+        if with_another.is_none() {
+            with_another = columns
+                .iter()
+                .find(|name| !same(name))
+                .map(|other| (check, other.as_str()));
+        }
+    }
+    let Some(user) = user else {
+        return Ok(None);
+    };
+    if let Some(what) = beside_a_check(table, column, schema) {
+        return Err(format!(
+            "the CHECK constraint {} uses {column}, and {what}, which has not been measured \
+             together",
+            check_name(user)
+        ));
+    }
+    Ok(Some(CheckUse { user, with_another }))
+}
+
+/// What else holds for a column a CHECK constraint uses that the lab has not
+/// measured next to one.
+fn beside_a_check(table: &Table, column: &str, schema: &Schema) -> Option<String> {
+    if table.column(column).is_some_and(|c| c.generated.is_some()) {
+        return Some(format!("{column} is a generated column"));
+    }
+    if let Some(user) = generated_column_naming(table, column) {
+        return Some(format!("the generated column {} uses it", user.name));
+    }
+    if table.in_primary_key(column) {
+        return Some(format!("{column} is in the primary key"));
+    }
+    if let Some(key) = table.foreign_key_on(column) {
+        let key = key.name.as_deref().unwrap_or_default();
+        return Some(format!("{column} is in the foreign key {key}"));
+    }
+    if let Some((other, key)) = referenced_by(schema, table, column) {
+        return Some(format!(
+            "{column} is referenced by the foreign key {key} on {other}"
+        ));
+    }
+    if let Some(index) = table.fulltext_index() {
+        let index = index.name.as_deref().unwrap_or_default();
+        return Some(format!("{} has the FULLTEXT index {index}", table.name));
+    }
+    table
+        .indexes
+        .iter()
+        .find(|index| {
+            index.columns.iter().any(|entry| match entry_column(entry) {
+                Some(entry) => index.kind != IndexKind::Plain && entry.eq_ignore_ascii_case(column),
+                None => uses_column(entry, column),
+            })
+        })
+        .map(|index| {
+            let index = index.name.as_deref().unwrap_or_default();
+            format!("{column} is in the index {index}, not a plain one")
+        })
+}
+
+/// Whether a CHECK constraint uses `column` and another column of `table`, so
+/// that MySQL refuses to drop `column`. A constraint that uses only `column`
+/// goes with it, and the lab measured that it changes nothing in the answer.
+fn check_with_another_column(table: &Table, column: &str, schema: &Schema) -> Applies {
+    match check_use(table, column, schema) {
+        Ok(Some(CheckUse {
+            with_another: Some((check, other)),
+            ..
+        })) => Applies::Yes(vec![format!(
+            "the CHECK constraint {} uses {column} and {other}",
+            check_name(check)
+        )]),
+        Ok(_) => Applies::No,
+        Err(reason) => Applies::Unmeasured(reason),
+    }
+}
+
+/// Whether a CHECK constraint uses `column`, so that MySQL refuses to rename it.
+fn check_uses_column(table: &Table, column: &str, schema: &Schema) -> Applies {
+    match check_use(table, column, schema) {
+        Ok(Some(CheckUse { user, .. })) => Applies::Yes(vec![format!(
+            "the CHECK constraint {} uses {column}",
+            check_name(user)
+        )]),
+        Ok(None) => Applies::No,
+        Err(reason) => Applies::Unmeasured(reason),
+    }
+}
+
+/// The first CHECK constraint of `table` that names `column`, plain or not.
+fn check_naming<'a>(table: &'a Table, column: &str) -> Option<&'a Check> {
+    table.checks.iter().find(|check| {
+        let (CheckColumns::Plain(names) | CheckColumns::Other(names)) = &check.columns;
+        names.iter().any(|name| name.eq_ignore_ascii_case(column))
+    })
+}
+
+/// The lab measured adding an enforced CHECK constraint with a plain expression
+/// over columns of the table. By hand, MySQL 8.0.46 and 8.4.13 refuse a name
+/// the database already has (error 3822), a column the table does not have
+/// (1054), an AUTO_INCREMENT column (3818), a disallowed function (3814) and a
+/// foreign key column with a referential action (3823), and a NOT ENFORCED
+/// constraint is INSTANT. None of that has a lab fact yet, so kilit gives no
+/// answer when it can see one of them.
+fn check_new_constraint(
+    check: &Check,
+    table: TableState<'_>,
+    schema: &Schema,
+) -> Result<(), String> {
+    if !check.enforced {
+        return Err("adding a NOT ENFORCED CHECK constraint has not been measured yet".into());
+    }
+    let CheckColumns::Plain(columns) = &check.columns else {
+        return Err(format!(
+            "adding a CHECK constraint on ({}) has not been measured yet; the lab measured \
+             expressions of column names, numbers and arithmetic, comparison and logical \
+             operators only",
+            check.expression
+        ));
+    };
+    if columns.is_empty() {
+        return Err(
+            "adding a CHECK constraint that uses no column has not been measured yet".into(),
+        );
+    }
+    let TableState::Known(table) = table else {
+        return Ok(());
+    };
+    if let Some(name) = &check.name {
+        let holder = schema.tables().find(|other| {
+            other
+                .checks
+                .iter()
+                .any(|c| check_name(c).eq_ignore_ascii_case(name))
+        });
+        if let Some(holder) = holder {
+            return Err(format!(
+                "{} already has a CHECK constraint {name}, and adding one with a name the \
+                 database already has has not been measured yet",
+                holder.name
+            ));
+        }
+    }
+    for name in columns {
+        let Some(column) = table.column(name) else {
+            return Err(format!(
+                "{} has no column {name}, as far as kilit can tell",
+                table.name
+            ));
+        };
+        let what = if column.auto_increment {
+            "an AUTO_INCREMENT column"
+        } else if column.generated.is_some() {
+            "a generated column"
+        } else if table.foreign_key_on(name).is_some() {
+            "a foreign key's column"
+        } else {
+            continue;
+        };
+        return Err(format!(
+            "{name} is {what}, and a CHECK constraint on such a column has not been measured yet"
+        ));
+    }
+    Ok(())
+}
+
+/// The case of `DROP CONSTRAINT`, which depends on what the name is. The lab
+/// measured it for a CHECK constraint only.
+fn dropped_constraint(name: &str, table: TableState<'_>) -> Result<&'static Case, String> {
+    let table = match table {
+        TableState::Known(table) => table,
+        TableState::Lost { reason } => {
+            return Err(format!(
+                "kilit lost track of this table ({reason}), so it cannot tell what kind of \
+                 constraint {name} is"
+            ));
+        }
+        TableState::Missing => {
+            return Err(format!(
+                "kilit does not know this table, so it cannot tell what kind of constraint \
+                 {name} is"
+            ));
+        }
+    };
+    let kind = match table.constraints_named(name).as_slice() {
+        [ConstraintKind::Check] => return Ok(&DROP_CHECK_CONSTRAINT),
+        [ConstraintKind::ForeignKey] => "a foreign key",
+        [ConstraintKind::UniqueIndex] => "a unique index",
+        [ConstraintKind::PrimaryKey] => "the primary key",
+        [] => {
+            return Err(format!(
+                "{} has no constraint {name}, as far as kilit can tell; MySQL does not count a \
+                 plain index as one",
+                table.name
+            ));
+        }
+        _ => {
+            return Err(format!(
+                "{} has several constraints named {name}, and MySQL 8.0.46 and 8.4.13 do not \
+                 accept DROP CONSTRAINT then",
+                table.name
+            ));
+        }
+    };
+    Err(format!(
+        "{name} is {kind}, and dropping one with DROP CONSTRAINT has not been measured yet"
+    ))
+}
+
 /// The TEXT and BLOB types the lab measured an index on, without a prefix
 /// length: MySQL refuses each with error 1170, in a plain and in a unique
 /// index. The names are kilit's: [`DataType`] as it prints.
@@ -1531,6 +1889,16 @@ fn classify(
                     user.name
                 ));
             }
+            if !old_name.eq_ignore_ascii_case(&column.name)
+                && let TableState::Known(table) = table
+                && let Some(user) = check_naming(table, old_name)
+            {
+                return Err(format!(
+                    "the CHECK constraint {} names {old_name}, and renaming such a column with \
+                     CHANGE has not been measured yet",
+                    check_name(user)
+                ));
+            }
             subject = Some(old_name.clone());
             modified(
                 table,
@@ -1572,6 +1940,11 @@ fn classify(
             }
         },
         Operation::DropForeignKey { .. } => &DROP_FOREIGN_KEY,
+        Operation::AddCheck(check) => {
+            check_new_constraint(check, table, schema)?;
+            &ADD_CHECK_CONSTRAINT
+        }
+        Operation::DropConstraint { name } => dropped_constraint(name, table)?,
         Operation::AddPrimaryKey { .. } | Operation::DropPrimaryKey => {
             return Err("changing the primary key has not been measured yet".into());
         }
@@ -2902,7 +3275,7 @@ mod tests {
             panic!("expected a measured prediction");
         };
         assert_eq!(verdict.to_string(), "INSTANT, no rebuild, writes continue");
-        assert_eq!(evidence, ["drop-column"]);
+        assert_eq!(evidence, DROP_COLUMN.scenarios);
         assert!(notes.is_empty(), "{notes:?}");
         // A copy when the table has a FULLTEXT index.
         let Prediction::Measured {
@@ -2933,7 +3306,7 @@ mod tests {
                 "if the table keeps a FULLTEXT index: COPY, copies every row, writes wait \
                  (drop-column-with-fulltext)",
                 "if the column is in a plain or FULLTEXT index, or has a UNIQUE index of its \
-                 own: INPLACE, rebuilds the table, writes continue (drop-column-indexed and 6 \
+                 own: INPLACE, rebuilds the table, writes continue (drop-column-indexed and 7 \
                  more lab scenarios)",
                 "if the column is in an index and the table keeps a FULLTEXT index: COPY, \
                  copies every row, writes wait (drop-column-indexed-with-fulltext and 6 more \
@@ -2942,6 +3315,11 @@ mod tests {
                  (drop-column-in-foreign-key)",
                 "if a generated column uses the column: fails with error 3108 \
                  (drop-column-generated-source and drop-column-stored-generated-source)",
+                "if a CHECK constraint uses the column and another column: fails with error \
+                 3959 (drop-column-in-two-column-check and \
+                 drop-column-in-not-enforced-two-column-check)",
+                "if the column is in an index and a CHECK constraint uses it and another \
+                 column: fails with error 3959 (drop-column-indexed-in-two-column-check)",
             ]
         );
     }
@@ -4554,6 +4932,33 @@ mod tests {
     }
 
     #[test]
+    fn an_index_a_key_added_later_points_at_gets_no_answer() {
+        // The key comes after the tables, and names the table in capitals.
+        let schema = "
+            CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100) NOT NULL,
+                UNIQUE KEY uq_name (name));
+            CREATE TABLE children (id INT PRIMARY KEY, name VARCHAR(100) NOT NULL);";
+        let predictions = predictions_with(
+            schema,
+            "ALTER TABLE users DROP INDEX uq_name;
+             ALTER TABLE users ADD UNIQUE INDEX uq_name (name);
+             ALTER TABLE children ADD CONSTRAINT fk_name FOREIGN KEY (name) REFERENCES USERS (name);
+             ALTER TABLE users DROP INDEX uq_name;
+             ALTER TABLE users ADD UNIQUE INDEX uq_name (name);
+             ALTER TABLE children DROP FOREIGN KEY fk_name;
+             ALTER TABLE users DROP INDEX uq_name;",
+        );
+        assert_eq!(said(&predictions[0]), DROP_INDEX_ANSWER);
+        assert_eq!(
+            reason(predictions[3].clone()),
+            "uq_name serves the foreign key fk_name on children, which points at this table, \
+             and dropping such an index has not been measured yet"
+        );
+        // Without the key, the table's old name only makes kilit look again.
+        assert_eq!(said(&predictions[6]), DROP_INDEX_ANSWER);
+    }
+
+    #[test]
     fn the_only_index_of_a_foreign_key_is_found_in_any_quotes_or_case() {
         for dump in three_ways(
             "CREATE TABLE users ({id} INT PRIMARY KEY);
@@ -4920,6 +5325,911 @@ mod tests {
                     "{first}"
                 );
             }
+        }
+    }
+
+    const CHECK_ALONE: &str = "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0);";
+    const CHECK_ALONE_OFF: &str =
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0) NOT ENFORCED;";
+    const CHECK_TWO: &str =
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount + user_id > 0);";
+    const CHECK_TWO_OFF: &str =
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount + user_id > 0) NOT ENFORCED;";
+    const AMOUNT_INDEX: &str = "ALTER TABLE orders ADD INDEX idx_amount (amount);";
+    const DROP_AMOUNT: &str = "ALTER TABLE orders DROP COLUMN amount";
+    const RENAME_AMOUNT: &str = "ALTER TABLE orders RENAME COLUMN amount TO total";
+    const INSTANT_ANSWER: &str = "INSTANT, no rebuild, writes continue";
+    const COPY_ANSWER: &str = "COPY, copies every row, writes wait";
+
+    #[test]
+    fn dropping_a_column_a_check_uses_with_another_column_fails() {
+        for setup in [CHECK_TWO, CHECK_TWO_OFF] {
+            let prediction = on_shop(setup, DROP_AMOUNT);
+            assert_eq!(fails_with(&prediction), Ok(3959), "{setup}");
+            let (case, _, notes) = measured(prediction);
+            assert_eq!(case, "drop-column");
+            assert_eq!(
+                notes,
+                ["the CHECK constraint chk_amount uses amount and user_id"]
+            );
+            // And so does the other column.
+            let prediction = on_shop(setup, "ALTER TABLE orders DROP COLUMN user_id");
+            assert_eq!(fails_with(&prediction), Ok(3959), "{setup}");
+            let (_, _, notes) = measured(prediction);
+            assert_eq!(
+                notes,
+                ["the CHECK constraint chk_amount uses user_id and amount"]
+            );
+        }
+    }
+
+    #[test]
+    fn one_check_with_another_column_is_enough_to_keep_the_column() {
+        // Run by hand: the constraint on the column alone does not save it.
+        let setup = "ALTER TABLE orders ADD CONSTRAINT chk_one CHECK (amount > 0);
+                     ALTER TABLE orders ADD CONSTRAINT chk_two CHECK (amount + user_id > 0);";
+        let prediction = on_shop(setup, DROP_AMOUNT);
+        assert_eq!(fails_with(&prediction), Ok(3959));
+        let (_, _, notes) = measured(prediction);
+        assert_eq!(
+            notes,
+            ["the CHECK constraint chk_two uses amount and user_id"]
+        );
+    }
+
+    #[test]
+    fn renaming_a_column_a_check_uses_fails_also_when_it_uses_no_other_column() {
+        for setup in [CHECK_ALONE, CHECK_ALONE_OFF, CHECK_TWO, CHECK_TWO_OFF] {
+            let prediction = on_shop(setup, RENAME_AMOUNT);
+            assert_eq!(fails_with(&prediction), Ok(3959), "{setup}");
+            let (case, _, notes) = measured(prediction);
+            assert_eq!(case, "rename-column");
+            assert_eq!(notes, ["the CHECK constraint chk_amount uses amount"]);
+        }
+    }
+
+    #[test]
+    fn dropping_the_only_column_of_a_check_keeps_the_answer_for_dropping_a_column() {
+        let twice = "ALTER TABLE orders ADD CONSTRAINT chk_amount \
+                     CHECK (amount > 0 AND amount < 100000);";
+        for setup in [CHECK_ALONE, CHECK_ALONE_OFF, twice] {
+            let (case, verdict, notes) = measured(on_shop(setup, DROP_AMOUNT));
+            assert_eq!(case, "drop-column", "{setup}");
+            assert_eq!(verdict, INSTANT_ANSWER, "{setup}");
+            assert!(notes.is_empty(), "{setup}: {notes:?}");
+        }
+    }
+
+    #[test]
+    fn a_check_goes_with_its_only_column() {
+        // The new column of that name has no CHECK constraint. The name is free.
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{CHECK_ALONE}"),
+            "ALTER TABLE orders DROP COLUMN amount;
+             ALTER TABLE orders ADD COLUMN amount INT NOT NULL;
+             ALTER TABLE orders RENAME COLUMN amount TO total;
+             ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (total > 0);",
+        );
+        assert_eq!(said(&predictions[0]), INSTANT_ANSWER);
+        assert_eq!(said(&predictions[1]), INSTANT_ANSWER);
+        assert_eq!(said(&predictions[2]), INSTANT_ANSWER);
+        assert_eq!(said(&predictions[3]), COPY_ANSWER);
+    }
+
+    #[test]
+    fn a_check_on_a_column_with_a_plain_index() {
+        let indexed_alone = format!("{AMOUNT_INDEX}{CHECK_ALONE}");
+        let (_, verdict, notes) = measured(on_shop(&indexed_alone, DROP_AMOUNT));
+        assert_eq!(verdict, "INPLACE, rebuilds the table, writes continue");
+        assert_eq!(notes, ["amount is in the index idx_amount"]);
+        assert_eq!(
+            fails_with(&on_shop(&indexed_alone, RENAME_AMOUNT)),
+            Ok(3959)
+        );
+
+        let indexed_two = format!("{AMOUNT_INDEX}{CHECK_TWO}");
+        let prediction = on_shop(&indexed_two, DROP_AMOUNT);
+        assert_eq!(fails_with(&prediction), Ok(3959));
+        // The exception measured with both conditions decides.
+        let Prediction::Measured {
+            evidence, notes, ..
+        } = prediction
+        else {
+            panic!("expected a measured prediction");
+        };
+        assert_eq!(evidence, ["drop-column-indexed-in-two-column-check"]);
+        assert_eq!(
+            notes,
+            [
+                "amount is in the index idx_amount",
+                "the CHECK constraint chk_amount uses amount and user_id"
+            ]
+        );
+        assert_eq!(fails_with(&on_shop(&indexed_two, RENAME_AMOUNT)), Ok(3959));
+    }
+
+    #[test]
+    fn a_column_no_check_uses_keeps_its_answer() {
+        for setup in [CHECK_ALONE, CHECK_TWO] {
+            for sql in [
+                "ALTER TABLE orders DROP COLUMN note",
+                "ALTER TABLE orders RENAME COLUMN note TO memo",
+            ] {
+                assert_eq!(said(&on_shop(setup, sql)), INSTANT_ANSWER, "{setup} {sql}");
+            }
+        }
+        // A part of a name is not the name.
+        let setup = "ALTER TABLE orders ADD COLUMN amount_due INT NOT NULL;
+                     ALTER TABLE orders ADD CONSTRAINT chk CHECK (amount_due > user_id);";
+        assert_eq!(said(&on_shop(setup, DROP_AMOUNT)), INSTANT_ANSWER);
+    }
+
+    #[test]
+    fn a_column_named_only_in_a_string_of_a_check_is_not_used() {
+        // In all these MySQL accepts the change and keeps the constraint (run
+        // by hand; the lab measured the first).
+        for check in [
+            "email <> 'note'",
+            "email <> _utf8mb4'note'",
+            "email NOT LIKE 'note%'",
+            "email NOT IN ('note', 'a')",
+            "char_length(concat(email, 'note')) > 0",
+        ] {
+            let setup = format!("ALTER TABLE orders ADD CONSTRAINT chk_email CHECK ({check});");
+            for sql in [
+                "ALTER TABLE orders DROP COLUMN note",
+                "ALTER TABLE orders RENAME COLUMN note TO memo",
+            ] {
+                assert_eq!(said(&on_shop(&setup, sql)), INSTANT_ANSWER, "{check} {sql}");
+            }
+        }
+        // kilit does not read a string with a backslash, so a word in it counts.
+        let setup = r"ALTER TABLE orders ADD CONSTRAINT chk_email CHECK (email <> 'note\\');";
+        assert!(
+            reason(on_shop(setup, "ALTER TABLE orders DROP COLUMN note"))
+                .starts_with("the expression of the CHECK constraint chk_email names note"),
+        );
+        // With ANSI_QUOTES a double-quoted word is a column's name, and kilit
+        // does not know the server's sql_mode.
+        let setup = "ALTER TABLE orders ADD CONSTRAINT chk_email CHECK (email <> \"note\");";
+        assert!(
+            reason(on_shop(setup, "ALTER TABLE orders DROP COLUMN note"))
+                .starts_with("the expression of the CHECK constraint chk_email names note"),
+        );
+    }
+
+    #[test]
+    fn a_check_that_is_not_plain_gets_no_answer_for_the_names_it_has() {
+        for (check, names) in [
+            ("note IN ('a', 'b')", &["note"][..]),
+            ("char_length(note) > 0", &["note"]),
+            ("note LIKE 'a%'", &["note"]),
+            ("amount BETWEEN 1 AND 1000", &["amount"]),
+            ("amount IN (user_id, 1)", &["amount", "user_id"]),
+            ("char_length(note) < amount", &["note", "amount"]),
+            ("amount <=> user_id OR amount > 0", &["amount", "user_id"]),
+            ("amount DIV 2 >= user_id", &["amount", "user_id"]),
+            ("orders.amount > 0", &["amount"]),
+        ] {
+            let setup = format!("ALTER TABLE orders ADD CONSTRAINT chk CHECK ({check});");
+            for name in names {
+                for sql in [
+                    format!("ALTER TABLE orders DROP COLUMN {name}"),
+                    format!("ALTER TABLE orders RENAME COLUMN {name} TO other_name"),
+                ] {
+                    assert_eq!(
+                        reason(on_shop(&setup, &sql)),
+                        format!(
+                            "the expression of the CHECK constraint chk names {name}, and the \
+                             lab measured expressions of column names, numbers and arithmetic, \
+                             comparison and logical operators only, not strings, function \
+                             calls, IN, BETWEEN or LIKE"
+                        ),
+                        "{check} {sql}"
+                    );
+                }
+            }
+            // The answer for a column it does not name does not depend on it.
+            assert_eq!(
+                said(&on_shop(&setup, "ALTER TABLE orders DROP COLUMN email")),
+                INSTANT_ANSWER,
+                "{check}"
+            );
+        }
+        // A word that is a function's name is no column, but kilit cannot tell.
+        let setup = "ALTER TABLE orders ADD COLUMN lower INT NULL;
+                     ALTER TABLE orders ADD CONSTRAINT chk CHECK (lower(note) <> 'x');";
+        assert!(
+            reason(on_shop(setup, "ALTER TABLE orders DROP COLUMN lower"))
+                .starts_with("the expression of the CHECK constraint chk names lower")
+        );
+    }
+
+    #[test]
+    fn a_check_is_found_in_any_quotes_or_case() {
+        for dump in three_ways(
+            "CREATE TABLE orders (
+                 {id} BIGINT UNSIGNED NOT NULL,
+                 {amount} INT NOT NULL,
+                 {note} VARCHAR(50) DEFAULT NULL,
+                 PRIMARY KEY ({id}),
+                 CONSTRAINT {orders_chk_1} CHECK (({amount} > {id})),
+                 CONSTRAINT {orders_chk_2} CHECK (({note} IS NULL))
+             );",
+        ) {
+            for sql in [
+                "ALTER TABLE orders DROP COLUMN amount",
+                "ALTER TABLE orders DROP COLUMN AMOUNT",
+                "ALTER TABLE orders DROP COLUMN `Amount`",
+                "ALTER TABLE orders RENAME COLUMN Amount TO total",
+                "ALTER TABLE orders RENAME COLUMN note TO memo",
+                "ALTER TABLE orders RENAME COLUMN `NOTE` TO memo",
+            ] {
+                assert_eq!(
+                    fails_with(&predictions_with(&dump, sql)[0]),
+                    Ok(3959),
+                    "{dump} {sql}"
+                );
+            }
+            assert_eq!(
+                said(&predictions_with(&dump, "ALTER TABLE orders DROP COLUMN NOTE")[0]),
+                INSTANT_ANSWER,
+                "{dump}"
+            );
+            assert_eq!(
+                said(
+                    &predictions_with(&dump, "ALTER TABLE orders DROP CONSTRAINT ORDERS_CHK_2")[0]
+                ),
+                INSTANT_ANSWER,
+                "{dump}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_check_written_as_a_schema_dump_writes_it_is_followed() {
+        // SHOW CREATE TABLE on MySQL 8.0.46 and 8.4.13, run by hand.
+        let dump = "CREATE TABLE `orders` (
+              `id` bigint unsigned NOT NULL,
+              `amount` int NOT NULL,
+              `note` varchar(50) DEFAULT NULL,
+              `email` varchar(255) DEFAULT NULL,
+              PRIMARY KEY (`id`),
+              CONSTRAINT `orders_chk_1` CHECK ((`amount` > `id`)),
+              CONSTRAINT `orders_chk_2` CHECK ((`note` <> _utf8mb4'x')),
+              CONSTRAINT `orders_chk_3` CHECK ((`email` > 0)) /*!80016 NOT ENFORCED */
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;";
+        let (_, _, notes) = measured(predictions_with(dump, DROP_AMOUNT).remove(0));
+        assert_eq!(
+            notes,
+            ["the CHECK constraint orders_chk_1 uses amount and id"]
+        );
+        assert!(
+            reason(predictions_with(dump, "ALTER TABLE orders DROP COLUMN note").remove(0))
+                .starts_with("the expression of the CHECK constraint orders_chk_2 names note")
+        );
+        assert_eq!(
+            fails_with(
+                &predictions_with(dump, "ALTER TABLE orders RENAME COLUMN email TO mail")[0]
+            ),
+            Ok(3959)
+        );
+        assert_eq!(
+            said(&predictions_with(dump, "ALTER TABLE orders DROP COLUMN email")[0]),
+            INSTANT_ANSWER
+        );
+    }
+
+    #[test]
+    fn checks_without_a_name_and_on_a_column_count_as_well() {
+        let dump = "CREATE TABLE orders (
+                        id INT PRIMARY KEY,
+                        user_id INT NOT NULL,
+                        amount INT NOT NULL CHECK (amount > 0),
+                        price INT NOT NULL CONSTRAINT price_positive CHECK (price > 0),
+                        note VARCHAR(50) NULL,
+                        CHECK (user_id > amount)
+                    );";
+        let (_, _, notes) = measured(predictions_with(dump, DROP_AMOUNT).remove(0));
+        assert_eq!(
+            notes,
+            ["the CHECK constraint orders_chk_2 uses amount and user_id"]
+        );
+        let (_, _, notes) = measured(
+            predictions_with(dump, "ALTER TABLE orders RENAME COLUMN price TO cost").remove(0),
+        );
+        assert_eq!(notes, ["the CHECK constraint price_positive uses price"]);
+        assert_eq!(
+            said(&predictions_with(dump, "ALTER TABLE orders DROP COLUMN price")[0]),
+            INSTANT_ANSWER
+        );
+        // The automatic names work in DROP CONSTRAINT.
+        for sql in [
+            "ALTER TABLE orders DROP CONSTRAINT orders_chk_1",
+            "ALTER TABLE orders DROP CONSTRAINT orders_chk_2",
+            "ALTER TABLE orders DROP CONSTRAINT price_positive",
+        ] {
+            assert_eq!(
+                said(&predictions_with(dump, sql)[0]),
+                INSTANT_ANSWER,
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_the_table_error_3959_is_a_note() {
+        // kilit never saw the table, or lost track of it.
+        let lost = format!("{SHOP}{CHECK_TWO}ALTER TABLE orders AUTO_INCREMENT = 5;");
+        for schema in ["", lost.as_str()] {
+            for (sql, case, wanted) in [
+                (
+                    DROP_AMOUNT,
+                    "drop-column",
+                    &[
+                        "if a CHECK constraint uses the column and another column: fails with \
+                         error 3959 (drop-column-in-two-column-check and \
+                         drop-column-in-not-enforced-two-column-check)",
+                        "if the column is in an index and a CHECK constraint uses it and another \
+                         column: fails with error 3959 (drop-column-indexed-in-two-column-check)",
+                    ][..],
+                ),
+                (
+                    RENAME_AMOUNT,
+                    "rename-column",
+                    &[
+                        "if a CHECK constraint uses the column: fails with error 3959 \
+                       (rename-column-in-two-column-check and 5 more lab scenarios)",
+                    ],
+                ),
+            ] {
+                let (found, verdict, notes) =
+                    measured(predictions_with(schema, sql).pop().unwrap());
+                assert_eq!(found, case, "{sql}");
+                assert_eq!(verdict, INSTANT_ANSWER, "{sql}");
+                for note in wanted {
+                    assert!(notes.iter().any(|n| n == note), "{sql}: {notes:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_column_and_its_check_stay_after_a_statement_that_fails() {
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{CHECK_TWO}"),
+            "ALTER TABLE orders DROP COLUMN amount;
+             ALTER TABLE orders DROP COLUMN amount;
+             ALTER TABLE orders RENAME COLUMN amount TO total;
+             ALTER TABLE orders MODIFY amount BIGINT NOT NULL;
+             ALTER TABLE orders DROP CONSTRAINT chk_amount;
+             ALTER TABLE orders DROP COLUMN amount;",
+        );
+        assert_eq!(fails_with(&predictions[0]), Ok(3959));
+        assert_eq!(fails_with(&predictions[1]), Ok(3959));
+        assert_eq!(fails_with(&predictions[2]), Ok(3959));
+        // The column is still there, as it was.
+        assert_eq!(said(&predictions[3]), COPY_ANSWER);
+        assert_eq!(said(&predictions[4]), INSTANT_ANSWER);
+        assert_eq!(said(&predictions[5]), INSTANT_ANSWER);
+    }
+
+    #[test]
+    fn adding_a_check_copies_the_table() {
+        for sql in [
+            "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount >= 0)",
+            "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount >= 0) ENFORCED",
+            "ALTER TABLE orders ADD CHECK (amount >= 0)",
+            "ALTER TABLE orders ADD CONSTRAINT CHECK (amount >= 0)",
+            "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount + user_id > 0)",
+            "ALTER TABLE orders ADD CONSTRAINT chk_note CHECK (note IS NULL OR amount > 0)",
+        ] {
+            let (case, verdict, notes) = measured(on_shop("", sql));
+            assert_eq!(case, "add-check-constraint", "{sql}");
+            assert_eq!(verdict, COPY_ANSWER, "{sql}");
+            // No schema shows the rows, so a failure is only ever a note.
+            assert_eq!(
+                notes,
+                ["if a row breaks the constraint: fails with error 3819 \
+                     (add-check-constraint-rows-break-it)"],
+                "{sql}"
+            );
+        }
+        // The other algorithms are refused, as the lab measured.
+        let add = "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount >= 0)";
+        for (clause, code) in [
+            ("ALGORITHM=INSTANT", 1845),
+            ("ALGORITHM=INPLACE", 1845),
+            ("ALGORITHM=INPLACE, LOCK=NONE", 1845),
+            ("LOCK=NONE", 1846),
+        ] {
+            assert_eq!(
+                fails_with(&on_shop("", &format!("{add}, {clause}"))),
+                Ok(code),
+                "{clause}"
+            );
+        }
+        assert_eq!(
+            said(&on_shop("", &format!("{add}, ALGORITHM=COPY"))),
+            COPY_ANSWER
+        );
+        // Without the table too: nothing in the answer depends on it.
+        assert_eq!(said(&only(add)), COPY_ANSWER);
+    }
+
+    #[test]
+    fn adding_a_check_no_longer_loses_the_table() {
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{CHECK_TWO}"),
+            "ALTER TABLE orders MODIFY note VARCHAR(60) NULL;
+             ALTER TABLE orders ADD FULLTEXT INDEX ft_email (email);
+             ALTER TABLE orders ADD COLUMN coupon VARCHAR(20) NULL;
+             ALTER TABLE orders DROP COLUMN coupon;",
+        );
+        assert_eq!(
+            said(&predictions[0]),
+            "INPLACE, no rebuild, writes continue"
+        );
+        assert_eq!(
+            said(&predictions[1]),
+            "INPLACE, rebuilds the table, writes wait"
+        );
+        // kilit sees the FULLTEXT index it just followed, so both are copies.
+        assert_eq!(said(&predictions[2]), COPY_ANSWER);
+        assert_eq!(said(&predictions[3]), COPY_ANSWER);
+    }
+
+    #[test]
+    fn a_check_that_fails_to_be_added_is_not_followed() {
+        // ALGORITHM=INSTANT is refused, so the name is still free.
+        let predictions = predictions_with(
+            SHOP,
+            "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount >= 0), ALGORITHM=INSTANT;
+             ALTER TABLE orders RENAME COLUMN amount TO total;
+             ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (total >= 0);",
+        );
+        assert_eq!(fails_with(&predictions[0]), Ok(1845));
+        assert_eq!(said(&predictions[1]), INSTANT_ANSWER);
+        assert_eq!(said(&predictions[2]), COPY_ANSWER);
+    }
+
+    #[test]
+    fn adding_a_check_the_lab_has_not_measured_is_unknown() {
+        let add = |check: &str| format!("ALTER TABLE orders ADD CONSTRAINT chk CHECK ({check})");
+        // Measured by hand, or in no scenario of the repository: MySQL runs a
+        // NOT ENFORCED constraint as INSTANT, and refuses some expressions.
+        assert_eq!(
+            reason(on_shop("", &format!("{} NOT ENFORCED", add("amount > 0")))),
+            "adding a NOT ENFORCED CHECK constraint has not been measured yet"
+        );
+        for check in [
+            "note IN ('a', 'b')",
+            "char_length(note) > 0",
+            "note LIKE 'a%'",
+            "amount BETWEEN 1 AND 2",
+            "amount > RAND()",
+            "amount",
+        ] {
+            assert_eq!(
+                reason(on_shop("", &add(check))),
+                format!(
+                    "adding a CHECK constraint on ({check}) has not been measured yet; the lab \
+                     measured expressions of column names, numbers and arithmetic, comparison \
+                     and logical operators only"
+                ),
+                "{check}"
+            );
+        }
+        assert_eq!(
+            reason(on_shop("", &add("1 > 0"))),
+            "adding a CHECK constraint that uses no column has not been measured yet"
+        );
+        // What kilit can see in the table.
+        assert_eq!(
+            reason(on_shop("", &add("nosuch > 0"))),
+            "orders has no column nosuch, as far as kilit can tell"
+        );
+        assert_eq!(
+            reason(on_shop("", &add("amount > id"))),
+            "id is an AUTO_INCREMENT column, and a CHECK constraint on such a column has not \
+             been measured yet"
+        );
+        assert_eq!(
+            reason(on_shop(VIRTUAL_COLUMN, &add("amount2 > 0"))),
+            "amount2 is a generated column, and a CHECK constraint on such a column has not \
+             been measured yet"
+        );
+        assert_eq!(
+            reason(on_shop(FOREIGN_KEY, &add("user_id > 0"))),
+            "user_id is a foreign key's column, and a CHECK constraint on such a column has not \
+             been measured yet"
+        );
+        // A name is taken across the database, in any case.
+        let taken = "CREATE TABLE others (a INT, CONSTRAINT CHK CHECK (a > 0));";
+        assert_eq!(
+            reason(on_shop(taken, &add("amount > 0"))),
+            "others already has a CHECK constraint chk, and adding one with a name the database \
+             already has has not been measured yet"
+        );
+    }
+
+    #[test]
+    fn a_check_with_a_name_the_table_has_loses_the_table() {
+        // MySQL refuses it (error 3822, run by hand). kilit has no fact for
+        // that, so it gives no answer, as for a column the table already has.
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{CHECK_ALONE}"),
+            "ALTER TABLE orders ADD CONSTRAINT CHK_AMOUNT CHECK (amount > 1);
+             ALTER TABLE orders MODIFY note VARCHAR(60) NULL;",
+        );
+        assert!(reason(predictions[0].clone()).contains("already has a CHECK constraint"));
+        assert!(reason(predictions[1].clone()).starts_with("kilit lost track of this table"));
+    }
+
+    #[test]
+    fn dropping_a_check_with_drop_constraint_runs_at_once() {
+        for setup in [CHECK_ALONE, CHECK_ALONE_OFF, CHECK_TWO, CHECK_TWO_OFF] {
+            let (case, verdict, notes) = measured(on_shop(
+                setup,
+                "ALTER TABLE orders DROP CONSTRAINT chk_amount",
+            ));
+            assert_eq!(case, "drop-check-constraint", "{setup}");
+            assert_eq!(verdict, INSTANT_ANSWER, "{setup}");
+            assert!(notes.is_empty(), "{setup}: {notes:?}");
+            // The column has nothing in the way now.
+            assert_eq!(
+                said(
+                    &predictions_with(
+                        &format!("{SHOP}\n{setup}"),
+                        "ALTER TABLE orders DROP CONSTRAINT chk_amount;
+                     ALTER TABLE orders RENAME COLUMN amount TO total;"
+                    )[1]
+                ),
+                INSTANT_ANSWER,
+                "{setup}"
+            );
+        }
+    }
+
+    #[test]
+    fn drop_constraint_finds_the_kind_by_the_name() {
+        // A foreign key: no measurement, and its index stays, as run by hand.
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{FOREIGN_KEY}"),
+            "ALTER TABLE orders DROP CONSTRAINT fk_orders_user;
+             ALTER TABLE orders DROP COLUMN user_id;",
+        );
+        assert_eq!(
+            reason(predictions[0].clone()),
+            "fk_orders_user is a foreign key, and dropping one with DROP CONSTRAINT has not been \
+             measured yet"
+        );
+        assert_eq!(
+            said(&predictions[1]),
+            "INPLACE, rebuilds the table, writes continue"
+        );
+        // A unique index, which goes.
+        let predictions = predictions_with(
+            &format!("{SHOP}\nALTER TABLE orders ADD UNIQUE INDEX uq_email (email);"),
+            "ALTER TABLE orders DROP CONSTRAINT UQ_EMAIL;
+             ALTER TABLE orders DROP COLUMN email;",
+        );
+        assert_eq!(
+            reason(predictions[0].clone()),
+            "UQ_EMAIL is a unique index, and dropping one with DROP CONSTRAINT has not been \
+             measured yet"
+        );
+        assert_eq!(said(&predictions[1]), INSTANT_ANSWER);
+        // The primary key.
+        let dump =
+            "CREATE TABLE orders (id INT NOT NULL, note VARCHAR(50) NULL, PRIMARY KEY (id));";
+        let predictions = predictions_with(
+            dump,
+            "ALTER TABLE orders DROP CONSTRAINT `PRIMARY`;
+             ALTER TABLE orders MODIFY id INT NULL;",
+        );
+        assert_eq!(
+            reason(predictions[0].clone()),
+            "PRIMARY is the primary key, and dropping one with DROP CONSTRAINT has not been \
+             measured yet"
+        );
+        assert_eq!(
+            said(&predictions[1]),
+            "INPLACE, rebuilds the table, writes continue"
+        );
+    }
+
+    #[test]
+    fn a_foreign_key_and_a_plain_index_with_one_name_count_as_the_foreign_key() {
+        // As Laravel's tables have them: MySQL drops the key and keeps the index.
+        let predictions = predictions_with(
+            LARAVEL_TABLES,
+            "alter table `orders` drop constraint `orders_user_id_foreign`;
+             alter table `orders` drop index `orders_user_id_foreign`;",
+        );
+        assert!(
+            reason(predictions[0].clone()).starts_with("orders_user_id_foreign is a foreign key")
+        );
+        assert_eq!(
+            said(&predictions[1]),
+            "INPLACE, no rebuild, writes continue"
+        );
+    }
+
+    #[test]
+    fn drop_constraint_of_a_name_kilit_cannot_place_loses_the_table() {
+        // MySQL refuses all of them (errors 3940 and 3939, run by hand).
+        let lost = "ALTER TABLE orders MODIFY note VARCHAR(60) NULL";
+        for (setup, name, wanted) in [
+            (
+                "",
+                "nosuch",
+                "orders has no constraint nosuch, as far as kilit can tell; MySQL does not count \
+                 a plain index as one",
+            ),
+            (
+                "ALTER TABLE orders ADD INDEX i_amount (amount);",
+                "i_amount",
+                "orders has no constraint i_amount, as far as kilit can tell; MySQL does not \
+                 count a plain index as one",
+            ),
+            (
+                "ALTER TABLE orders ADD FULLTEXT INDEX f_note (note);",
+                "f_note",
+                "orders has no constraint f_note, as far as kilit can tell; MySQL does not count \
+                 a plain index as one",
+            ),
+            (
+                "ALTER TABLE orders ADD CONSTRAINT same FOREIGN KEY (user_id) REFERENCES users (id);
+                 ALTER TABLE orders ADD CONSTRAINT same CHECK (amount > 0);",
+                "same",
+                "orders has several constraints named same, and MySQL 8.0.46 and 8.4.13 do not \
+                 accept DROP CONSTRAINT then",
+            ),
+            (
+                "ALTER TABLE orders ADD UNIQUE INDEX same (email);
+                 ALTER TABLE orders ADD CONSTRAINT same CHECK (amount > 0);",
+                "same",
+                "orders has several constraints named same, and MySQL 8.0.46 and 8.4.13 do not \
+                 accept DROP CONSTRAINT then",
+            ),
+        ] {
+            let predictions = predictions_with(
+                &format!("{SHOP}\n{setup}"),
+                &format!("ALTER TABLE orders DROP CONSTRAINT {name};\n{lost};"),
+            );
+            assert_eq!(reason(predictions[0].clone()), wanted, "{setup}");
+            assert!(
+                reason(predictions[1].clone()).starts_with("kilit lost track of this table"),
+                "{setup}"
+            );
+        }
+    }
+
+    #[test]
+    fn drop_constraint_without_the_table_is_unknown() {
+        assert_eq!(
+            reason(only("ALTER TABLE orders DROP CONSTRAINT chk_amount")),
+            "kilit does not know this table, so it cannot tell what kind of constraint \
+             chk_amount is"
+        );
+        let lost = format!("{SHOP}ALTER TABLE orders AUTO_INCREMENT = 5;");
+        assert!(
+            reason(predictions_with(&lost, "ALTER TABLE orders DROP CONSTRAINT c").remove(0))
+                .starts_with("kilit lost track of this table")
+        );
+    }
+
+    #[test]
+    fn drop_check_and_alter_check_stay_unread_and_lose_the_table() {
+        for sql in [
+            "ALTER TABLE orders DROP CHECK chk_amount",
+            "ALTER TABLE orders ALTER CHECK chk_amount NOT ENFORCED",
+            "ALTER TABLE orders ALTER CONSTRAINT chk_amount ENFORCED",
+        ] {
+            let predictions = predictions_with(
+                &format!("{SHOP}\n{CHECK_ALONE}"),
+                &format!("{sql};\nALTER TABLE orders DROP COLUMN note;"),
+            );
+            assert!(
+                reason(predictions[0].clone()).starts_with("kilit could not read this statement"),
+                "{sql}"
+            );
+            // The note says what the lab measured for a table kilit lost.
+            let (_, _, notes) = measured(predictions[1].clone());
+            assert!(
+                notes.iter().any(|note| note.contains("error 3959")),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_check_next_to_what_the_lab_has_not_measured_together_is_unknown() {
+        // By hand MySQL refuses some of these with 3959, and others with 1828
+        // or 3108: which error comes first depends on the pair. A constraint
+        // that uses the column alone goes with it, unless something refuses.
+        for check in ["amount > 0", "amount + user_id > 0"] {
+            let check = format!("ALTER TABLE orders ADD CONSTRAINT chk CHECK ({check});");
+            for (other, what) in [
+                (VIRTUAL_COLUMN, "the generated column amount2 uses it"),
+                (
+                    "ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note);",
+                    "orders has the FULLTEXT index ft_note",
+                ),
+                (
+                    "ALTER TABLE orders ADD UNIQUE INDEX uq_amount (amount);",
+                    "amount is in the index uq_amount, not a plain one",
+                ),
+            ] {
+                let setup = format!("{other}{check}");
+                for sql in [DROP_AMOUNT, RENAME_AMOUNT] {
+                    assert_eq!(
+                        reason(on_shop(&setup, sql)),
+                        format!(
+                            "the CHECK constraint chk uses amount, and {what}, which has not \
+                             been measured together"
+                        ),
+                        "{setup} {sql}"
+                    );
+                }
+            }
+        }
+        // A foreign key's column.
+        let setup = "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) \
+                     REFERENCES users (id);
+                     ALTER TABLE orders ADD CONSTRAINT chk CHECK (amount + user_id > 0);";
+        for sql in [
+            "ALTER TABLE orders DROP COLUMN user_id",
+            "ALTER TABLE orders RENAME COLUMN user_id TO customer_id",
+        ] {
+            assert_eq!(
+                reason(on_shop(setup, sql)),
+                "the CHECK constraint chk uses user_id, and user_id is in the foreign key \
+                 fk_orders_user, which has not been measured together",
+                "{sql}"
+            );
+        }
+        // A generated column itself.
+        let setup =
+            format!("{VIRTUAL_COLUMN}ALTER TABLE orders ADD CONSTRAINT chk CHECK (amount2 > 0);");
+        assert_eq!(
+            reason(on_shop(&setup, "ALTER TABLE orders DROP COLUMN amount2")),
+            "the CHECK constraint chk uses amount2, and amount2 is a generated column, which has \
+             not been measured together"
+        );
+        // A functional index, the primary key, and a column another table
+        // points at.
+        let setup = "ALTER TABLE orders ADD INDEX i_lower ((LOWER(note)));
+                     ALTER TABLE orders ADD CONSTRAINT chk CHECK (note IS NULL);";
+        assert_eq!(
+            reason(on_shop(
+                setup,
+                "ALTER TABLE orders RENAME COLUMN note TO memo"
+            )),
+            "the CHECK constraint chk uses note, and note is in the index i_lower, not a plain \
+             one, which has not been measured together"
+        );
+        let dump = "CREATE TABLE parents (id INT NOT NULL, code INT NOT NULL, PRIMARY KEY (id),
+                        KEY k_code (code), CONSTRAINT chk_id CHECK (id > 0),
+                        CONSTRAINT chk_code CHECK (code > 0));
+                    CREATE TABLE children (code INT,
+                        CONSTRAINT fk_code FOREIGN KEY (code) REFERENCES parents (code));";
+        assert_eq!(
+            reason(
+                predictions_with(dump, "ALTER TABLE parents RENAME COLUMN id TO key_id").remove(0)
+            ),
+            "the CHECK constraint chk_id uses id, and id is in the primary key, which has not \
+             been measured together"
+        );
+        assert_eq!(
+            reason(predictions_with(dump, "ALTER TABLE parents RENAME COLUMN code TO c").remove(0)),
+            "the CHECK constraint chk_code uses code, and code is referenced by the foreign key \
+             fk_code on children, which has not been measured together"
+        );
+    }
+
+    #[test]
+    fn change_that_renames_a_column_a_check_names_is_unknown() {
+        // MySQL refuses it with error 3959 in the lab, but no scenario of the
+        // repository has it.
+        for (setup, name) in [
+            (CHECK_ALONE, "chk_amount"),
+            (CHECK_TWO, "chk_amount"),
+            (
+                "ALTER TABLE orders ADD CONSTRAINT chk CHECK (amount IN (1, 2));",
+                "chk",
+            ),
+        ] {
+            assert_eq!(
+                reason(on_shop(
+                    setup,
+                    "ALTER TABLE orders CHANGE amount total INT NOT NULL"
+                )),
+                format!(
+                    "the CHECK constraint {name} names amount, and renaming such a column with \
+                     CHANGE has not been measured yet"
+                ),
+                "{setup}"
+            );
+        }
+        // Keeping the name is the change the statement makes.
+        assert_eq!(
+            said(&on_shop(
+                CHECK_TWO,
+                "ALTER TABLE orders CHANGE amount amount BIGINT NOT NULL"
+            )),
+            COPY_ANSWER
+        );
+    }
+
+    #[test]
+    fn a_statement_with_no_answer_is_followed_and_the_check_with_it() {
+        // MySQL refuses the first, so `total` does not exist there, but kilit
+        // follows what it gives no answer for: the constraint follows too.
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{CHECK_TWO}"),
+            "ALTER TABLE orders CHANGE amount total INT NOT NULL;
+             ALTER TABLE orders DROP COLUMN total;
+             ALTER TABLE orders DROP COLUMN user_id;",
+        );
+        assert!(reason(predictions[0].clone()).contains("with CHANGE"));
+        assert_eq!(fails_with(&predictions[1]), Ok(3959));
+        assert_eq!(fails_with(&predictions[2]), Ok(3959));
+        // Dropping both columns in one statement has no answer. The constraint
+        // stays, and names columns the table no longer has.
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{CHECK_TWO}"),
+            "ALTER TABLE orders DROP COLUMN amount, DROP COLUMN user_id;
+             ALTER TABLE orders ADD COLUMN amount INT NOT NULL;
+             ALTER TABLE orders DROP COLUMN amount;",
+        );
+        assert!(reason(predictions[0].clone()).starts_with("2 changes in one statement"));
+        assert_eq!(said(&predictions[1]), INSTANT_ANSWER);
+        assert_eq!(
+            reason(predictions[2].clone()),
+            "the CHECK constraint chk_amount uses user_id, a column orders does not have, as far \
+             as kilit can tell"
+        );
+    }
+
+    #[test]
+    fn a_check_on_a_column_changes_no_answer_for_other_changes_to_it() {
+        // The lab gave the same results with and without the constraint, on
+        // both servers, for all of these.
+        let check_note =
+            "ALTER TABLE orders ADD CONSTRAINT chk_note CHECK (note IS NULL OR amount > 0);";
+        for (sql, answer) in [
+            (
+                "ALTER TABLE orders MODIFY note VARCHAR(60) NULL",
+                "INPLACE, no rebuild, writes continue",
+            ),
+            (
+                "ALTER TABLE orders MODIFY note VARCHAR(40) NULL",
+                COPY_ANSWER,
+            ),
+            (
+                "ALTER TABLE orders MODIFY note VARCHAR(100) NULL",
+                COPY_ANSWER,
+            ),
+            (
+                "ALTER TABLE orders MODIFY amount BIGINT NOT NULL",
+                COPY_ANSWER,
+            ),
+            (
+                "ALTER TABLE orders MODIFY amount INT NULL",
+                "INPLACE, rebuilds the table, writes continue",
+            ),
+            (
+                "ALTER TABLE orders ALTER COLUMN amount SET DEFAULT 5",
+                INSTANT_ANSWER,
+            ),
+            (
+                "ALTER TABLE orders ADD INDEX i_amount (amount)",
+                "INPLACE, no rebuild, writes continue",
+            ),
+        ] {
+            assert_eq!(said(&on_shop(check_note, sql)), answer, "{sql}");
         }
     }
 

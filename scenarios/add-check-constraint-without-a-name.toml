@@ -1,0 +1,2 @@
+title = "Add a CHECK constraint without a name"
+operation = "ADD CHECK (amount >= 0)"

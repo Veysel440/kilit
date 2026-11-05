@@ -1,0 +1,6 @@
+title = "Rename a column that has an index of its own and that a CHECK constraint uses with another column"
+setup = [
+    "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)",
+    "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount + user_id > 0)",
+]
+operation = "RENAME COLUMN amount TO total"

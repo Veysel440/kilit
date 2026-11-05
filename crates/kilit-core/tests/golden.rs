@@ -658,6 +658,85 @@ fn a_generated_column_keeps_the_column_it_uses() {
 }
 
 #[test]
+fn a_check_constraint_keeps_the_columns_it_uses() {
+    // DB::statement('alter table orders add constraint ... check (...)'), then
+    // $table->dropColumn('amount') or $table->renameColumn('amount', 'total').
+    // Laravel has no call for a CHECK constraint.
+    let add = "alter table `orders` add constraint `orders_amount_check` \
+               check (`amount` + `legacy_flag` > 0)";
+    for change in ["drop `amount`", "rename column `amount` to `total`"] {
+        assert_eq!(
+            pretend_on_mysql_84(
+                LARAVEL_TABLES,
+                &pretend(
+                    "2026_11_05_101000_add_amount_check_to_orders_table",
+                    &[
+                        add,
+                        &format!("alter table `orders` {change}"),
+                        "alter table `orders` drop constraint `orders_amount_check`",
+                        &format!("alter table `orders` {change}"),
+                    ]
+                )
+            ),
+            [
+                "COPY, copies every row, writes wait",
+                "fails with error 3959",
+                "INSTANT, no rebuild, writes continue",
+                "INSTANT, no rebuild, writes continue",
+            ],
+            "{change}"
+        );
+    }
+}
+
+#[test]
+fn a_check_constraint_goes_with_its_only_column_but_not_with_a_new_name() {
+    let add = "alter table `orders` add constraint `orders_amount_check` check (`amount` > 0)";
+    assert_eq!(
+        pretend_on_mysql_84(
+            LARAVEL_TABLES,
+            &pretend(
+                "2026_11_05_101100_add_amount_check_to_orders_table",
+                &[
+                    add,
+                    "alter table `orders` rename column `amount` to `total`",
+                    "alter table `orders` drop `amount`",
+                ]
+            )
+        ),
+        [
+            "COPY, copies every row, writes wait",
+            "fails with error 3959",
+            "INSTANT, no rebuild, writes continue",
+        ]
+    );
+}
+
+#[test]
+fn a_schema_dump_shows_the_check_constraints_of_a_table() {
+    // As `php artisan schema:dump` writes them.
+    let schema = LARAVEL_TABLES.replacen(
+        "CONSTRAINT `orders_user_id_foreign`",
+        "CONSTRAINT `orders_chk_1` CHECK ((`amount` > `legacy_flag`)),\n  \
+         CONSTRAINT `orders_user_id_foreign`",
+        1,
+    );
+    assert_eq!(
+        on_mysql_84(
+            &schema,
+            "alter table `orders` drop `amount`;
+             alter table `orders` rename column `legacy_flag` to `flag`;
+             alter table `orders` drop `note`;"
+        ),
+        [
+            "fails with error 3959",
+            "fails with error 3959",
+            "INSTANT, no rebuild, writes continue",
+        ]
+    );
+}
+
+#[test]
 fn a_varchar_that_crosses_255_bytes_copies_the_table() {
     // $table->string('note', 63)->nullable()->change(); then 64, in utf8mb4
     assert_eq!(

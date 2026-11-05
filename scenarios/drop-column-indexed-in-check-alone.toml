@@ -1,0 +1,6 @@
+title = "Drop a column that has an index of its own and is the only column of a CHECK constraint"
+setup = [
+    "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)",
+    "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0)",
+]
+operation = "DROP COLUMN amount"

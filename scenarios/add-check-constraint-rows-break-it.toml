@@ -1,0 +1,2 @@
+title = "Add a CHECK constraint that rows break"
+operation = "ADD CONSTRAINT chk_amount CHECK (amount > 500)"

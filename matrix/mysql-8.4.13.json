@@ -6,6 +6,385 @@
   "orders_rows": 1000,
   "scenarios": [
     {
+      "id": "add-check-constraint",
+      "title": "Add a CHECK constraint",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount >= 0)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-check-constraint-enforced",
+      "title": "Add a CHECK constraint, writing ENFORCED",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount >= 0) ENFORCED",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-check-constraint-rows-break-it",
+      "title": "Add a CHECK constraint that rows break",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 500)",
+      "verdict": {
+        "result": "fails",
+        "code": 3819,
+        "message": "Check constraint 'chk_amount' is violated."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3819,
+          "message": "Check constraint 'chk_amount' is violated."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3819,
+          "message": "Check constraint 'chk_amount' is violated."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-check-constraint-two-columns",
+      "title": "Add a CHECK constraint on two columns",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount + user_id > 0)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-check-constraint-without-a-name",
+      "title": "Add a CHECK constraint without a name",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD CHECK (amount >= 0)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
       "id": "add-column-after",
       "title": "Add a nullable column after another column",
       "session": [],
@@ -3631,6 +4010,103 @@
       ]
     },
     {
+      "id": "drop-column-in-check-alone",
+      "title": "Drop the only column of a CHECK constraint",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
       "id": "drop-column-in-foreign-key",
       "title": "Drop a column in a foreign key",
       "setup": [
@@ -3697,6 +4173,243 @@
           "result": "rejected",
           "code": 1828,
           "message": "Cannot drop column 'user_id': needed in a foreign key constraint 'fk_orders_user'"
+        }
+      ]
+    },
+    {
+      "id": "drop-column-in-not-enforced-check-alone",
+      "title": "Drop the only column of a NOT ENFORCED CHECK constraint",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0) NOT ENFORCED"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-column-in-not-enforced-two-column-check",
+      "title": "Drop a column a NOT ENFORCED CHECK constraint uses with another column",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount + user_id > 0) NOT ENFORCED"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN amount",
+      "verdict": {
+        "result": "fails",
+        "code": 3959,
+        "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        }
+      ]
+    },
+    {
+      "id": "drop-column-in-two-column-check",
+      "title": "Drop a column a CHECK constraint uses with another column",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount + user_id > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN amount",
+      "verdict": {
+        "result": "fails",
+        "code": 3959,
+        "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
         }
       ]
     },
@@ -4221,6 +4934,171 @@
           "result": "rejected",
           "code": 1846,
           "message": "LOCK=NONE is not supported. Reason: InnoDB presently supports one FULLTEXT index creation at a time. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "drop-column-indexed-in-check-alone",
+      "title": "Drop a column that has an index of its own and is the only column of a CHECK constraint",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)",
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": true,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-column-indexed-in-two-column-check",
+      "title": "Drop a column that has an index of its own and that a CHECK constraint uses with another column",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)",
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount + user_id > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN amount",
+      "verdict": {
+        "result": "fails",
+        "code": 3959,
+        "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
         }
       ]
     },
@@ -4832,6 +5710,200 @@
       ]
     },
     {
+      "id": "drop-column-named-in-check-string",
+      "title": "Drop a column a CHECK constraint names only in a string",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_email CHECK (email <> 'note')"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN note",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-column-next-to-check",
+      "title": "Drop a column no CHECK constraint uses",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN note",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
       "id": "drop-column-stored-generated-source",
       "title": "Drop a column a stored generated column uses",
       "setup": [
@@ -4979,6 +6051,297 @@
           "result": "rejected",
           "code": 1846,
           "message": "LOCK=NONE is not supported. Reason: InnoDB presently supports one FULLTEXT index creation at a time. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "drop-constraint-check",
+      "title": "Drop a CHECK constraint with DROP CONSTRAINT",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP CONSTRAINT chk_amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-constraint-not-enforced-check",
+      "title": "Drop a NOT ENFORCED CHECK constraint with DROP CONSTRAINT",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0) NOT ENFORCED"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP CONSTRAINT chk_amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-constraint-two-column-check",
+      "title": "Drop a CHECK constraint on two columns with DROP CONSTRAINT",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount + user_id > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP CONSTRAINT chk_amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
         }
       ]
     },
@@ -7327,6 +8690,622 @@
           "result": "rejected",
           "code": 3108,
           "message": "Column 'amount' has a generated column dependency."
+        }
+      ]
+    },
+    {
+      "id": "rename-column-in-check-alone",
+      "title": "Rename the only column of a CHECK constraint",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders RENAME COLUMN amount TO total",
+      "verdict": {
+        "result": "fails",
+        "code": 3959,
+        "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        }
+      ]
+    },
+    {
+      "id": "rename-column-in-not-enforced-check-alone",
+      "title": "Rename the only column of a NOT ENFORCED CHECK constraint",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0) NOT ENFORCED"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders RENAME COLUMN amount TO total",
+      "verdict": {
+        "result": "fails",
+        "code": 3959,
+        "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        }
+      ]
+    },
+    {
+      "id": "rename-column-in-not-enforced-two-column-check",
+      "title": "Rename a column a NOT ENFORCED CHECK constraint uses with another column",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount + user_id > 0) NOT ENFORCED"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders RENAME COLUMN amount TO total",
+      "verdict": {
+        "result": "fails",
+        "code": 3959,
+        "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        }
+      ]
+    },
+    {
+      "id": "rename-column-in-two-column-check",
+      "title": "Rename a column a CHECK constraint uses with another column",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount + user_id > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders RENAME COLUMN amount TO total",
+      "verdict": {
+        "result": "fails",
+        "code": 3959,
+        "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        }
+      ]
+    },
+    {
+      "id": "rename-column-indexed-in-check-alone",
+      "title": "Rename a column that has an index of its own and is the only column of a CHECK constraint",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)",
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders RENAME COLUMN amount TO total",
+      "verdict": {
+        "result": "fails",
+        "code": 3959,
+        "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        }
+      ]
+    },
+    {
+      "id": "rename-column-indexed-in-two-column-check",
+      "title": "Rename a column that has an index of its own and that a CHECK constraint uses with another column",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)",
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount + user_id > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders RENAME COLUMN amount TO total",
+      "verdict": {
+        "result": "fails",
+        "code": 3959,
+        "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3959,
+          "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        }
+      ]
+    },
+    {
+      "id": "rename-column-named-in-check-string",
+      "title": "Rename a column a CHECK constraint names only in a string",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_email CHECK (email <> 'note')"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders RENAME COLUMN note TO memo",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rename-column-next-to-check",
+      "title": "Rename a column no CHECK constraint uses",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders RENAME COLUMN note TO memo",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
         }
       ]
     },

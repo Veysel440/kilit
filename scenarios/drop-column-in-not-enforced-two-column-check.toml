@@ -1,0 +1,3 @@
+title = "Drop a column a NOT ENFORCED CHECK constraint uses with another column"
+setup = ["ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount + user_id > 0) NOT ENFORCED"]
+operation = "DROP COLUMN amount"
