@@ -156,10 +156,11 @@ impl Schema {
 
     fn alter(&mut self, line: usize, alter: &Alter) {
         // A missing table stays missing, and a lost one stays lost.
-        let Some(Entry::Known(table)) = self.tables.get(&key(&alter.table)) else {
+        let Some(Entry::Known(table)) = self.tables.get_mut(&key(&alter.table)) else {
             return;
         };
-        let mut table = table.clone();
+        // The table changes in place: an operation kilit cannot follow loses
+        // it, so what the operations before that one did is never seen.
         let mut new_name = None;
         for operation in &alter.operations {
             let changed = match operation {
@@ -167,7 +168,7 @@ impl Schema {
                     new_name = Some(name);
                     Ok(())
                 }
-                other => change(&mut table, other),
+                other => change(table, other),
             };
             if let Err(reason) = changed {
                 self.lose(&alter.table, format!("line {line}: {reason}"));
@@ -177,7 +178,6 @@ impl Schema {
                 self.pointed_at.insert(key(&foreign_key.referenced_table));
             }
         }
-        self.tables.insert(key(&alter.table), Entry::Known(table));
         if let Some(name) = new_name {
             self.rename(&alter.table, name);
         }
