@@ -9,8 +9,9 @@
 use sqlparser::ast::{
     self, AlterColumnOperation, AlterTableAlgorithm, AlterTableLock, AlterTableOperation,
     CharacterLength, ColumnOption, ContextModifier, CreateTableOptions, Expr, ForeignKeyConstraint,
-    GeneratedExpressionMode, Ident, IndexColumn, MySQLColumnPosition, ObjectName, ObjectNamePart,
-    ObjectType, ReferentialAction, RenameTableNameKind, SqlOption, TableConstraint, Value,
+    Function, FunctionArg, FunctionArgExpr, FunctionArguments, GeneratedExpressionMode, Ident,
+    IndexColumn, MySQLColumnPosition, ObjectName, ObjectNamePart, ObjectType, ReferentialAction,
+    RenameTableNameKind, SqlOption, TableConstraint, UnaryOperator, Value,
 };
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::keywords::Keyword;
@@ -42,7 +43,7 @@ pub fn parse(sql: &str) -> Vec<Statement> {
 fn read(sql: &str) -> StatementKind {
     match Parser::parse_sql(&MySqlDialect {}, sql) {
         Ok(statements) => match <[ast::Statement; 1]>::try_from(statements) {
-            Ok([statement]) => convert(statement),
+            Ok([statement]) => convert(statement, sql),
             Err(statements) => StatementKind::Unparsed {
                 error: unreadable(format!(
                     "expected one statement, found {}",
@@ -63,23 +64,72 @@ fn unreadable(detail: impl std::fmt::Display) -> String {
     format!("kilit could not read this statement: {detail}")
 }
 
-/// The table a statement names after the word `TABLE`, such as `orders` in
-/// `ALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4`, found from the
-/// words alone for a statement the parser cannot read.
+/// The table a statement names, found from the words alone for a statement
+/// the parser cannot read: after `ON` in `CREATE [UNIQUE | FULLTEXT |
+/// SPATIAL] INDEX` and `DROP INDEX`, such as `orders` in `CREATE FULLTEXT
+/// INDEX ft ON orders (note)`, and after the word `TABLE` in the others, such
+/// as `orders` in `ALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4`.
 fn table_named_in(sql: &str) -> Option<String> {
-    let tokens = Tokenizer::new(&MySqlDialect {}, sql).tokenize().ok()?;
-    let mut words = tokens
-        .into_iter()
-        .filter(|token| !matches!(token, Token::Whitespace(_)));
-    words.find(|token| matches!(token, Token::Word(word) if word.keyword == Keyword::TABLE))?;
-    let Token::Word(first) = words.next()? else {
-        return None;
+    let words = words(sql);
+    let first: [Keyword; 3] =
+        std::array::from_fn(|at| words.get(at).map_or(Keyword::NoKeyword, keyword));
+    let before_table = match first {
+        [Keyword::CREATE, Keyword::INDEX, _]
+        | [
+            Keyword::CREATE,
+            Keyword::UNIQUE | Keyword::FULLTEXT | Keyword::SPATIAL,
+            Keyword::INDEX,
+        ]
+        | [Keyword::DROP, Keyword::INDEX, _] => Keyword::ON,
+        _ => Keyword::TABLE,
     };
-    // `shop.orders`
-    if let (Some(Token::Period), Some(Token::Word(table))) = (words.next(), words.next()) {
-        return Some(format!("{}.{}", first.value, table.value));
+    table_after(&words, before_table).map(|(table, _)| table)
+}
+
+/// The tokens of `sql` without the spaces and comments between them; none
+/// if the tokenizer cannot read it.
+fn words(sql: &str) -> Vec<Token> {
+    let mut tokens = Tokenizer::new(&MySqlDialect {}, sql)
+        .tokenize()
+        .unwrap_or_default();
+    tokens.retain(|token| !matches!(token, Token::Whitespace(_)));
+    tokens
+}
+
+/// The keyword `token` is, if it is one. A quoted word is never a keyword.
+fn keyword(token: &Token) -> Keyword {
+    match token {
+        Token::Word(word) => word.keyword,
+        _ => Keyword::NoKeyword,
     }
-    Some(first.value)
+}
+
+/// The table named right after the first `marker` in `words`, such as
+/// `shop.orders`, and the words after the name.
+fn table_after(words: &[Token], marker: Keyword) -> Option<(String, &[Token])> {
+    let start = words.iter().position(|word| keyword(word) == marker)? + 1;
+    match &words[start..] {
+        [
+            Token::Word(schema),
+            Token::Period,
+            Token::Word(table),
+            rest @ ..,
+        ] => Some((format!("{}.{}", schema.value, table.value), rest)),
+        [Token::Word(table), rest @ ..] => Some((table.value.clone(), rest)),
+        _ => None,
+    }
+}
+
+/// Whether `sql`, a `CREATE INDEX` statement, has `USING` right after the
+/// table name, as in `CREATE INDEX i ON t USING BTREE (c)`. The parser reads
+/// it there and before `ON` alike; MySQL only before `ON` or after the
+/// column list.
+fn using_after_table(sql: &str) -> bool {
+    let words = words(sql);
+    matches!(
+        table_after(&words, Keyword::ON),
+        Some((_, [next, ..])) if keyword(next) == Keyword::USING
+    )
 }
 
 fn parser_message(err: ParserError) -> String {
@@ -89,10 +139,10 @@ fn parser_message(err: ParserError) -> String {
     }
 }
 
-fn convert(statement: ast::Statement) -> StatementKind {
+fn convert(statement: ast::Statement, sql: &str) -> StatementKind {
     // The statement fails on the measured servers or has not been measured:
     // it changes no table definition there, so there is no table to name.
-    if let Some(reason) = no_answer(&statement) {
+    if let Some(reason) = no_answer(&statement, sql) {
         return StatementKind::Unparsed {
             error: reason,
             table: None,
@@ -168,14 +218,16 @@ fn convert(statement: ast::Statement) -> StatementKind {
     }
 }
 
-/// How kilit's reasons name what MySQL 8.0.46 and 8.4.13 reject. Each word
-/// was run by hand on both servers and failed with error 1064; the lab has
-/// no fact for it yet, so kilit says no more than that.
+/// How kilit's reasons name what MySQL 8.0.46 and 8.4.13 reject. Each form
+/// was run by hand on both servers and failed with error 1064, or 1067 for
+/// a date or time literal as a default; the lab has no fact for it yet, so
+/// kilit says no more than that.
 const REJECTED_BY: &str = "MySQL 8.0.46 and 8.4.13 do not accept";
 
-/// Why kilit gives no answer for `statement`, which sqlparser reads: MySQL
-/// 8.0.46 and 8.4.13 do not accept it, or kilit has not measured it.
-fn no_answer(statement: &ast::Statement) -> Option<String> {
+/// Why kilit gives no answer for `statement`, which sqlparser reads from
+/// `sql`: MySQL 8.0.46 and 8.4.13 do not accept it, or kilit has not
+/// measured it.
+fn no_answer(statement: &ast::Statement, sql: &str) -> Option<String> {
     match statement {
         ast::Statement::Truncate(_) => {
             return Some(
@@ -192,7 +244,7 @@ fn no_answer(statement: &ast::Statement) -> Option<String> {
         }
         _ => {}
     }
-    let rejected = rejected_words(statement);
+    let rejected = rejected_words(statement, sql);
     if !rejected.is_empty() {
         return Some(format!("{REJECTED_BY} {}", rejected.join(" or ")));
     }
@@ -203,12 +255,36 @@ fn no_answer(statement: &ast::Statement) -> Option<String> {
                 .to_owned(),
         );
     }
+    let key_parts = key_parts(statement);
+    if names(statement)
+        .into_iter()
+        .any(|name| name.quote_style == Some('"'))
+        || key_parts.iter().any(|part| double_quoted_string(part))
+    {
+        return Some(
+            "a double-quoted column, index or constraint name works only when sql_mode \
+             has ANSI_QUOTES, and kilit does not know the server's sql_mode"
+                .to_owned(),
+        );
+    }
+    if let Some(default) = rejected_default(statement) {
+        return Some(format!("{REJECTED_BY} {default} without parentheses"));
+    }
+    if let Some(part) = key_parts
+        .into_iter()
+        .find(|part| matches!(part, Expr::Function(function) if prefix(function).is_none()))
+    {
+        return Some(format!(
+            "{REJECTED_BY} the key part {part}; an expression in an index needs its own \
+             parentheses, and a prefix length is a whole number"
+        ));
+    }
     None
 }
 
-/// The words in `statement` that MySQL 8.0.46 and 8.4.13 do not accept, as
-/// kilit names them.
-fn rejected_words(statement: &ast::Statement) -> Vec<&'static str> {
+/// The words in `statement`, read from `sql`, that MySQL 8.0.46 and 8.4.13
+/// do not accept, as kilit names them.
+fn rejected_words(statement: &ast::Statement, sql: &str) -> Vec<&'static str> {
     let mut words = Vec::new();
     match statement {
         ast::Statement::AlterTable(alter) => {
@@ -236,6 +312,9 @@ fn rejected_words(statement: &ast::Statement) -> Vec<&'static str> {
             }
             if index.if_not_exists {
                 words.push("CREATE INDEX IF NOT EXISTS");
+            }
+            if index.using.is_some() && using_after_table(sql) {
+                words.push("USING between the table name and the column list in CREATE INDEX");
             }
             if !index.include.is_empty() {
                 words.push("INCLUDE in CREATE INDEX");
@@ -279,7 +358,25 @@ fn rejected_words(statement: &ast::Statement) -> Vec<&'static str> {
 /// The tables `statement` names, where MySQL expects a table name.
 fn table_names(statement: &ast::Statement) -> Vec<&ObjectName> {
     match statement {
-        ast::Statement::AlterTable(alter) => vec![&alter.name],
+        // With the table a foreign key points at and the new name.
+        ast::Statement::AlterTable(alter) => std::iter::once(&alter.name)
+            .chain(
+                alter
+                    .operations
+                    .iter()
+                    .filter_map(|operation| match operation {
+                        AlterTableOperation::AddConstraint {
+                            constraint: TableConstraint::ForeignKey(key),
+                            ..
+                        } => Some(&key.foreign_table),
+                        AlterTableOperation::RenameTable {
+                            table_name:
+                                RenameTableNameKind::As(name) | RenameTableNameKind::To(name),
+                        } => Some(name),
+                        _ => None,
+                    }),
+            )
+            .collect(),
         ast::Statement::CreateIndex(index) => vec![&index.table_name],
         ast::Statement::CreateTable(create) => vec![&create.name],
         ast::Statement::Drop {
@@ -304,6 +401,289 @@ fn double_quoted(name: &ObjectName) -> bool {
     name.0.iter().any(
         |part| matches!(part, ObjectNamePart::Identifier(ident) if ident.quote_style == Some('"')),
     )
+}
+
+/// The column, index and constraint names `statement` writes where MySQL
+/// expects a name. The key parts of an index are in [`key_parts`].
+fn names(statement: &ast::Statement) -> Vec<&Ident> {
+    let mut names = Vec::new();
+    match statement {
+        ast::Statement::AlterTable(alter) => {
+            for operation in &alter.operations {
+                operation_names(operation, &mut names);
+            }
+        }
+        ast::Statement::CreateIndex(index) => names.extend(index.name.iter().flat_map(parts)),
+        ast::Statement::Drop {
+            object_type: ObjectType::Index,
+            names: indexes,
+            ..
+        } => names.extend(indexes.iter().flat_map(parts)),
+        _ => {}
+    }
+    names
+}
+
+/// The parts of `shop.orders`.
+fn parts(name: &ObjectName) -> impl Iterator<Item = &Ident> {
+    name.0.iter().filter_map(|part| match part {
+        ObjectNamePart::Identifier(ident) => Some(ident),
+        _ => None,
+    })
+}
+
+fn operation_names<'a>(operation: &'a AlterTableOperation, names: &mut Vec<&'a Ident>) {
+    let after = |position: &'a Option<MySQLColumnPosition>| match position {
+        Some(MySQLColumnPosition::After(column)) => Some(column),
+        _ => None,
+    };
+    match operation {
+        AlterTableOperation::AddConstraint { constraint, .. } => match constraint {
+            TableConstraint::Index(index) => names.extend(&index.name),
+            TableConstraint::Unique(unique) => {
+                names.extend(unique.name.iter().chain(&unique.index_name));
+            }
+            TableConstraint::PrimaryKey(key) => {
+                names.extend(key.name.iter().chain(&key.index_name))
+            }
+            TableConstraint::FulltextOrSpatial(index) => names.extend(&index.opt_index_name),
+            TableConstraint::ForeignKey(key) => names.extend(
+                key.name
+                    .iter()
+                    .chain(&key.index_name)
+                    .chain(&key.columns)
+                    .chain(&key.referred_columns),
+            ),
+            TableConstraint::Check(check) => names.extend(&check.name),
+            _ => {}
+        },
+        AlterTableOperation::AddColumn {
+            column_def,
+            column_position,
+            ..
+        } => {
+            names.push(&column_def.name);
+            names.extend(
+                column_def
+                    .options
+                    .iter()
+                    .filter_map(|option| option.name.as_ref()),
+            );
+            names.extend(after(column_position));
+        }
+        AlterTableOperation::ModifyColumn {
+            col_name,
+            column_position,
+            ..
+        } => {
+            names.push(col_name);
+            names.extend(after(column_position));
+        }
+        AlterTableOperation::ChangeColumn {
+            old_name,
+            new_name,
+            column_position,
+            ..
+        } => {
+            names.extend([old_name, new_name]);
+            names.extend(after(column_position));
+        }
+        AlterTableOperation::RenameColumn {
+            old_column_name,
+            new_column_name,
+        } => names.extend([old_column_name, new_column_name]),
+        AlterTableOperation::AlterColumn { column_name, .. } => names.push(column_name),
+        AlterTableOperation::DropColumn { column_names, .. } => names.extend(column_names),
+        AlterTableOperation::DropIndex { name }
+        | AlterTableOperation::DropForeignKey { name, .. }
+        | AlterTableOperation::DropConstraint { name, .. } => names.push(name),
+        _ => {}
+    }
+}
+
+/// The key parts of the indexes and keys `statement` adds, such as `amount`
+/// and `note(10)` in `ADD INDEX i (amount, note(10))`.
+fn key_parts(statement: &ast::Statement) -> Vec<&Expr> {
+    let columns: Vec<&IndexColumn> = match statement {
+        ast::Statement::AlterTable(alter) => alter
+            .operations
+            .iter()
+            .flat_map(|operation| match operation {
+                AlterTableOperation::AddConstraint { constraint, .. } => match constraint {
+                    TableConstraint::Index(index) => index.columns.as_slice(),
+                    TableConstraint::Unique(unique) => unique.columns.as_slice(),
+                    TableConstraint::PrimaryKey(key) => key.columns.as_slice(),
+                    TableConstraint::FulltextOrSpatial(index) => index.columns.as_slice(),
+                    _ => &[],
+                },
+                _ => &[],
+            })
+            .collect(),
+        ast::Statement::CreateIndex(index) => index.columns.iter().collect(),
+        _ => Vec::new(),
+    };
+    columns
+        .into_iter()
+        .map(|column| &column.column.expr)
+        .collect()
+}
+
+/// `"amount"` as a key part: the parser reads it as a string, as MySQL does
+/// without ANSI_QUOTES.
+fn double_quoted_string(part: &Expr) -> bool {
+    matches!(part, Expr::Value(value) if matches!(value.value, Value::DoubleQuotedString(_)))
+}
+
+/// The first default in `statement` that MySQL 8.0.46 and 8.4.13 do not
+/// take without parentheses, as kilit names it: `DEFAULT CURRENT_DATE` or
+/// `SET DEFAULT CURRENT_TIMESTAMP`.
+fn rejected_default(statement: &ast::Statement) -> Option<String> {
+    let ast::Statement::AlterTable(alter) = statement else {
+        return None;
+    };
+    alter
+        .operations
+        .iter()
+        .find_map(|operation| match operation {
+            AlterTableOperation::AddColumn { column_def, .. } => column_def
+                .options
+                .iter()
+                .find_map(|option| rejected_column_default(&option.option)),
+            AlterTableOperation::ModifyColumn { options, .. }
+            | AlterTableOperation::ChangeColumn { options, .. } => {
+                options.iter().find_map(rejected_column_default)
+            }
+            AlterTableOperation::AlterColumn {
+                op: AlterColumnOperation::SetDefault { value },
+                ..
+            } => (!plain_default(value, false)).then(|| format!("SET DEFAULT {value}")),
+            _ => None,
+        })
+}
+
+fn rejected_column_default(option: &ColumnOption) -> Option<String> {
+    match option {
+        ColumnOption::Default(value) if !plain_default(value, true) => {
+            Some(format!("DEFAULT {value}"))
+        }
+        _ => None,
+    }
+}
+
+/// Whether MySQL takes the default `value` as written: in parentheses, a
+/// literal, or, in a column definition (`now`), CURRENT_TIMESTAMP and its
+/// synonyms. `ALTER COLUMN ... SET DEFAULT` takes no CURRENT_TIMESTAMP.
+/// Every form, and the ones refused, was run by hand on MySQL 8.0.46 and
+/// 8.4.13, with the same result on both.
+fn plain_default(value: &Expr, now: bool) -> bool {
+    match value {
+        // An expression default, which `check` answers.
+        Expr::Nested(_) => true,
+        Expr::Value(value) => matches!(
+            value.value,
+            Value::Number(..)
+                | Value::SingleQuotedString(_)
+                | Value::DoubleQuotedString(_)
+                | Value::NationalStringLiteral(_)
+                | Value::HexStringLiteral(_)
+                | Value::SingleQuotedByteStringLiteral(_)
+                | Value::Boolean(_)
+                | Value::Null
+        ),
+        // `-1`, `+1.5`
+        Expr::UnaryOp {
+            op: UnaryOperator::Plus | UnaryOperator::Minus,
+            expr,
+        } => matches!(&**expr, Expr::Value(value) if matches!(value.value, Value::Number(..))),
+        // `_utf8mb4'x'`, `_binary x'0A'`
+        Expr::Prefixed { prefix, value } => {
+            prefix.value.starts_with('_')
+                && matches!(&**value, Expr::Value(value) if matches!(
+                    value.value,
+                    Value::SingleQuotedString(_)
+                        | Value::DoubleQuotedString(_)
+                        | Value::HexStringLiteral(_)
+                ))
+        }
+        // `0b01`, which the parser reads as a name.
+        Expr::Identifier(name) => {
+            name.quote_style.is_none()
+                && name.value.strip_prefix("0b").is_some_and(|bits| {
+                    !bits.is_empty() && bits.bytes().all(|bit| matches!(bit, b'0' | b'1'))
+                })
+        }
+        Expr::Function(function) => now && current_timestamp(function),
+        _ => false,
+    }
+}
+
+/// `CURRENT_TIMESTAMP`, `NOW()`, `LOCALTIME` or `LOCALTIMESTAMP`, with
+/// nothing, `()` or a whole number in parentheses after it.
+fn current_timestamp(function: &Function) -> bool {
+    let [ObjectNamePart::Identifier(name)] = function.name.0.as_slice() else {
+        return false;
+    };
+    let synonym = name.quote_style.is_none()
+        && ["CURRENT_TIMESTAMP", "NOW", "LOCALTIME", "LOCALTIMESTAMP"]
+            .iter()
+            .any(|synonym| name.value.eq_ignore_ascii_case(synonym));
+    let precision = match &function.args {
+        FunctionArguments::None => true,
+        FunctionArguments::List(list) => {
+            list.duplicate_treatment.is_none()
+                && list.clauses.is_empty()
+                && match list.args.as_slice() {
+                    [] => true,
+                    [precision] => whole_number(precision).is_some(),
+                    _ => false,
+                }
+        }
+        FunctionArguments::Subquery(_) => false,
+    };
+    synonym && precision && plain_call(function)
+}
+
+/// A call with nothing around its arguments: no `FILTER`, `OVER` or the like.
+fn plain_call(function: &Function) -> bool {
+    matches!(function.parameters, FunctionArguments::None)
+        && function.filter.is_none()
+        && function.null_treatment.is_none()
+        && function.over.is_none()
+        && function.within_group.is_empty()
+        && !function.uses_odbc_syntax
+}
+
+/// The digits of `argument` when it is a whole number, such as `10`.
+fn whole_number(argument: &FunctionArg) -> Option<&str> {
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))) = argument else {
+        return None;
+    };
+    match &value.value {
+        Value::Number(digits, _)
+            if !digits.is_empty() && digits.bytes().all(|digit| digit.is_ascii_digit()) =>
+        {
+            Some(digits)
+        }
+        _ => None,
+    }
+}
+
+/// The column and length of a prefix key part, such as `note` and `10` in
+/// `note(10)` or `` `note`(10) ``, which the parser reads as a call.
+fn prefix(function: &Function) -> Option<(&Ident, &str)> {
+    let [ObjectNamePart::Identifier(column)] = function.name.0.as_slice() else {
+        return None;
+    };
+    let FunctionArguments::List(list) = &function.args else {
+        return None;
+    };
+    let [length] = list.args.as_slice() else {
+        return None;
+    };
+    if list.duplicate_treatment.is_some() || !list.clauses.is_empty() || !plain_call(function) {
+        return None;
+    }
+    whole_number(length).map(|length| (column, length))
 }
 
 /// `CREATE TABLE` with its columns, keys and default character set.
@@ -1376,6 +1756,354 @@ mod tests {
         }
     }
 
+    // The forms in the tests below were run by hand on MySQL 8.0.46 and
+    // 8.4.13, with the same result on both. Each default was run in ADD
+    // COLUMN; MODIFY and CHANGE take the same column definition.
+
+    #[test]
+    fn a_double_quoted_column_index_or_constraint_name_gets_no_answer() {
+        // Error 1064 without ANSI_QUOTES: "x" is a string there.
+        for sql in [
+            r#"ALTER TABLE orders ADD COLUMN "coupon" INT NULL"#,
+            r#"ALTER TABLE orders ADD INDEX "ix_amount" (amount)"#,
+            r#"ALTER TABLE orders ADD INDEX ix_amount ("amount")"#,
+            r#"ALTER TABLE orders ADD UNIQUE INDEX uq_email ("email")"#,
+            r#"ALTER TABLE orders ADD FULLTEXT INDEX ft_note ("note")"#,
+            r#"ALTER TABLE orders ADD PRIMARY KEY ("id")"#,
+            r#"ALTER TABLE orders DROP COLUMN "note""#,
+            r#"ALTER TABLE orders MODIFY "note" VARCHAR(60) NULL"#,
+            r#"ALTER TABLE orders CHANGE "note" memo VARCHAR(60) NULL"#,
+            r#"ALTER TABLE orders CHANGE note "memo" VARCHAR(60) NULL"#,
+            r#"ALTER TABLE orders RENAME COLUMN "note" TO memo"#,
+            r#"ALTER TABLE orders RENAME COLUMN note TO "memo""#,
+            r#"ALTER TABLE orders ALTER COLUMN "amount" SET DEFAULT 0"#,
+            r#"ALTER TABLE orders ADD COLUMN coupon INT NULL AFTER "amount""#,
+            r#"ALTER TABLE orders DROP INDEX "ix""#,
+            r#"ALTER TABLE orders ADD CONSTRAINT "fk_user" FOREIGN KEY (user_id) REFERENCES users (id)"#,
+            r#"ALTER TABLE orders ADD CONSTRAINT fk_user FOREIGN KEY ("user_id") REFERENCES users (id)"#,
+            r#"ALTER TABLE orders ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users ("id")"#,
+            r#"ALTER TABLE orders DROP FOREIGN KEY "fk_x""#,
+            r#"CREATE INDEX "ix_amount" ON orders (amount)"#,
+            r#"CREATE INDEX ix_amount ON orders ("amount")"#,
+            r#"DROP INDEX "ix" ON orders"#,
+        ] {
+            assert_eq!(
+                no_answer_for(sql),
+                "a double-quoted column, index or constraint name works only when sql_mode \
+                 has ANSI_QUOTES, and kilit does not know the server's sql_mode",
+                "{sql}"
+            );
+        }
+        // The table a foreign key points at and the new name are table names.
+        for sql in [
+            r#"ALTER TABLE orders ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES "users" (id)"#,
+            r#"ALTER TABLE orders RENAME TO "orders2""#,
+        ] {
+            assert_eq!(
+                no_answer_for(sql),
+                "a double-quoted table name works only when sql_mode has ANSI_QUOTES, \
+                 and kilit does not know the server's sql_mode",
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn double_quotes_where_mysql_expects_a_string_keep_the_statement() {
+        for sql in [
+            r#"ALTER TABLE orders ADD COLUMN c_default VARCHAR(10) NOT NULL DEFAULT "x""#,
+            r#"ALTER TABLE orders ADD COLUMN c_collate VARCHAR(10) COLLATE "utf8mb4_bin" NULL"#,
+            r#"ALTER TABLE orders ADD COLUMN c_charset VARCHAR(10) CHARACTER SET "utf8mb4" NULL"#,
+            r#"ALTER TABLE orders ADD COLUMN c_enum ENUM("a", "b") NULL"#,
+            r#"ALTER TABLE d ALTER COLUMN note SET DEFAULT "x""#,
+            "ALTER TABLE orders ADD COLUMN `coupon` INT NULL",
+            "ALTER TABLE orders ADD INDEX `ix_amount` (`amount`)",
+        ] {
+            assert!(matches!(kind(sql), StatementKind::Alter(_)), "{sql}");
+        }
+        assert_eq!(
+            added_column(
+                r#"ALTER TABLE orders ADD COLUMN c_collate VARCHAR(10) COLLATE "utf8mb4_bin" NULL"#
+            )
+            .collation
+            .as_deref(),
+            Some("utf8mb4_bin")
+        );
+    }
+
+    #[test]
+    fn using_between_the_table_and_the_columns_gets_no_answer() {
+        for sql in [
+            "CREATE INDEX i_using_1 ON orders USING BTREE (amount)",
+            "CREATE INDEX i_using_2 ON orders USING HASH (amount)",
+            "CREATE UNIQUE INDEX u_using_3 ON orders USING BTREE (email)",
+            "CREATE INDEX i_using_4 ON k5bmanual.orders USING BTREE (amount)",
+            "CREATE INDEX i_using_5 ON orders USING BTREE (amount) USING BTREE",
+        ] {
+            assert_eq!(
+                no_answer_for(sql),
+                "MySQL 8.0.46 and 8.4.13 do not accept USING between the table name and \
+                 the column list in CREATE INDEX",
+                "{sql}"
+            );
+        }
+        // Before ON and after the column list, MySQL takes it.
+        for sql in [
+            "CREATE INDEX i_using_6 USING BTREE ON orders (amount)",
+            "CREATE INDEX i_using_7 ON orders (amount) USING BTREE",
+            "CREATE INDEX i_using_8 USING BTREE ON orders (amount) USING HASH",
+            "ALTER TABLE orders ADD INDEX i_using_9 USING BTREE (amount)",
+            "ALTER TABLE orders ADD INDEX i_using_10 (amount) USING BTREE",
+        ] {
+            assert!(matches!(kind(sql), StatementKind::Alter(_)), "{sql}");
+        }
+    }
+
+    #[test]
+    fn defaults_mysql_takes_without_parentheses_keep_the_statement() {
+        // Literals, and CURRENT_TIMESTAMP and its synonyms in a column
+        // definition. In parentheses, a default is an expression, which
+        // `check` answers.
+        for default in [
+            "0",
+            "-1",
+            "+1",
+            "- 1",
+            "1.5",
+            "-1.5",
+            ".5",
+            "-.5",
+            "1.",
+            "1e3",
+            "-1e3",
+            "'x'",
+            "''",
+            "'a b'",
+            "'it''s'",
+            r#""x""#,
+            "N'x'",
+            "_utf8mb4'x'",
+            "_utf8mb4 0x41",
+            r#"_utf8mb4"x""#,
+            "'a' 'b'",
+            "'x' COLLATE utf8mb4_bin",
+            "NULL",
+            "null",
+            "TRUE",
+            "false",
+            "b'01'",
+            "B'01'",
+            "0b01",
+            "x'0A'",
+            "X'0A'",
+            "0x0A",
+            "_binary x'0A'",
+            "CURRENT_TIMESTAMP",
+            "current_timestamp",
+            "CURRENT_TIMESTAMP(6)",
+            "CURRENT_TIMESTAMP ( 6 )",
+            "CURRENT_TIMESTAMP()",
+            "CURRENT_TIMESTAMP(0)",
+            "CURRENT_TIMESTAMP(06)",
+            "CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
+            "CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)",
+            "NOW()",
+            "now(6)",
+            "LOCALTIME",
+            "LOCALTIME()",
+            "LOCALTIME(6)",
+            "LOCALTIMESTAMP",
+            "LOCALTIMESTAMP()",
+            "LOCALTIMESTAMP ( )",
+            "LOCALTIMESTAMP(6)",
+            "(CURRENT_DATE)",
+            "(DATE '2020-01-01')",
+        ] {
+            for sql in [
+                format!("ALTER TABLE d ADD COLUMN c INT NULL DEFAULT {default}"),
+                format!("ALTER TABLE d MODIFY c INT NULL DEFAULT {default}"),
+                format!("ALTER TABLE d CHANGE c c INT NULL DEFAULT {default}"),
+            ] {
+                assert!(matches!(kind(&sql), StatementKind::Alter(_)), "{sql}");
+            }
+        }
+        // ALTER COLUMN ... SET DEFAULT takes literals.
+        for default in [
+            "0",
+            "-1",
+            "+1",
+            "1.5",
+            "1e3",
+            "'x'",
+            "''",
+            r#""x""#,
+            "N'x'",
+            "_utf8mb4'x'",
+            "'a' 'b'",
+            "NULL",
+            "TRUE",
+            "FALSE",
+            "b'01'",
+            "0b01",
+            "x'0A'",
+            "0x0A",
+            "_binary x'0A'",
+            "(NOW())",
+        ] {
+            let sql = format!("ALTER TABLE d ALTER COLUMN c SET DEFAULT {default}");
+            assert!(matches!(kind(&sql), StatementKind::Alter(_)), "{sql}");
+        }
+    }
+
+    #[test]
+    fn other_defaults_without_parentheses_get_no_answer() {
+        // Error 1064, or 1067 for the date and time literals. The reason has
+        // the default as the parser prints it.
+        for (default, printed) in [
+            ("+-1", "+-1"),
+            ("-'1'", "-'1'"),
+            ("-0x0A", "-X'0A'"),
+            ("0X0A", "0X0A"),
+            ("0B01", "0B01"),
+            (r#"b"01""#, r#"B"01""#),
+            ("UNKNOWN", "UNKNOWN"),
+            ("DATE '2020-01-01'", "DATE '2020-01-01'"),
+            ("TIME '10:00:00'", "TIME '10:00:00'"),
+            (
+                "TIMESTAMP '2020-01-01 00:00:00'",
+                "TIMESTAMP '2020-01-01 00:00:00'",
+            ),
+            (
+                "DATETIME '2020-01-01 00:00:00'",
+                "DATETIME '2020-01-01 00:00:00'",
+            ),
+            ("{d '2020-01-01'}", "{d '2020-01-01'}"),
+            ("NOW", "NOW"),
+            ("NOW(+6)", "NOW(+6)"),
+            ("CURRENT_TIMESTAMP(6.0)", "CURRENT_TIMESTAMP(6.0)"),
+            ("`NOW`()", "`NOW`()"),
+            ("CURRENT_DATE", "CURRENT_DATE"),
+            ("CURRENT_DATE()", "CURRENT_DATE()"),
+            ("CURDATE()", "CURDATE()"),
+            ("CURRENT_TIME", "CURRENT_TIME"),
+            ("SYSDATE()", "SYSDATE()"),
+            ("UTC_TIMESTAMP", "UTC_TIMESTAMP"),
+            ("UTC_TIMESTAMP()", "UTC_TIMESTAMP()"),
+            (
+                "CURRENT_TIMESTAMP + INTERVAL 1 DAY",
+                "CURRENT_TIMESTAMP + INTERVAL 1 DAY",
+            ),
+            ("1+1", "1 + 1"),
+            ("UUID()", "UUID()"),
+            ("abc", "abc"),
+            ("CURRENT_USER", "CURRENT_USER"),
+            ("@x", "@x"),
+        ] {
+            for sql in [
+                format!("ALTER TABLE d ADD COLUMN c DATE NULL DEFAULT {default}"),
+                format!("ALTER TABLE d MODIFY day DATE NULL DEFAULT {default}"),
+                format!("ALTER TABLE d CHANGE day day DATE NULL DEFAULT {default}"),
+            ] {
+                assert_eq!(
+                    no_answer_for(&sql),
+                    format!(
+                        "MySQL 8.0.46 and 8.4.13 do not accept DEFAULT {printed} \
+                         without parentheses"
+                    ),
+                    "{sql}"
+                );
+            }
+        }
+        // ALTER COLUMN ... SET DEFAULT takes no CURRENT_TIMESTAMP.
+        for (default, printed) in [
+            ("CURRENT_TIMESTAMP", "CURRENT_TIMESTAMP"),
+            ("CURRENT_TIMESTAMP()", "CURRENT_TIMESTAMP()"),
+            ("CURRENT_TIMESTAMP(6)", "CURRENT_TIMESTAMP(6)"),
+            ("NOW()", "NOW()"),
+            ("LOCALTIME", "LOCALTIME"),
+            ("LOCALTIMESTAMP", "LOCALTIMESTAMP"),
+            ("CURRENT_DATE", "CURRENT_DATE"),
+            ("'x' COLLATE utf8mb4_bin", "'x' COLLATE utf8mb4_bin"),
+            ("1+1", "1 + 1"),
+            ("CURRENT_TIMESTAMP + 0", "CURRENT_TIMESTAMP + 0"),
+            ("DATE '2020-01-01'", "DATE '2020-01-01'"),
+            (
+                "TIMESTAMP '2020-01-01 00:00:00'",
+                "TIMESTAMP '2020-01-01 00:00:00'",
+            ),
+        ] {
+            let sql = format!("ALTER TABLE d ALTER COLUMN seen SET DEFAULT {default}");
+            assert_eq!(
+                no_answer_for(&sql),
+                format!(
+                    "MySQL 8.0.46 and 8.4.13 do not accept SET DEFAULT {printed} \
+                     without parentheses"
+                ),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_part_that_is_not_a_prefix_gets_no_answer() {
+        for (sql, part) in [
+            ("ALTER TABLE k ADD INDEX k9 (lower(email))", "lower(email)"),
+            (
+                "ALTER TABLE k ADD UNIQUE INDEX k10 (lower(email))",
+                "lower(email)",
+            ),
+            (
+                "ALTER TABLE k ADD FULLTEXT INDEX k11 (lower(note))",
+                "lower(note)",
+            ),
+            ("CREATE INDEX k12 ON k (lower(email))", "lower(email)"),
+            (
+                "CREATE UNIQUE INDEX k13 ON k (lower(email))",
+                "lower(email)",
+            ),
+            // $table->rawIndex('lower(email)', 'k_lower_email_index')
+            (
+                "alter table `k` add index `k_lower_email_index`(lower(email))",
+                "lower(email)",
+            ),
+            ("ALTER TABLE k ADD INDEX k14 (note(10, 2))", "note(10, 2)"),
+            ("ALTER TABLE k ADD INDEX k15 (note(10.5))", "note(10.5)"),
+            ("ALTER TABLE k ADD INDEX k16 (note(1e1))", "note(1e1)"),
+            ("ALTER TABLE k ADD INDEX k17 (note(0x0A))", "note(X'0A')"),
+            ("ALTER TABLE k ADD INDEX k18 (note(+10))", "note(+10)"),
+            ("ALTER TABLE k ADD INDEX k19 (note())", "note()"),
+            ("ALTER TABLE k ADD INDEX k20 (k.note(10))", "k.note(10)"),
+            (
+                "ALTER TABLE k2 ADD PRIMARY KEY (lower(email))",
+                "lower(email)",
+            ),
+        ] {
+            assert_eq!(
+                no_answer_for(sql),
+                format!(
+                    "MySQL 8.0.46 and 8.4.13 do not accept the key part {part}; an expression \
+                     in an index needs its own parentheses, and a prefix length is a whole \
+                     number"
+                ),
+                "{sql}"
+            );
+        }
+        // A prefix, and an expression in its own parentheses.
+        for sql in [
+            "ALTER TABLE k ADD INDEX k1 (note(10))",
+            "ALTER TABLE k ADD INDEX k2 (`note`(10))",
+            "ALTER TABLE k ADD INDEX k3 (NOTE(10))",
+            "ALTER TABLE k ADD INDEX k4 (note (10))",
+            "ALTER TABLE k ADD INDEX k5 (note(010))",
+            "ALTER TABLE k ADD INDEX k6 (note(10) DESC)",
+            "ALTER TABLE k ADD INDEX k7 (`note`(10), email)",
+            "ALTER TABLE k ADD INDEX k8 ((lower(email)))",
+            "ALTER TABLE k2 ADD PRIMARY KEY (`note`(10))",
+        ] {
+            assert!(matches!(kind(sql), StatementKind::Alter(_)), "{sql}");
+        }
+    }
+
     #[test]
     fn truncate_and_lock_tables_get_no_answer() {
         for sql in ["TRUNCATE TABLE orders", "TRUNCATE orders"] {
@@ -1638,6 +2366,41 @@ SET FOREIGN_KEY_CHECKS=1;
                 Some("shop.orders"),
             ),
             ("ALTER TABLE orders DEFAULT CHARSET=latin1", Some("orders")),
+            // An index statement names its table after ON. MySQL 8.0.46 and
+            // 8.4.13 accept each one, run by hand.
+            (
+                "CREATE FULLTEXT INDEX ft_note ON orders (note)",
+                Some("orders"),
+            ),
+            (
+                "CREATE FULLTEXT INDEX ft_email ON `shop`.`orders` (email) WITH PARSER ngram",
+                Some("shop.orders"),
+            ),
+            (
+                "CREATE SPATIAL INDEX sp_spot ON places (spot)",
+                Some("places"),
+            ),
+            (
+                "CREATE INDEX i_invisible ON orders (amount) INVISIBLE",
+                Some("orders"),
+            ),
+            (
+                "CREATE UNIQUE INDEX u_invisible ON orders (email) INVISIBLE",
+                Some("orders"),
+            ),
+            (
+                "CREATE INDEX i_block ON orders (amount) KEY_BLOCK_SIZE=8",
+                Some("orders"),
+            ),
+            (
+                "DROP INDEX i_drop_1 ON orders ALGORITHM=INPLACE",
+                Some("orders"),
+            ),
+            ("DROP INDEX i_drop_2 ON orders LOCK=NONE", Some("orders")),
+            (
+                "DROP INDEX `on` ON orders ALGORITHM=INPLACE LOCK=NONE",
+                Some("orders"),
+            ),
             ("FOO BAR", None),
         ] {
             assert!(

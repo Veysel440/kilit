@@ -1889,6 +1889,131 @@ mod tests {
     }
 
     #[test]
+    fn statements_in_a_syntax_mysql_rejects_are_unknown_on_any_table() {
+        // One of each kind; parse.rs tests every form. Each failed with
+        // error 1064 on MySQL 8.0.46 and 8.4.13, run by hand.
+        for (sql, expected) in [
+            (
+                r#"ALTER TABLE orders DROP COLUMN "note""#,
+                "a double-quoted column, index or constraint name works only when sql_mode \
+                 has ANSI_QUOTES, and kilit does not know the server's sql_mode",
+            ),
+            (
+                "CREATE INDEX i ON orders USING BTREE (amount)",
+                "MySQL 8.0.46 and 8.4.13 do not accept USING between the table name and the \
+                 column list in CREATE INDEX",
+            ),
+            (
+                "ALTER TABLE orders ADD COLUMN due_on DATE NULL DEFAULT CURRENT_DATE",
+                "MySQL 8.0.46 and 8.4.13 do not accept DEFAULT CURRENT_DATE without parentheses",
+            ),
+            (
+                "ALTER TABLE orders ALTER COLUMN amount SET DEFAULT CURRENT_TIMESTAMP",
+                "MySQL 8.0.46 and 8.4.13 do not accept SET DEFAULT CURRENT_TIMESTAMP without \
+                 parentheses",
+            ),
+            (
+                "ALTER TABLE orders ADD INDEX i (lower(email))",
+                "MySQL 8.0.46 and 8.4.13 do not accept the key part lower(email); an \
+                 expression in an index needs its own parentheses, and a prefix length is a \
+                 whole number",
+            ),
+        ] {
+            // A table from the schema, and the same table created earlier in
+            // the input.
+            assert_eq!(reason(on_shop("", sql)), expected, "{sql}");
+            let created = predictions(&format!("{SHOP}\n{sql}")).pop().unwrap();
+            assert_eq!(reason(created), expected, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_statement_in_a_syntax_mysql_rejects_changes_no_table() {
+        let predictions = predictions_with(
+            SHOP,
+            r#"ALTER TABLE orders DROP COLUMN "note";
+               ALTER TABLE orders RENAME TO "orders2";
+               ALTER TABLE orders ADD INDEX i (lower(email));
+               ALTER TABLE orders MODIFY note VARCHAR(100) NULL;
+               ALTER TABLE orders DROP COLUMN email;"#,
+        );
+        assert!(
+            predictions[..3]
+                .iter()
+                .all(|prediction| matches!(prediction, Prediction::Unknown { .. })),
+            "{predictions:?}"
+        );
+        // note is still there, the table is still orders, and email is in
+        // no index.
+        assert_eq!(
+            measured(predictions[3].clone()).0,
+            "lengthen-varchar-past-255-bytes"
+        );
+        assert_eq!(
+            said(&predictions[4]),
+            "INSTANT, no rebuild, writes continue"
+        );
+    }
+
+    #[test]
+    fn an_index_statement_kilit_cannot_read_loses_its_table() {
+        // MySQL 8.0.46 and 8.4.13 accept each one, run by hand. kilit
+        // cannot read them, so it no longer knows which indexes orders has:
+        // the FULLTEXT index is a note, as on a table it does not know.
+        for unreadable in [
+            "CREATE FULLTEXT INDEX ft_note ON orders (note)",
+            "CREATE UNIQUE INDEX u_invisible ON orders (email) INVISIBLE",
+            "CREATE INDEX i_block ON orders (amount) KEY_BLOCK_SIZE=8",
+        ] {
+            let predictions = predictions_with(
+                SHOP,
+                &format!("{unreadable};\nALTER TABLE orders ADD COLUMN coupon INT NULL;"),
+            );
+            assert!(
+                reason(predictions[0].clone()).starts_with("kilit could not read this statement"),
+                "{unreadable}"
+            );
+            let (case, verdict, notes) = measured(predictions[1].clone());
+            assert_eq!(
+                (case, verdict.as_str()),
+                ("add-column", "INSTANT, no rebuild, writes continue"),
+                "{unreadable}"
+            );
+            assert_eq!(
+                notes,
+                [
+                    "if the table has a FULLTEXT index: COPY, copies every row, writes wait \
+                     (add-column-with-fulltext)",
+                    "if the table has had 64 instant column changes since it was last \
+                     rebuilt: INPLACE, rebuilds the table, writes continue \
+                     (add-column-after-64-changes)",
+                ],
+                "{unreadable}"
+            );
+        }
+        // After DROP INDEX ... ON with ALGORITHM, kilit no longer claims the
+        // index is there.
+        let predictions = predictions_with(
+            SHOP,
+            "ALTER TABLE orders ADD INDEX ix (amount);
+             DROP INDEX ix ON orders ALGORITHM=INPLACE;
+             ALTER TABLE orders DROP COLUMN amount;",
+        );
+        assert!(reason(predictions[1].clone()).starts_with("kilit could not read this statement"));
+        let (case, verdict, notes) = measured(predictions[2].clone());
+        assert_eq!(
+            (case, verdict.as_str()),
+            ("drop-column", "INSTANT, no rebuild, writes continue")
+        );
+        assert!(
+            notes
+                .iter()
+                .all(|note| note.starts_with("if the ") && !note.contains("ix")),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
     fn there_is_one_finding_per_statement_with_its_line() {
         let findings = check(
             &parse("SELECT 1;\n\nALTER TABLE orders DROP note;\nFOO BAR;"),
