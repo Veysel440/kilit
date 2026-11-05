@@ -1,0 +1,9 @@
+# The constraint is named idx_user so that the scenarios of this
+# exception give the same message, which names the index. With
+# Laravel's name, orders_user_id_foreign, MySQL 8.0.46 and 8.4.13
+# give the same result.
+title = "Drop the index MySQL made for a foreign key, named after the key, while the key stays"
+setup = [
+    "ALTER TABLE orders ADD CONSTRAINT idx_user FOREIGN KEY (user_id) REFERENCES users (id)",
+]
+operation = "DROP INDEX idx_user"

@@ -1,0 +1,7 @@
+title = "Drop the index a foreign key needs, with the checks off"
+setup = [
+    "ALTER TABLE orders ADD INDEX idx_user (user_id)",
+    "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)",
+]
+session = ["SET foreign_key_checks = 0"]
+operation = "DROP INDEX idx_user"

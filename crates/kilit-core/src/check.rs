@@ -17,8 +17,8 @@ use crate::modify::{Change, changes};
 use crate::results::{Variant, Verdict};
 use crate::schema::{Schema, TableState};
 use crate::statement::{
-    Alter, Column, DataType, Index, IndexKind, Lock, Operation, Position, Statement, StatementKind,
-    Table, Variable,
+    Alter, Column, DataType, ForeignKey, Index, IndexKind, Lock, Operation, Position, Statement,
+    StatementKind, Table, Variable,
 };
 
 /// What kilit says about one statement of the input.
@@ -89,6 +89,13 @@ pub enum Condition {
     /// length. Only those types count: CHAR, ENUM and SET are not TEXT,
     /// and JSON is not BLOB.
     BlobOrTextWithoutPrefix,
+    /// The dropped index is the only one that serves a foreign key of the
+    /// table: the key's columns are the first columns of no other index,
+    /// and not of the primary key.
+    OnlyIndexOfForeignKey,
+    /// A generated column of the table uses the changed column, in an
+    /// expression of column names, numbers and arithmetic operators.
+    GeneratedColumnSource,
     /// Something no schema shows: the rows, or the table's history.
     Hidden,
 }
@@ -159,7 +166,7 @@ const EXPRESSION_DEFAULTS: [(&str, &Case); 7] = [
 
 /// Shapes the lab has not measured, such as a column in a foreign key of
 /// several columns or in the primary key, are unknown: see
-/// [`check_dropped_column`].
+/// [`check_dropped_column`] and [`generated_column_source`].
 const DROP_COLUMN: Case = Case {
     id: "drop-column",
     scenarios: &["drop-column"],
@@ -204,13 +211,32 @@ const DROP_COLUMN: Case = Case {
             when: "if the column is in a foreign key",
             conditions: &[Condition::IndexedColumn, Condition::ForeignKeyColumn],
         },
+        Exception {
+            scenarios: &[
+                "drop-column-generated-source",
+                "drop-column-stored-generated-source",
+            ],
+            when: GENERATED_COLUMN_USES_IT,
+            conditions: &[Condition::GeneratedColumnSource],
+        },
     ],
 };
 
+const GENERATED_COLUMN_USES_IT: &str = "if a generated column uses the column";
+
+/// A `CHANGE` that renames a column a generated column uses has not been
+/// measured, and is unknown: see [`classify`].
 const RENAME_COLUMN: Case = Case {
     id: "rename-column",
     scenarios: &["rename-column", "change-column-rename"],
-    exceptions: &[],
+    exceptions: &[Exception {
+        scenarios: &[
+            "rename-column-generated-source",
+            "rename-column-stored-generated-source",
+        ],
+        when: GENERATED_COLUMN_USES_IT,
+        conditions: &[Condition::GeneratedColumnSource],
+    }],
 };
 
 const SET_COLUMN_DEFAULT: Case = Case {
@@ -380,11 +406,30 @@ const ADD_FULLTEXT_INDEX: Case = Case {
     }],
 };
 
+/// Shapes the lab has not measured, and an index MySQL may have replaced,
+/// are unknown: see [`only_index_of_foreign_key`].
 const DROP_INDEX: Case = Case {
     id: "drop-index",
-    // The second: the index of a foreign key, after dropping the key.
-    scenarios: &["drop-index", "drop-index-after-dropping-its-foreign-key"],
-    exceptions: &[],
+    scenarios: &[
+        "drop-index",
+        // The index of a foreign key, after dropping the key.
+        "drop-index-after-dropping-its-foreign-key",
+        // An index of a foreign key, when something else serves the key.
+        "drop-index-foreign-key-keeps-second-index",
+        "drop-index-foreign-key-keeps-first-index",
+        "drop-index-foreign-key-keeps-primary-key",
+    ],
+    exceptions: &[Exception {
+        scenarios: &[
+            "drop-index-needed-by-foreign-key",
+            "drop-index-needed-by-foreign-key-two-column-index",
+            "drop-index-needed-by-foreign-key-automatic",
+            "drop-index-needed-by-foreign-key-checks-off",
+            "drop-index-needed-by-two-column-foreign-key",
+        ],
+        when: "if the index is the only one that serves a foreign key",
+        conditions: &[Condition::OnlyIndexOfForeignKey],
+    }],
 };
 
 const ADD_FOREIGN_KEY: Case = Case {
@@ -660,6 +705,10 @@ fn predict(
             Operation::AddIndex(index) => Some(index),
             _ => None,
         },
+        dropped_index: match operation {
+            Operation::DropIndex { name } => Some(name),
+            _ => None,
+        },
         session,
         schema,
     };
@@ -825,6 +874,8 @@ struct Situation<'a> {
     dropped: Option<&'a str>,
     /// The index the statement adds.
     index: Option<&'a Index>,
+    /// The name of the index the statement drops.
+    dropped_index: Option<&'a str>,
     session: &'a Session,
     schema: &'a Schema,
 }
@@ -869,9 +920,19 @@ fn applies(condition: Condition, situation: &Situation<'_>) -> Applies {
         return Applies::Maybe;
     };
     match (condition, situation.column) {
-        (Condition::Hidden, _) | (Condition::IndexedColumn | Condition::ForeignKeyColumn, None) => {
-            Applies::Maybe
+        (Condition::Hidden, _)
+        | (
+            Condition::IndexedColumn
+            | Condition::ForeignKeyColumn
+            | Condition::GeneratedColumnSource,
+            None,
+        ) => Applies::Maybe,
+        (Condition::OnlyIndexOfForeignKey, _) => {
+            situation.dropped_index.map_or(Applies::No, |name| {
+                only_index_of_foreign_key(table, name, situation)
+            })
         }
+        (Condition::GeneratedColumnSource, Some(column)) => generated_column_source(table, column),
         (Condition::BlobOrTextWithoutPrefix, _) => situation.index.map_or(Applies::No, |index| {
             blob_or_text_without_prefix(table, index)
         }),
@@ -962,6 +1023,308 @@ fn referenced_by(schema: &Schema, table: &Table, column: &str) -> Option<(String
             })
             .map(|key| (other.name.clone(), key.name.clone().unwrap_or_default()))
     })
+}
+
+/// Whether an index with these entries serves the foreign key: the key's
+/// columns are its first columns, in order. A prefix such as `note(10)` does
+/// not count, and an expression matches no column.
+fn serves(entries: &[String], key: &ForeignKey) -> bool {
+    entries.len() >= key.columns.len()
+        && key
+            .columns
+            .iter()
+            .zip(entries)
+            .all(|(column, entry)| column.eq_ignore_ascii_case(entry))
+}
+
+/// Whether the index can serve a foreign key at all.
+fn can_serve_a_key(index: &Index) -> bool {
+    matches!(index.kind, IndexKind::Plain | IndexKind::Unique)
+}
+
+/// Whether MySQL may have made the index itself for the foreign key: it
+/// names such an index after the key, or after the key's first column when
+/// the key has no name of its own. No schema shows where an index came from.
+fn may_be_automatic(index: &Index, key: &ForeignKey) -> bool {
+    index.name.as_deref().is_some_and(|name| {
+        key.name
+            .as_deref()
+            .is_some_and(|key| key.eq_ignore_ascii_case(name))
+            || key
+                .columns
+                .first()
+                .is_some_and(|column| column.eq_ignore_ascii_case(name))
+    })
+}
+
+/// Whether dropping the index leaves a foreign key of `table` without an
+/// index, which MySQL refuses. The lab measured: a plain index of one or two
+/// columns under a key of one column, also with the checks off when the index
+/// has one column, and a plain index of exactly the two columns of a key. It
+/// measured the drop with another plain index or the primary key serving a
+/// key of one column, and that gets the answer for any index, unless one of
+/// the indexes may be automatic: MySQL drops an index it made for a key,
+/// without a word, when another index can serve the key. Then kilit's table
+/// may have an index the server does not, and only the server knows.
+fn only_index_of_foreign_key(table: &Table, name: &str, situation: &Situation<'_>) -> Applies {
+    let Some(index) = table.indexes.iter().find(|index| {
+        can_serve_a_key(index)
+            && index
+                .name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+    }) else {
+        return Applies::No;
+    };
+    let not_measured = "dropping such an index has not been measured yet";
+    let pointing_here = situation.schema.tables().find_map(|other| {
+        other
+            .foreign_keys
+            .iter()
+            .find(|key| {
+                key.referenced_table.eq_ignore_ascii_case(&table.name)
+                    && !key.referenced_columns.is_empty()
+                    && key
+                        .referenced_columns
+                        .iter()
+                        .zip(&index.columns)
+                        .all(|(column, entry)| column.eq_ignore_ascii_case(entry))
+                    && key.referenced_columns.len() <= index.columns.len()
+            })
+            .map(|key| (other.name.as_str(), key.name.as_deref().unwrap_or_default()))
+    });
+    if let Some((other, key)) = pointing_here {
+        return Applies::Unmeasured(format!(
+            "{name} serves the foreign key {key} on {other}, which points at this table, and \
+             {not_measured}"
+        ));
+    }
+    let keys: Vec<&ForeignKey> = table
+        .foreign_keys
+        .iter()
+        .filter(|key| serves(&index.columns, key))
+        .collect();
+    let key = match keys.as_slice() {
+        [] => return Applies::No,
+        [key] => *key,
+        [first, second, ..] => {
+            return Applies::Unmeasured(format!(
+                "the foreign keys {} and {} both use {name}, and {not_measured}",
+                first.name.as_deref().unwrap_or("without a name"),
+                second.name.as_deref().unwrap_or("without a name")
+            ));
+        }
+    };
+    let key_name = key.name.as_deref().unwrap_or("without a name");
+    let checks_off = match situation.session.foreign_key_checks {
+        Setting::Off => true,
+        Setting::On | Setting::ServerDefault => false,
+        Setting::Unclear => {
+            return Applies::Unmeasured(format!(
+                "{name} serves the foreign key {key_name}, and foreign_key_checks is set to a \
+                 value kilit does not understand"
+            ));
+        }
+    };
+    if index.kind != IndexKind::Plain || index.columns.len() > 2 {
+        return Applies::Unmeasured(format!(
+            "{name} serves the foreign key {key_name}, and the lab measured plain indexes of \
+             one or two columns only"
+        ));
+    }
+    let others: Vec<&Index> = table
+        .indexes
+        .iter()
+        .filter(|other| {
+            !std::ptr::eq(*other, index) && can_serve_a_key(other) && serves(&other.columns, key)
+        })
+        .collect();
+    if others.is_empty() && !serves(&table.primary_key, key) {
+        let measured = match (key.columns.len(), index.columns.len()) {
+            (1, 1) => true,
+            (1, 2) | (2, 2) => !checks_off,
+            _ => false,
+        };
+        if !measured {
+            let setting = if checks_off {
+                " with foreign_key_checks off"
+            } else {
+                ""
+            };
+            return Applies::Unmeasured(format!(
+                "{name} is the only index that serves the foreign key {key_name}{setting}, and \
+                 the lab has not measured this shape of index and key"
+            ));
+        }
+        let assumes = if situation.session.foreign_key_checks == Setting::ServerDefault {
+            format!("; {ASSUMES_FOREIGN_KEY_CHECKS}")
+        } else {
+            String::new()
+        };
+        return Applies::Yes(vec![format!(
+            "{name} is the only index that serves the foreign key {key_name}{assumes}"
+        )]);
+    }
+    // Something else serves the key. The lab measured that for a key of one
+    // column, with the checks on.
+    if key.columns.len() > 1 || checks_off {
+        return Applies::Unmeasured(format!(
+            "another index also serves the foreign key {key_name}, and dropping {name} with \
+             that key has not been measured yet"
+        ));
+    }
+    if let Some(unique) = others.iter().find(|other| other.kind != IndexKind::Plain) {
+        return Applies::Unmeasured(format!(
+            "the unique index {} also serves the foreign key {key_name}, and {not_measured}",
+            unique.name.as_deref().unwrap_or_default()
+        ));
+    }
+    if let Some(automatic) = std::iter::once(&index)
+        .chain(&others)
+        .find(|index| may_be_automatic(index, key))
+    {
+        return Applies::Unmeasured(format!(
+            "the index {} has the name MySQL gives the index it makes for the foreign key \
+             {key_name}, and MySQL drops that index silently when another one can serve the key; \
+             no schema shows which of the two this is",
+            automatic.name.as_deref().unwrap_or_default()
+        ));
+    }
+    Applies::No
+}
+
+/// The columns an expression names, when it is plain: column names of
+/// `table`, numbers, arithmetic operators and parentheses, as in `(amount *
+/// 2)`. A string, a function call, a word that is no column of the table or
+/// two operands in a row (`amount DIV 2`) make it something else.
+fn plain_expression_columns<'a>(expression: &'a str, table: &Table) -> Option<Vec<&'a str>> {
+    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut columns = Vec::new();
+    let mut after_operand = false;
+    let mut rest = expression.trim_start();
+    while let Some(first) = rest.chars().next() {
+        if first.is_ascii_digit() {
+            let end = rest
+                .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+                .unwrap_or(rest.len());
+            if after_operand || rest[end..].starts_with(word) {
+                return None;
+            }
+            after_operand = true;
+            rest = &rest[end..];
+        } else if first == '`' || word(first) {
+            let (name, after) = if first == '`' {
+                rest[1..].split_once('`')?
+            } else {
+                rest.split_at(rest.find(|c: char| !word(c)).unwrap_or(rest.len()))
+            };
+            if after_operand || after.trim_start().starts_with('(') {
+                return None;
+            }
+            table.column(name)?;
+            columns.push(name);
+            after_operand = true;
+            rest = after;
+        } else {
+            match first {
+                '+' | '-' | '*' | '/' | '%' | '(' => after_operand = false,
+                ')' => after_operand = true,
+                _ => return None,
+            }
+            rest = &rest[1..];
+        }
+        rest = rest.trim_start();
+    }
+    Some(columns)
+}
+
+/// The first generated column of `table`, other than `column` itself, whose
+/// expression names `column`, plain or not.
+fn generated_column_naming<'a>(table: &'a Table, column: &str) -> Option<&'a Column> {
+    table.columns.iter().find(|other| {
+        !other.name.eq_ignore_ascii_case(column)
+            && other
+                .generated
+                .as_ref()
+                .is_some_and(|generated| uses_column(&generated.expression, column))
+    })
+}
+
+/// Whether a generated column of `table` uses `column`, so that MySQL refuses
+/// to drop or rename it. The lab measured one shape: a plain expression over
+/// a column in no index, on a table without a FULLTEXT index. Anything else
+/// that names the column gets no answer: a word in a string or a function
+/// name is no column at all, and MySQL accepts the change then.
+fn generated_column_source(table: &Table, column: &str) -> Applies {
+    let mut user = None;
+    for other in &table.columns {
+        let Some(generated) = &other.generated else {
+            continue;
+        };
+        if other.name.eq_ignore_ascii_case(column) {
+            continue;
+        }
+        match plain_expression_columns(&generated.expression, table) {
+            Some(columns) => {
+                if columns.iter().any(|c| c.eq_ignore_ascii_case(column)) {
+                    user.get_or_insert(other);
+                }
+            }
+            None if uses_column(&generated.expression, column) => {
+                return Applies::Unmeasured(format!(
+                    "the expression of the generated column {} names {column}, and the lab \
+                     measured expressions of column names, numbers and arithmetic operators \
+                     only, not strings or function calls",
+                    other.name
+                ));
+            }
+            None => {}
+        }
+    }
+    let Some(user) = user else {
+        return Applies::No;
+    };
+    let also = |what: String| {
+        Applies::Unmeasured(format!(
+            "the generated column {} uses {column}, and {what}, which has not been measured \
+             together",
+            user.name
+        ))
+    };
+    if table.column(column).is_some_and(|c| c.generated.is_some()) {
+        return also(format!("{column} is a generated column too"));
+    }
+    if let Some(next) = generated_column_naming(table, &user.name) {
+        return also(format!(
+            "the generated column {} uses {}",
+            next.name, user.name
+        ));
+    }
+    let uses_generated = table.columns.iter().any(|other| {
+        other.generated.is_some()
+            && !other.name.eq_ignore_ascii_case(&user.name)
+            && user
+                .generated
+                .as_ref()
+                .is_some_and(|generated| uses_column(&generated.expression, &other.name))
+    });
+    if uses_generated {
+        return also(format!("{} uses another generated column", user.name));
+    }
+    if let Some(index) = table.index_on(column) {
+        return also(format!("{column} is in the index {index}"));
+    }
+    if let Some(index) = table.index_on(&user.name) {
+        return also(format!("{} is in the index {index}", user.name));
+    }
+    if let Some(index) = table.fulltext_index() {
+        let name = index.name.as_deref().unwrap_or_default();
+        return also(format!("{} has the FULLTEXT index {name}", table.name));
+    }
+    Applies::Yes(vec![format!(
+        "the generated column {} uses {column}",
+        user.name
+    )])
 }
 
 /// The TEXT and BLOB types the lab measured an index on, without a prefix
@@ -1158,6 +1521,16 @@ fn classify(
             position,
         } => {
             check_new_definition(column)?;
+            if !old_name.eq_ignore_ascii_case(&column.name)
+                && let TableState::Known(table) = table
+                && let Some(user) = generated_column_naming(table, old_name)
+            {
+                return Err(format!(
+                    "the generated column {} uses {old_name}, and renaming such a column with \
+                     CHANGE has not been measured yet",
+                    user.name
+                ));
+            }
             subject = Some(old_name.clone());
             modified(
                 table,
@@ -1458,9 +1831,9 @@ fn check_dropped_column(
             format!("{column} is the primary key, and {DROPPING_NOT_MEASURED}")
         });
     }
-    // Generated columns are measured neither as the column dropped nor as
-    // what uses it. Only the indexed shapes are kept away here, from the
-    // answer the lab gave for indexed columns.
+    // An indexed column that is generated, or that a generated column uses,
+    // has not been measured: it must not get the answer for indexed columns.
+    // Without an index, see [`generated_column_source`].
     if indexed {
         for other in &table.columns {
             let Some(generated) = &other.generated else {
@@ -2205,7 +2578,7 @@ mod tests {
         assert!(
             notes
                 .iter()
-                .all(|note| note.starts_with("if the ") && !note.contains("ix")),
+                .all(|note| note.starts_with("if ") && !note.contains("ix")),
             "{notes:?}"
         );
     }
@@ -2445,12 +2818,11 @@ mod tests {
     #[test]
     fn generated_columns_do_not_get_the_answer_measured_for_indexed_columns() {
         let generated = "ALTER TABLE orders ADD COLUMN amount2 INT AS (amount * 2) VIRTUAL;";
-        // Not indexed: the answer kilit gave before, which this change
-        // leaves alone. MySQL refuses to drop a column a generated column
-        // uses (error 3108); the lab has not measured it yet.
+        // Not indexed: MySQL refuses to drop a column a generated column
+        // uses, as the lab measured.
         assert_eq!(
-            said(&on_shop(generated, "ALTER TABLE orders DROP COLUMN amount")),
-            "INSTANT, no rebuild, writes continue"
+            fails_with(&on_shop(generated, "ALTER TABLE orders DROP COLUMN amount")),
+            Ok(3108)
         );
         assert_eq!(
             reason(on_shop(
@@ -2568,6 +2940,8 @@ mod tests {
                  lab scenarios)",
                 "if the column is in a foreign key: fails with error 1828 \
                  (drop-column-in-foreign-key)",
+                "if a generated column uses the column: fails with error 3108 \
+                 (drop-column-generated-source and drop-column-stored-generated-source)",
             ]
         );
     }
@@ -3838,6 +4212,715 @@ mod tests {
         );
         assert_eq!(fails_with(&predictions[0]), Ok(1828));
         assert_eq!(fails_with(&predictions[1]), Ok(3780));
+    }
+
+    const FOREIGN_KEY: &str = "ALTER TABLE orders ADD CONSTRAINT fk_orders_user \
+                               FOREIGN KEY (user_id) REFERENCES users (id);";
+    const OWN_INDEX: &str = "ALTER TABLE orders ADD INDEX idx_user (user_id);";
+    const SECOND_INDEX: &str = "ALTER TABLE orders ADD INDEX idx_user_amount (user_id, amount);";
+
+    /// The answer for the drop of an index that kilit should treat as any
+    /// other index.
+    const DROP_INDEX_ANSWER: &str = "INPLACE, no rebuild, writes continue";
+
+    #[test]
+    fn dropping_the_only_index_of_a_foreign_key_fails() {
+        for (setup, index) in [
+            (format!("{OWN_INDEX}{FOREIGN_KEY}"), "idx_user"),
+            (format!("{SECOND_INDEX}{FOREIGN_KEY}"), "idx_user_amount"),
+            // The index MySQL makes for the key, named after it.
+            (FOREIGN_KEY.to_owned(), "fk_orders_user"),
+            // A key without a name: MySQL names the index after its column.
+            (
+                "ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users (id);".to_owned(),
+                "user_id",
+            ),
+        ] {
+            let prediction = on_shop(&setup, &format!("ALTER TABLE orders DROP INDEX {index}"));
+            assert_eq!(fails_with(&prediction), Ok(1553), "{setup}");
+            let (case, _, notes) = measured(prediction);
+            assert_eq!(case, "drop-index");
+            assert!(
+                notes[0].starts_with(&format!(
+                    "{index} is the only index that serves the foreign key"
+                )),
+                "{notes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dropping_an_index_when_another_serves_the_foreign_key_gets_the_drop_index_answer() {
+        let setup = format!("{OWN_INDEX}{FOREIGN_KEY}{SECOND_INDEX}");
+        for index in ["idx_user", "idx_user_amount"] {
+            let prediction = on_shop(&setup, &format!("ALTER TABLE orders DROP INDEX {index}"));
+            let (case, verdict, _) = measured(prediction);
+            assert_eq!(case, "drop-index");
+            assert_eq!(verdict, DROP_INDEX_ANSWER, "{index}");
+        }
+        // After that, the index that is left is the only one.
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{setup}"),
+            "ALTER TABLE orders DROP INDEX idx_user;
+             ALTER TABLE orders DROP INDEX idx_user_amount;",
+        );
+        assert_eq!(said(&predictions[0]), DROP_INDEX_ANSWER);
+        assert_eq!(fails_with(&predictions[1]), Ok(1553));
+    }
+
+    #[test]
+    fn an_index_with_the_column_second_does_not_serve_the_foreign_key() {
+        let setup = format!(
+            "{OWN_INDEX}{FOREIGN_KEY}ALTER TABLE orders ADD INDEX idx_amount_user (amount, user_id);"
+        );
+        assert_eq!(
+            fails_with(&on_shop(&setup, "ALTER TABLE orders DROP INDEX idx_user")),
+            Ok(1553)
+        );
+        assert_eq!(
+            said(&on_shop(
+                &setup,
+                "ALTER TABLE orders DROP INDEX idx_amount_user"
+            )),
+            DROP_INDEX_ANSWER
+        );
+    }
+
+    #[test]
+    fn a_prefix_or_a_fulltext_index_does_not_serve_a_foreign_key() {
+        let schema = "CREATE TABLE codes (code VARCHAR(50) NOT NULL PRIMARY KEY);
+             CREATE TABLE orders (id INT PRIMARY KEY, code VARCHAR(50) NOT NULL,
+                 KEY idx_code (code), KEY idx_code_prefix (code(10)),
+                 FULLTEXT KEY ft_code (code),
+                 CONSTRAINT fk_code FOREIGN KEY (code) REFERENCES codes (code));";
+        for (sql, expected) in [
+            ("ALTER TABLE orders DROP INDEX idx_code", Ok(1553)),
+            (
+                "ALTER TABLE orders DROP INDEX idx_code_prefix",
+                Err(DROP_INDEX_ANSWER.to_owned()),
+            ),
+            (
+                "ALTER TABLE orders DROP INDEX ft_code",
+                Err(DROP_INDEX_ANSWER.to_owned()),
+            ),
+        ] {
+            let predictions = predictions_with(schema, sql);
+            assert_eq!(fails_with(&predictions[0]), expected, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_primary_key_on_the_column_serves_the_foreign_key() {
+        let schema = "
+            CREATE TABLE users (id BIGINT UNSIGNED NOT NULL PRIMARY KEY);
+            CREATE TABLE profiles (
+                user_id BIGINT UNSIGNED NOT NULL,
+                PRIMARY KEY (user_id),
+                KEY idx_user (user_id),
+                CONSTRAINT fk_profile FOREIGN KEY (user_id) REFERENCES users (id)
+            );";
+        let predictions = predictions_with(schema, "ALTER TABLE profiles DROP INDEX idx_user");
+        assert_eq!(said(&predictions[0]), DROP_INDEX_ANSWER);
+        // The first columns count, as for any index.
+        let schema = "
+            CREATE TABLE users (id BIGINT UNSIGNED NOT NULL PRIMARY KEY);
+            CREATE TABLE lines (
+                user_id BIGINT UNSIGNED NOT NULL,
+                line INT NOT NULL,
+                PRIMARY KEY (line, user_id),
+                KEY idx_user (user_id),
+                CONSTRAINT fk_line FOREIGN KEY (user_id) REFERENCES users (id)
+            );";
+        let predictions = predictions_with(schema, "ALTER TABLE lines DROP INDEX idx_user");
+        assert_eq!(fails_with(&predictions[0]), Ok(1553));
+    }
+
+    #[test]
+    fn an_index_mysql_may_have_replaced_gets_no_answer() {
+        // MySQL replaced the first index with the second, without a word,
+        // but kilit's table has both, so neither drop gets an answer.
+        for (key, automatic) in [
+            (FOREIGN_KEY, "fk_orders_user"),
+            (
+                "ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users (id);",
+                "user_id",
+            ),
+        ] {
+            for second in [
+                SECOND_INDEX,
+                "ALTER TABLE orders ADD INDEX idx_user_amount (user_id);",
+            ] {
+                let setup = format!("{key}{second}");
+                for index in [automatic, "idx_user_amount"] {
+                    assert_eq!(
+                        reason(on_shop(
+                            &setup,
+                            &format!("ALTER TABLE orders DROP INDEX {index}")
+                        )),
+                        format!(
+                            "the index {automatic} has the name MySQL gives the index it makes \
+                             for the foreign key {}, and MySQL drops that index silently when \
+                             another one can serve the key; no schema shows which of the two \
+                             this is",
+                            if automatic == "user_id" {
+                                "without a name"
+                            } else {
+                                automatic
+                            }
+                        ),
+                        "{setup} {index}"
+                    );
+                }
+            }
+        }
+        // A dump shows such an index as any other, whichever it is. An index
+        // named after the column looks like the one of a key without a name.
+        let schema = "
+            CREATE TABLE users (id BIGINT UNSIGNED NOT NULL PRIMARY KEY);
+            CREATE TABLE orders (
+                id INT NOT NULL PRIMARY KEY,
+                user_id BIGINT UNSIGNED NOT NULL,
+                amount INT NOT NULL,
+                KEY user_id (user_id),
+                CONSTRAINT orders_ibfk_1 FOREIGN KEY (user_id) REFERENCES users (id)
+            );";
+        let predictions = predictions_with(
+            schema,
+            "ALTER TABLE orders ADD INDEX idx_user_amount (user_id, amount);
+             ALTER TABLE orders DROP INDEX user_id;",
+        );
+        assert!(reason(predictions[1].clone()).starts_with("the index user_id has the name"));
+        // Alone, it is the only index whichever it is: the answer holds.
+        let predictions = predictions_with(schema, "ALTER TABLE orders DROP INDEX user_id");
+        assert_eq!(fails_with(&predictions[0]), Ok(1553));
+    }
+
+    #[test]
+    fn an_automatic_index_is_not_followed_after_its_foreign_key_is_gone() {
+        // Pinned as it is, a known gap. MySQL 8.0.46 and 8.4.13 replace the
+        // index they made for a key even after the key is gone (run by hand),
+        // so this drop fails there with error 1091. kilit's table still has
+        // the old index, and no key is left to tell where it came from.
+        let setup = "ALTER TABLE orders ADD CONSTRAINT fk_old \
+                     FOREIGN KEY (user_id) REFERENCES users (id);
+             ALTER TABLE orders DROP FOREIGN KEY fk_old;
+             ALTER TABLE orders ADD INDEX idx_user (user_id);";
+        assert_eq!(
+            said(&on_shop(setup, "ALTER TABLE orders DROP INDEX fk_old")),
+            DROP_INDEX_ANSWER
+        );
+    }
+
+    #[test]
+    fn two_foreign_keys_on_one_index_get_no_answer() {
+        let setup = format!(
+            "{FOREIGN_KEY}ALTER TABLE orders ADD CONSTRAINT fk_two \
+             FOREIGN KEY (user_id) REFERENCES users (id);"
+        );
+        assert_eq!(
+            reason(on_shop(
+                &setup,
+                "ALTER TABLE orders DROP INDEX fk_orders_user"
+            )),
+            "the foreign keys fk_orders_user and fk_two both use fk_orders_user, and dropping \
+             such an index has not been measured yet"
+        );
+    }
+
+    #[test]
+    fn dropping_the_index_of_a_foreign_key_follows_the_checks_as_measured() {
+        let own = format!("{OWN_INDEX}{FOREIGN_KEY}");
+        let run = |setup: &str, session: &str, index: &str| {
+            on_shop(
+                setup,
+                &format!("{session}; ALTER TABLE orders DROP INDEX {index}"),
+            )
+        };
+        // Measured with the checks off: an index of one column.
+        assert_eq!(
+            fails_with(&run(&own, "SET foreign_key_checks = 0", "idx_user")),
+            Ok(1553)
+        );
+        assert_eq!(
+            fails_with(&run(&own, "SET foreign_key_checks = 1", "idx_user")),
+            Ok(1553)
+        );
+        // The rest with the checks off has not been measured.
+        assert_eq!(
+            reason(run(
+                &format!("{SECOND_INDEX}{FOREIGN_KEY}"),
+                "SET foreign_key_checks = 0",
+                "idx_user_amount"
+            )),
+            "idx_user_amount is the only index that serves the foreign key fk_orders_user with \
+             foreign_key_checks off, and the lab has not measured this shape of index and key"
+        );
+        assert_eq!(
+            reason(run(
+                &format!("{own}{SECOND_INDEX}"),
+                "SET foreign_key_checks = 0",
+                "idx_user"
+            )),
+            "another index also serves the foreign key fk_orders_user, and dropping idx_user \
+             with that key has not been measured yet"
+        );
+        assert_eq!(
+            reason(run(&own, "SET foreign_key_checks = @old", "idx_user")),
+            "idx_user serves the foreign key fk_orders_user, and foreign_key_checks is set to \
+             a value kilit does not understand"
+        );
+        // A global value does not change this session's.
+        assert_eq!(
+            fails_with(&run(&own, "SET GLOBAL foreign_key_checks = 0", "idx_user")),
+            Ok(1553)
+        );
+    }
+
+    /// A foreign key of two columns, with `index` on the child table.
+    fn two_column_key(index: &str) -> String {
+        format!(
+            "CREATE TABLE parents (a INT NOT NULL, b INT NOT NULL, c INT NOT NULL,
+                 PRIMARY KEY (a, b));
+             CREATE TABLE children (id INT PRIMARY KEY, a INT NOT NULL, b INT NOT NULL,
+                 c INT NOT NULL, {index}
+                 CONSTRAINT fk_ab FOREIGN KEY (a, b) REFERENCES parents (a, b));"
+        )
+    }
+
+    #[test]
+    fn a_foreign_key_of_two_columns_gets_only_the_measured_answer() {
+        let drop = "ALTER TABLE children DROP INDEX i";
+        // The index of exactly its columns, the measured shape.
+        let schema = two_column_key("KEY i (a, b),");
+        assert_eq!(fails_with(&predictions_with(&schema, drop)[0]), Ok(1553));
+        // The other order does not serve the key: MySQL has its own index.
+        let schema = two_column_key("KEY i (b, a),");
+        assert_eq!(said(&predictions_with(&schema, drop)[0]), DROP_INDEX_ANSWER);
+        // With the checks off, a longer index, or a second one: not measured.
+        let schema = two_column_key("KEY i (a, b),");
+        let off = format!("SET foreign_key_checks = 0; {drop}");
+        assert!(
+            reason(predictions_with(&schema, &off).pop().unwrap())
+                .contains("with foreign_key_checks off")
+        );
+        let schema = two_column_key("KEY i (a, b, c),");
+        assert!(
+            reason(predictions_with(&schema, drop).pop().unwrap())
+                .contains("plain indexes of one or two columns only")
+        );
+        let schema = two_column_key("KEY i (a, b), KEY other_index (a, b),");
+        assert!(
+            reason(predictions_with(&schema, drop).pop().unwrap())
+                .starts_with("another index also serves the foreign key fk_ab")
+        );
+    }
+
+    #[test]
+    fn index_shapes_around_a_foreign_key_the_lab_has_not_measured_are_unknown() {
+        // A unique index, dropped or staying.
+        let schema = format!(
+            "{SHOP}{FOREIGN_KEY}ALTER TABLE orders ADD UNIQUE INDEX uq_user (user_id, id);"
+        );
+        assert!(
+            reason(predictions_with(&schema, "ALTER TABLE orders DROP INDEX uq_user").remove(0))
+                .starts_with("uq_user serves the foreign key fk_orders_user")
+        );
+        let schema = format!(
+            "{SHOP}{OWN_INDEX}{FOREIGN_KEY}ALTER TABLE orders ADD UNIQUE INDEX uq_user (user_id, id);"
+        );
+        assert_eq!(
+            reason(predictions_with(&schema, "ALTER TABLE orders DROP INDEX idx_user").remove(0)),
+            "the unique index uq_user also serves the foreign key fk_orders_user, and dropping \
+             such an index has not been measured yet"
+        );
+        // Three columns.
+        let setup =
+            format!("ALTER TABLE orders ADD INDEX i3 (user_id, amount, note);{FOREIGN_KEY}");
+        assert!(
+            reason(on_shop(&setup, "ALTER TABLE orders DROP INDEX i3"))
+                .contains("plain indexes of one or two columns only")
+        );
+        // The index a foreign key of another table points at.
+        let schema = "
+            CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100) NOT NULL,
+                UNIQUE KEY uq_name (name));
+            CREATE TABLE children (id INT PRIMARY KEY, name VARCHAR(100) NOT NULL,
+                CONSTRAINT fk_name FOREIGN KEY (name) REFERENCES users (name));";
+        assert_eq!(
+            reason(predictions_with(schema, "ALTER TABLE users DROP INDEX uq_name").remove(0)),
+            "uq_name serves the foreign key fk_name on children, which points at this table, \
+             and dropping such an index has not been measured yet"
+        );
+    }
+
+    #[test]
+    fn the_only_index_of_a_foreign_key_is_found_in_any_quotes_or_case() {
+        for dump in three_ways(
+            "CREATE TABLE users ({id} INT PRIMARY KEY);
+             CREATE TABLE orders ({id} INT PRIMARY KEY, {user_id} INT NOT NULL, {amount} INT,
+                 KEY {idx_user} ({user_id}), KEY {idx_amount} ({amount}, {user_id}),
+                 CONSTRAINT {fk_user} FOREIGN KEY ({user_id}) REFERENCES users ({id}));",
+        ) {
+            assert_eq!(
+                fails_with(&predictions_with(&dump, "ALTER TABLE orders DROP INDEX idx_user")[0]),
+                Ok(1553),
+                "{dump}"
+            );
+            assert_eq!(
+                said(&predictions_with(&dump, "ALTER TABLE orders DROP INDEX idx_amount")[0]),
+                DROP_INDEX_ANSWER,
+                "{dump}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_the_table_error_1553_and_3108_are_notes() {
+        // kilit never saw the table, or lost track of it.
+        let lost = format!("{SHOP}{OWN_INDEX}{FOREIGN_KEY}ALTER TABLE orders AUTO_INCREMENT = 5;");
+        for schema in ["", lost.as_str()] {
+            for (sql, case, verdict, note) in [
+                (
+                    "ALTER TABLE orders DROP INDEX idx_user",
+                    "drop-index",
+                    DROP_INDEX_ANSWER,
+                    "if the index is the only one that serves a foreign key: fails with error \
+                     1553 (drop-index-needed-by-foreign-key and 4 more lab scenarios)",
+                ),
+                (
+                    "ALTER TABLE orders DROP COLUMN amount",
+                    "drop-column",
+                    "INSTANT, no rebuild, writes continue",
+                    "if a generated column uses the column: fails with error 3108 \
+                     (drop-column-generated-source and drop-column-stored-generated-source)",
+                ),
+                (
+                    "ALTER TABLE orders RENAME COLUMN amount TO total",
+                    "rename-column",
+                    "INSTANT, no rebuild, writes continue",
+                    "if a generated column uses the column: fails with error 3108 \
+                     (rename-column-generated-source and rename-column-stored-generated-source)",
+                ),
+            ] {
+                let (found, said, notes) = measured(predictions_with(schema, sql).pop().unwrap());
+                assert_eq!(found, case, "{sql}");
+                assert_eq!(said, verdict, "{sql}");
+                assert!(notes.iter().any(|n| n == note), "{sql}: {notes:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_index_stays_after_a_drop_that_fails() {
+        let predictions = predictions_with(
+            &format!("{SHOP}{OWN_INDEX}{FOREIGN_KEY}"),
+            "ALTER TABLE orders DROP INDEX idx_user;
+             ALTER TABLE orders DROP INDEX idx_user;
+             ALTER TABLE orders DROP COLUMN user_id;",
+        );
+        assert_eq!(fails_with(&predictions[0]), Ok(1553));
+        assert_eq!(fails_with(&predictions[1]), Ok(1553));
+        assert_eq!(fails_with(&predictions[2]), Ok(1828));
+    }
+
+    const VIRTUAL_COLUMN: &str =
+        "ALTER TABLE orders ADD COLUMN amount2 INT AS (amount * 2) VIRTUAL;";
+    const STORED_COLUMN: &str = "ALTER TABLE orders ADD COLUMN amount2 INT AS (amount * 2) STORED;";
+
+    #[test]
+    fn dropping_or_renaming_a_column_a_generated_column_uses_fails() {
+        for setup in [VIRTUAL_COLUMN, STORED_COLUMN] {
+            for (sql, case) in [
+                ("ALTER TABLE orders DROP COLUMN amount", "drop-column"),
+                (
+                    "ALTER TABLE orders RENAME COLUMN amount TO total",
+                    "rename-column",
+                ),
+            ] {
+                let prediction = on_shop(setup, sql);
+                assert_eq!(fails_with(&prediction), Ok(3108), "{setup} {sql}");
+                let (found, _, notes) = measured(prediction);
+                assert_eq!(found, case);
+                assert_eq!(notes, ["the generated column amount2 uses amount"]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_generated_column_is_found_in_any_quotes_or_case() {
+        for dump in three_ways(
+            "CREATE TABLE orders ({id} INT PRIMARY KEY, {amount} INT NOT NULL,
+                 {amount2} INT GENERATED ALWAYS AS (({amount} * 2)) VIRTUAL);",
+        ) {
+            for sql in [
+                "ALTER TABLE orders DROP COLUMN amount",
+                "ALTER TABLE orders DROP COLUMN AMOUNT",
+                "ALTER TABLE orders RENAME COLUMN Amount TO total",
+            ] {
+                assert_eq!(
+                    fails_with(&predictions_with(&dump, sql)[0]),
+                    Ok(3108),
+                    "{dump} {sql}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dropping_the_generated_column_itself_keeps_its_answer() {
+        for setup in [VIRTUAL_COLUMN, STORED_COLUMN] {
+            for sql in [
+                "ALTER TABLE orders DROP COLUMN amount2",
+                "ALTER TABLE orders RENAME COLUMN amount2 TO doubled",
+            ] {
+                assert_eq!(
+                    said(&on_shop(setup, sql)),
+                    "INSTANT, no rebuild, writes continue",
+                    "{setup} {sql}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_column_no_generated_column_uses_keeps_its_answer() {
+        for sql in [
+            "ALTER TABLE orders DROP COLUMN note",
+            "ALTER TABLE orders RENAME COLUMN note TO memo",
+        ] {
+            assert_eq!(
+                said(&on_shop(VIRTUAL_COLUMN, sql)),
+                "INSTANT, no rebuild, writes continue",
+                "{sql}"
+            );
+        }
+        // A part of a name is not the name.
+        let setup = "ALTER TABLE orders ADD COLUMN total INT NOT NULL;
+                     ALTER TABLE orders ADD COLUMN g INT AS (total + 1) VIRTUAL;
+                     ALTER TABLE orders ADD COLUMN total_cost INT NOT NULL;";
+        assert_eq!(
+            said(&on_shop(setup, "ALTER TABLE orders DROP COLUMN total_cost")),
+            "INSTANT, no rebuild, writes continue"
+        );
+    }
+
+    #[test]
+    fn an_expression_that_is_not_plain_gets_no_3108() {
+        let not_measured = |generated: &str, column: &str| {
+            format!(
+                "the expression of the generated column {generated} names {column}, and the lab \
+                 measured expressions of column names, numbers and arithmetic operators only, \
+                 not strings or function calls"
+            )
+        };
+        // The name only in a string: MySQL accepts dropping amount (run by
+        // hand). The same answer for a column the function really uses.
+        let concat = "ALTER TABLE orders ADD COLUMN g VARCHAR(60) AS \
+                      (concat('amount', note)) VIRTUAL;";
+        for (sql, column) in [
+            ("ALTER TABLE orders DROP COLUMN amount", "amount"),
+            ("ALTER TABLE orders RENAME COLUMN amount TO total", "amount"),
+            ("ALTER TABLE orders DROP COLUMN note", "note"),
+            ("ALTER TABLE orders RENAME COLUMN note TO memo", "note"),
+        ] {
+            assert_eq!(
+                reason(on_shop(concat, sql)),
+                not_measured("g", column),
+                "{sql}"
+            );
+        }
+        // A column named like the function: MySQL accepts dropping it (run
+        // by hand).
+        let lower = "ALTER TABLE orders ADD COLUMN `lower` INT NULL;
+                     ALTER TABLE orders ADD COLUMN g VARCHAR(255) AS (lower(email)) VIRTUAL;";
+        for (sql, column) in [
+            ("ALTER TABLE orders DROP COLUMN `lower`", "lower"),
+            ("ALTER TABLE orders RENAME COLUMN `lower` TO low", "lower"),
+            ("ALTER TABLE orders DROP COLUMN email", "email"),
+        ] {
+            assert_eq!(
+                reason(on_shop(lower, sql)),
+                not_measured("g", column),
+                "{sql}"
+            );
+        }
+        // MySQL prints a string in a dump with its character set.
+        let dump = "CREATE TABLE orders (id INT PRIMARY KEY, amount INT NOT NULL,
+                        note VARCHAR(50) NULL, g VARCHAR(60) GENERATED ALWAYS AS \
+                        (concat(_utf8mb4'amount',`note`)) VIRTUAL);";
+        assert_eq!(
+            reason(predictions_with(dump, "ALTER TABLE orders DROP COLUMN amount").remove(0)),
+            not_measured("g", "amount")
+        );
+        // An expression that does not name the column changes nothing.
+        assert_eq!(
+            said(&on_shop(concat, "ALTER TABLE orders DROP COLUMN email")),
+            "INSTANT, no rebuild, writes continue"
+        );
+    }
+
+    #[test]
+    fn plain_expressions_are_column_names_numbers_and_arithmetic() {
+        let schema = Schema::from_sql(
+            "CREATE TABLE t (a INT, b INT, `div` INT, `lower` INT, c VARCHAR(10));",
+        );
+        let TableState::Known(table) = schema.table("t") else {
+            panic!("expected the table");
+        };
+        for (expression, columns) in [
+            ("a * 2", vec!["a"]),
+            ("(`a` * 2)", vec!["a"]),
+            ("((A + `B`) / 2.5) - 1 % a", vec!["A", "B", "a"]),
+            ("-a", vec!["a"]),
+            ("2", vec![]),
+        ] {
+            assert_eq!(
+                plain_expression_columns(expression, table),
+                Some(columns),
+                "{expression}"
+            );
+        }
+        for expression in [
+            "concat(a, 'b')",
+            "lower(c)",
+            "`lower`(c)",
+            "lower (c)",
+            "a + 'b'",
+            "a + \"b\"",
+            "_utf8mb4'a'",
+            "a > 1",
+            "a DIV 2",
+            "a `div` 2",
+            "nope + 1",
+            "t.a + 1",
+            "0x1F + a",
+            "1e3 + a",
+            "(a) b",
+            "`a",
+        ] {
+            assert_eq!(
+                plain_expression_columns(expression, table),
+                None,
+                "{expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_column_shapes_the_lab_has_not_measured_are_unknown() {
+        let drop = "ALTER TABLE orders DROP COLUMN amount";
+        let rename = "ALTER TABLE orders RENAME COLUMN amount TO total";
+        // CHANGE that renames. Keeping the name is the change it makes.
+        assert_eq!(
+            reason(on_shop(
+                VIRTUAL_COLUMN,
+                "ALTER TABLE orders CHANGE amount total INT NOT NULL"
+            )),
+            "the generated column amount2 uses amount, and renaming such a column with CHANGE \
+             has not been measured yet"
+        );
+        assert_eq!(
+            said(&on_shop(
+                VIRTUAL_COLUMN,
+                "ALTER TABLE orders CHANGE amount amount BIGINT NOT NULL"
+            )),
+            said(&on_shop(
+                VIRTUAL_COLUMN,
+                "ALTER TABLE orders MODIFY amount BIGINT NOT NULL"
+            )),
+        );
+        // A generated column that uses another.
+        let chain = format!(
+            "{VIRTUAL_COLUMN}ALTER TABLE orders ADD COLUMN amount4 INT AS (amount2 * 2) VIRTUAL;"
+        );
+        assert_eq!(
+            reason(on_shop(&chain, drop)),
+            "the generated column amount2 uses amount, and the generated column amount4 uses \
+             amount2, which has not been measured together"
+        );
+        assert_eq!(
+            reason(on_shop(&chain, "ALTER TABLE orders DROP COLUMN amount2")),
+            "the generated column amount4 uses amount2, and amount2 is a generated column too, \
+             which has not been measured together"
+        );
+        assert_eq!(
+            reason(on_shop(
+                &chain,
+                "ALTER TABLE orders RENAME COLUMN amount2 TO doubled"
+            )),
+            "the generated column amount4 uses amount2, and amount2 is a generated column too, \
+             which has not been measured together"
+        );
+        // The source in an index: renaming it. Dropping it has its own reason.
+        let indexed = format!("{VIRTUAL_COLUMN}ALTER TABLE orders ADD INDEX i (amount);");
+        assert_eq!(
+            reason(on_shop(&indexed, rename)),
+            "the generated column amount2 uses amount, and amount is in the index i, which has \
+             not been measured together"
+        );
+        assert_eq!(
+            reason(on_shop(&indexed, drop)),
+            "the generated column amount2 uses amount, and dropping such a column has not been \
+             measured yet"
+        );
+        // The generated column in an index.
+        let indexed = format!("{VIRTUAL_COLUMN}ALTER TABLE orders ADD INDEX i (amount2);");
+        for sql in [drop, rename] {
+            assert_eq!(
+                reason(on_shop(&indexed, sql)),
+                "the generated column amount2 uses amount, and amount2 is in the index i, which \
+                 has not been measured together",
+                "{sql}"
+            );
+        }
+        // A table with a FULLTEXT index.
+        let fulltext = format!("{VIRTUAL_COLUMN}ALTER TABLE orders ADD FULLTEXT INDEX ft (note);");
+        for sql in [drop, rename] {
+            assert_eq!(
+                reason(on_shop(&fulltext, sql)),
+                "the generated column amount2 uses amount, and orders has the FULLTEXT index ft, \
+                 which has not been measured together",
+                "{sql}"
+            );
+        }
+        // The generated column and its source in one ALTER.
+        assert!(
+            reason(on_shop(
+                VIRTUAL_COLUMN,
+                "ALTER TABLE orders DROP COLUMN amount2, DROP COLUMN amount"
+            ))
+            .starts_with("2 changes in one statement")
+        );
+    }
+
+    #[test]
+    fn the_column_stays_after_a_drop_or_a_rename_that_fails() {
+        for first in [
+            "ALTER TABLE orders DROP COLUMN amount;",
+            "ALTER TABLE orders RENAME COLUMN amount TO total;",
+        ] {
+            // The statement after it still sees amount and what uses it.
+            let predictions = predictions_with(
+                &format!("{SHOP}{VIRTUAL_COLUMN}"),
+                &format!(
+                    "{first}
+                     ALTER TABLE orders DROP COLUMN amount;
+                     ALTER TABLE orders DROP COLUMN amount2;
+                     ALTER TABLE orders RENAME COLUMN amount TO total;
+                     ALTER TABLE orders DROP COLUMN total;"
+                ),
+            );
+            assert_eq!(fails_with(&predictions[0]), Ok(3108), "{first}");
+            assert_eq!(fails_with(&predictions[1]), Ok(3108), "{first}");
+            // With the generated column gone, the source has nothing in the way.
+            for prediction in &predictions[2..] {
+                assert_eq!(
+                    said(prediction),
+                    "INSTANT, no rebuild, writes continue",
+                    "{first}"
+                );
+            }
+        }
     }
 
     #[test]

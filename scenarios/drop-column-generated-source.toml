@@ -1,0 +1,3 @@
+title = "Drop a column a generated column uses"
+setup = ["ALTER TABLE orders ADD COLUMN amount2 INT AS (amount * 2) VIRTUAL"]
+operation = "DROP COLUMN amount"

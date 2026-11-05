@@ -545,6 +545,119 @@ fn an_index_on_a_text_column_without_a_length_fails() {
 }
 
 #[test]
+fn dropping_the_index_of_a_foreign_key_that_stays_fails() {
+    // $table->dropIndex('orders_user_id_foreign'), with the foreign key still
+    // there. After it, the index and the key are both still there.
+    assert_eq!(
+        pretend_on_mysql_84(
+            LARAVEL_TABLES,
+            &pretend(
+                "2026_11_05_100500_drop_user_index_from_orders_table",
+                &[
+                    "alter table `orders` drop index `orders_user_id_foreign`",
+                    "alter table `orders` drop `user_id`"
+                ]
+            )
+        ),
+        ["fails with error 1553", "fails with error 1828"]
+    );
+    // $table->foreignId('shop_id')->constrained(), then the same.
+    assert_eq!(
+        pretend_on_mysql_84(
+            LARAVEL_TABLES,
+            &pretend(
+                "2026_11_05_100600_add_shop_to_orders_table",
+                &[
+                    "alter table `orders` add `shop_id` bigint unsigned not null",
+                    "alter table `orders` add constraint `orders_shop_id_foreign` foreign key \
+                     (`shop_id`) references `shops` (`id`)",
+                    "alter table `orders` drop index `orders_shop_id_foreign`"
+                ]
+            )
+        ),
+        [
+            "INSTANT, no rebuild, writes continue",
+            "COPY, copies every row, writes wait",
+            "fails with error 1553"
+        ]
+    );
+}
+
+#[test]
+fn dropping_the_foreign_key_first_lets_the_index_go() {
+    // $table->dropForeign(['user_id']); $table->dropIndex('orders_user_id_foreign');
+    assert_eq!(
+        pretend_on_mysql_84(
+            LARAVEL_TABLES,
+            &pretend(
+                "2026_11_05_100700_drop_user_key_from_orders_table",
+                &[
+                    "alter table `orders` drop foreign key `orders_user_id_foreign`",
+                    "alter table `orders` drop index `orders_user_id_foreign`"
+                ]
+            )
+        ),
+        [
+            "INPLACE, no rebuild, writes continue",
+            "INPLACE, no rebuild, writes continue"
+        ]
+    );
+}
+
+#[test]
+fn an_index_laravel_named_after_the_key_gets_no_answer_next_to_another() {
+    // $table->index(['user_id', 'amount']), then dropIndex of either index.
+    // The first may be gone already: MySQL replaces the index it made for a
+    // key, and a dump cannot show whether it made this one.
+    let add = "alter table `orders` add index `orders_user_id_amount_index`(`user_id`, `amount`)";
+    for dropped in ["orders_user_id_foreign", "orders_user_id_amount_index"] {
+        assert_eq!(
+            pretend_on_mysql_84(
+                LARAVEL_TABLES,
+                &pretend(
+                    "2026_11_05_100800_add_user_amount_index_to_orders_table",
+                    &[add, &format!("alter table `orders` drop index `{dropped}`")]
+                )
+            ),
+            ["INPLACE, no rebuild, writes continue", "unknown"],
+            "{dropped}"
+        );
+    }
+}
+
+#[test]
+fn a_generated_column_keeps_the_column_it_uses() {
+    // $table->integer('double_amount')->virtualAs('amount * 2'), or ->storedAs,
+    // then $table->dropColumn('amount') or $table->renameColumn('amount', 'total').
+    for kind in ["virtual", "stored"] {
+        for change in ["drop `amount`", "rename column `amount` to `total`"] {
+            assert_eq!(
+                pretend_on_mysql_84(
+                    LARAVEL_TABLES,
+                    &pretend(
+                        "2026_11_05_100900_add_double_amount_to_orders_table",
+                        &[
+                            &format!(
+                                "alter table `orders` add `double_amount` int as (amount * 2) \
+                                 {kind}"
+                            ),
+                            &format!("alter table `orders` {change}"),
+                            "alter table `orders` drop `double_amount`"
+                        ]
+                    )
+                ),
+                [
+                    "unknown",
+                    "fails with error 3108",
+                    "INSTANT, no rebuild, writes continue"
+                ],
+                "{kind} {change}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_varchar_that_crosses_255_bytes_copies_the_table() {
     // $table->string('note', 63)->nullable()->change(); then 64, in utf8mb4
     assert_eq!(

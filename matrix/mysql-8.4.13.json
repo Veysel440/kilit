@@ -3561,6 +3561,76 @@
       ]
     },
     {
+      "id": "drop-column-generated-source",
+      "title": "Drop a column a generated column uses",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN amount2 INT AS (amount * 2) VIRTUAL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN amount",
+      "verdict": {
+        "result": "fails",
+        "code": 3108,
+        "message": "Column 'amount' has a generated column dependency."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        }
+      ]
+    },
+    {
       "id": "drop-column-in-foreign-key",
       "title": "Drop a column in a foreign key",
       "setup": [
@@ -4762,6 +4832,76 @@
       ]
     },
     {
+      "id": "drop-column-stored-generated-source",
+      "title": "Drop a column a stored generated column uses",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN amount2 INT AS (amount * 2) STORED"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN amount",
+      "verdict": {
+        "result": "fails",
+        "code": 3108,
+        "message": "Column 'amount' has a generated column dependency."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        }
+      ]
+    },
+    {
       "id": "drop-column-with-fulltext",
       "title": "Drop a column from a table that has a FULLTEXT index",
       "setup": [
@@ -5120,6 +5260,651 @@
             0,
             0
           ]
+        }
+      ]
+    },
+    {
+      "id": "drop-index-foreign-key-keeps-first-index",
+      "title": "Drop a second index that starts with a foreign key's column, when the key's own index stays",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_user (user_id)",
+        "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)",
+        "ALTER TABLE orders ADD INDEX idx_user_amount (user_id, amount)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP INDEX idx_user_amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-index-foreign-key-keeps-primary-key",
+      "title": "Drop an index on a foreign key's column when the primary key starts with that column",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_id (id)",
+        "ALTER TABLE orders DROP PRIMARY KEY, ADD PRIMARY KEY (user_id, id)",
+        "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)",
+        "ALTER TABLE orders ADD INDEX idx_user (user_id)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP INDEX idx_user",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-index-foreign-key-keeps-second-index",
+      "title": "Drop a foreign key's index when a second index also starts with its column",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_user (user_id)",
+        "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)",
+        "ALTER TABLE orders ADD INDEX idx_user_amount (user_id, amount)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP INDEX idx_user",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-index-needed-by-foreign-key",
+      "title": "Drop the index a foreign key needs",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_user (user_id)",
+        "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP INDEX idx_user",
+      "verdict": {
+        "result": "fails",
+        "code": 1553,
+        "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        }
+      ]
+    },
+    {
+      "id": "drop-index-needed-by-foreign-key-automatic",
+      "title": "Drop the index MySQL made for a foreign key, named after the key, while the key stays",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT idx_user FOREIGN KEY (user_id) REFERENCES users (id)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP INDEX idx_user",
+      "verdict": {
+        "result": "fails",
+        "code": 1553,
+        "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        }
+      ]
+    },
+    {
+      "id": "drop-index-needed-by-foreign-key-checks-off",
+      "title": "Drop the index a foreign key needs, with the checks off",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_user (user_id)",
+        "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)"
+      ],
+      "session": [
+        "SET foreign_key_checks = 0"
+      ],
+      "statement": "ALTER TABLE orders DROP INDEX idx_user",
+      "verdict": {
+        "result": "fails",
+        "code": 1553,
+        "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        }
+      ]
+    },
+    {
+      "id": "drop-index-needed-by-foreign-key-two-column-index",
+      "title": "Drop a two-column index, the only one a foreign key can use",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_user (user_id, amount)",
+        "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP INDEX idx_user",
+      "verdict": {
+        "result": "fails",
+        "code": 1553,
+        "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        }
+      ]
+    },
+    {
+      "id": "drop-index-needed-by-two-column-foreign-key",
+      "title": "Drop the index a foreign key of two columns needs",
+      "setup": [
+        "ALTER TABLE users ADD COLUMN code INT NOT NULL DEFAULT 0",
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_id_code (id, code)",
+        "ALTER TABLE orders ADD COLUMN user_code INT NOT NULL DEFAULT 0",
+        "ALTER TABLE orders ADD INDEX idx_user (user_id, user_code)",
+        "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id, user_code) REFERENCES users (id, code)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP INDEX idx_user",
+      "verdict": {
+        "result": "fails",
+        "code": 1553,
+        "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1553,
+          "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
         }
       ]
     },
@@ -6472,6 +7257,146 @@
             0,
             0
           ]
+        }
+      ]
+    },
+    {
+      "id": "rename-column-generated-source",
+      "title": "Rename a column a generated column uses",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN amount2 INT AS (amount * 2) VIRTUAL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders RENAME COLUMN amount TO total",
+      "verdict": {
+        "result": "fails",
+        "code": 3108,
+        "message": "Column 'amount' has a generated column dependency."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        }
+      ]
+    },
+    {
+      "id": "rename-column-stored-generated-source",
+      "title": "Rename a column a stored generated column uses",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN amount2 INT AS (amount * 2) STORED"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders RENAME COLUMN amount TO total",
+      "verdict": {
+        "result": "fails",
+        "code": 3108,
+        "message": "Column 'amount' has a generated column dependency."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3108,
+          "message": "Column 'amount' has a generated column dependency."
         }
       ]
     },

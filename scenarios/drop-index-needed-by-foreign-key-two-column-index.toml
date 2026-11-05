@@ -1,0 +1,6 @@
+title = "Drop a two-column index, the only one a foreign key can use"
+setup = [
+    "ALTER TABLE orders ADD INDEX idx_user (user_id, amount)",
+    "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)",
+]
+operation = "DROP INDEX idx_user"

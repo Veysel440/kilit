@@ -1,0 +1,8 @@
+title = "Drop an index on a foreign key's column when the primary key starts with that column"
+setup = [
+    "ALTER TABLE orders ADD INDEX idx_id (id)",
+    "ALTER TABLE orders DROP PRIMARY KEY, ADD PRIMARY KEY (user_id, id)",
+    "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)",
+    "ALTER TABLE orders ADD INDEX idx_user (user_id)",
+]
+operation = "DROP INDEX idx_user"
