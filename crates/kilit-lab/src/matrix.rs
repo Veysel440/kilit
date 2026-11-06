@@ -33,6 +33,10 @@ struct ScenarioResult<'a> {
     session: &'a [String],
     #[serde(skip_serializing_if = "Option::is_none")]
     engine: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    row_format: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_block_size: Option<u8>,
     statement: String,
     verdict: &'a Verdict,
     observations: &'a [Observation],
@@ -83,6 +87,8 @@ pub fn write(
                 setup: &measurement.scenario.setup,
                 session: &measurement.scenario.session,
                 engine: measurement.scenario.engine,
+                row_format: measurement.scenario.row_format,
+                key_block_size: measurement.scenario.key_block_size,
                 statement: measurement.scenario.statement(Variant::SERVER_DEFAULT),
                 verdict: &measurement.verdict,
                 observations: &measurement.observations,

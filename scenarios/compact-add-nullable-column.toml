@@ -1,0 +1,3 @@
+title = "Add a nullable column to a COMPACT table"
+row_format = "COMPACT"
+operation = "ADD COLUMN coupon VARCHAR(255) NULL"

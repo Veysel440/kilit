@@ -1,0 +1,3 @@
+title = "Add a secondary index to a REDUNDANT table"
+row_format = "REDUNDANT"
+operation = "ADD INDEX idx_orders_amount (amount)"

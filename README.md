@@ -291,6 +291,53 @@ created after the input sets `default_storage_engine` or
 kilit stops trusting that table, and keeps answering for it only if it was
 InnoDB and the statement names InnoDB.
 
+### Row formats and `old_alter_table`
+
+The rows above are for the default row format, DYNAMIC. When a table says
+`ROW_FORMAT=COMPRESSED`, `COMPACT` or `REDUNDANT`, or has a `KEY_BLOCK_SIZE`,
+kilit answers from separate measurements on MySQL 8.0.46 and 8.4.13, with the
+same result on both. The same goes after the input runs `SET old_alter_table =
+ON`. `KEY_BLOCK_SIZE=8` without a `ROW_FORMAT` makes the table COMPRESSED, as
+`ROW_FORMAT=COMPRESSED` does.
+
+| Change | MySQL does | Writes |
+| --- | --- | --- |
+| Add or drop a column, on a COMPRESSED table<br>`$table->dropColumn('note')` | INPLACE, rebuilds the table | continue |
+| Rename a column, set a default, change an `INT` to a `BIGINT`, add, add a unique or drop an index, on a COMPRESSED table | as on a DYNAMIC table | as there |
+| Every change of the first two rows, on a COMPACT or REDUNDANT table | as on a DYNAMIC table, `INSTANT` column changes included | as there |
+| ↳ add an index or a unique index on a `utf8mb4` `VARCHAR(192)` or `VARCHAR(255)` column (768 bytes or more) | fails, error 1071 | – |
+| Every change of the first two rows after `SET old_alter_table = ON`<br>`ALTER TABLE orders ADD COLUMN …` | COPY, copies every row | **wait** |
+| ↳ with `LOCK=NONE` | fails, error 1846 | – |
+| ↳ with an `ALGORITHM` other than `DEFAULT` | as with `old_alter_table` off | as there |
+| Anything else, or a row format and `old_alter_table` together | not answered yet | – |
+
+An index key on a COMPACT or REDUNDANT table may be 767 bytes: in `utf8mb4`,
+`VARCHAR(191)` is 764 bytes and is accepted, `VARCHAR(192)` is 768 and fails.
+kilit counts bytes for integer columns and `utf8mb4` `VARCHAR` columns only.
+
+`KEY_BLOCK_SIZE` is measured at 8 only; 1, 2, 4 and 16 get no answer. A
+`KEY_BLOCK_SIZE` next to `ROW_FORMAT=DYNAMIC`, `COMPACT` or `REDUNDANT` is
+refused by MySQL (error 1031 in `CREATE TABLE`, 1478 in `ALTER TABLE`), and
+kilit gives no answer for such a table. The case of 64 instant column changes,
+and tables with duplicate values, were measured on DYNAMIC tables only; on
+other row formats the answer carries a note saying so.
+
+### What kilit assumes about the server
+
+The lab measured with the defaults of MySQL 8.0.46 and 8.4.13:
+
+- `old_alter_table` OFF
+- `innodb_default_row_format` DYNAMIC
+- `innodb_strict_mode` ON
+- `binlog_format` ROW, with the binary log on
+- strict `sql_mode`
+- `foreign_key_checks` ON
+- on 8.4, `restrict_fk_on_non_standard_key` ON
+
+kilit reads these settings when the input sets them, and answers from what it
+read. It cannot see a server that is configured otherwise, and it prints no
+note about it for each statement.
+
 ## Getting started
 
 You need [Rust](https://rustup.rs) 1.88 or newer. Checking a migration needs no
@@ -468,6 +515,7 @@ kilit is young, and it says so when it does not know. Today:
   read `default_storage_engine` from a `--schema` file, so a table created
   under a different default there is still taken as InnoDB.
 - sqlparser 0.63 cannot read `CONVERT TO CHARACTER SET`, `ALTER TABLE ... ENGINE=...`,
+  `ALTER TABLE ... ROW_FORMAT=...`, `ALTER TABLE ... KEY_BLOCK_SIZE=...`,
   `RENAME INDEX`, `ALGORITHM=NOCOPY` or `OPTIMIZE TABLE` yet, so kilit reports
   them as unreadable.
 - "Writes continue" describes the change itself. Every `ALTER TABLE` also

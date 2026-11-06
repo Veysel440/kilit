@@ -1,0 +1,3 @@
+title = "Rename a column of a COMPACT table"
+row_format = "COMPACT"
+operation = "RENAME COLUMN note TO memo"

@@ -1111,3 +1111,284 @@ fn a_uuid_short_default_after_sql_log_bin_is_off_is_unknown_and_only_strict_exit
     let output = kilit(&["check", "--schema", schema, "--strict"], sql);
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
 }
+
+// Step 9b: a table's ROW_FORMAT and the old_alter_table setting.
+
+/// A mysqldump schema with `users` and `orders` as the lab has them, where
+/// `orders` is COMPRESSED, and a COMPACT table `logs`.
+fn write_schema_with_row_formats(name: &str) -> PathBuf {
+    let file = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::write(
+        &file,
+        "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  `email` varchar(255) DEFAULT NULL,
+  `note` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8;
+
+CREATE TABLE `logs` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `message` varchar(255) DEFAULT NULL,
+  `level` int NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=COMPACT;
+",
+    )
+    .unwrap();
+    file
+}
+
+// (statement, exit status without --strict, exit status with --strict)
+const ROW_FORMAT_STATEMENTS: [(&str, i32, i32); 6] = [
+    // COMPRESSED: INPLACE with a rebuild, writes continue (INSTANT on DYNAMIC).
+    ("alter table orders add coupon varchar(255) null;", 0, 0),
+    // COMPRESSED: a rename is metadata only.
+    ("alter table orders rename column note to memo;", 0, 0),
+    // COMPRESSED: INT to BIGINT copies the table.
+    ("alter table orders modify amount bigint not null;", 1, 1),
+    // COMPACT: 255 characters of utf8mb4 are 1020 bytes, the limit is 767.
+    (
+        "alter table logs add unique index uq_message (message);",
+        1,
+        1,
+    ),
+    // COMPACT: a new column is instant.
+    ("alter table logs add coupon varchar(255) null;", 0, 0),
+    // COMPRESSED: not measured, unknown.
+    (
+        "alter table orders add constraint fk_orders_user foreign key (user_id) \
+         references users (id);",
+        0,
+        1,
+    ),
+];
+
+#[test]
+fn compressed_and_compact_tables_of_a_mysqldump_schema_get_their_own_answers_in_json() {
+    let schema = write_schema_with_row_formats("schema-with-row-formats.sql");
+    let sql: String = ROW_FORMAT_STATEMENTS
+        .iter()
+        .map(|(statement, _, _)| format!("{statement}\n"))
+        .collect();
+    let (json, status) = json_against(&schema, false, &sql);
+    // The tables are known, not lost.
+    assert_eq!(
+        json["schema"]["tables"],
+        serde_json::json!(["logs", "orders", "users"])
+    );
+    assert_eq!(json["schema"]["lost"], serde_json::json!([]));
+    let statements = json["sources"][0]["statements"].as_array().unwrap();
+    assert_eq!(statements.len(), 6);
+
+    // ADD COLUMN on COMPRESSED: INPLACE, rebuilds the table, writes continue.
+    assert_eq!(statements[0]["impact"], "writes_continue");
+    assert_eq!(statements[0]["algorithm"], "INPLACE");
+    assert_eq!(statements[0]["rebuilds_table"], true);
+    assert_eq!(statements[0]["copies_rows"], false);
+
+    // RENAME COLUMN: INSTANT.
+    assert_eq!(statements[1]["impact"], "writes_continue");
+    assert_eq!(statements[1]["algorithm"], "INSTANT");
+    assert_eq!(statements[1]["rebuilds_table"], false);
+
+    // INT to BIGINT: COPY, writes wait.
+    assert_eq!(statements[2]["impact"], "writes_wait");
+    assert_eq!(statements[2]["algorithm"], "COPY");
+    assert_eq!(statements[2]["copies_rows"], true);
+    assert_eq!(statements[2]["writes"], "blocked");
+
+    // The 1020-byte unique index on COMPACT: 1071.
+    assert_eq!(statements[3]["impact"], "fails");
+    assert_eq!(statements[3]["error"], 1071);
+
+    // ADD COLUMN on COMPACT: INSTANT.
+    assert_eq!(statements[4]["impact"], "writes_continue");
+    assert_eq!(statements[4]["algorithm"], "INSTANT");
+
+    // A foreign key on COMPRESSED: not measured.
+    assert_eq!(statements[5]["impact"], "unknown");
+    assert!(statements[5]["reason"].is_string(), "{}", statements[5]);
+
+    assert_eq!(json["summary"]["fails"], 1);
+    assert_eq!(json["summary"]["writes_wait"], 1);
+    assert_eq!(json["summary"]["writes_continue"], 3);
+    assert_eq!(json["summary"]["unknown"], 1);
+    assert_eq!(json["exit_code"], 1);
+    assert_eq!(status, Some(1));
+}
+
+#[test]
+fn compressed_and_compact_tables_of_a_mysqldump_schema_get_their_own_answers_in_text() {
+    let schema = write_schema_with_row_formats("schema-with-row-formats-text.sql");
+    let sql: String = ROW_FORMAT_STATEMENTS
+        .iter()
+        .map(|(statement, _, _)| format!("{statement}\n"))
+        .collect();
+    let output = kilit(&["check", "--schema", schema.to_str().unwrap()], &sql);
+    let text = stdout(&output);
+    for (line, statement, answer) in [
+        (
+            1,
+            "alter table orders add coupon varchar(255) null",
+            "INPLACE, rebuilds the table, writes continue",
+        ),
+        (
+            2,
+            "alter table orders rename column note to memo",
+            "INSTANT, no rebuild, writes continue",
+        ),
+        (
+            3,
+            "alter table orders modify amount bigint not null",
+            "COPY, copies every row, writes wait",
+        ),
+        (
+            4,
+            "alter table logs add unique index uq_message (message)",
+            "fails with error 1071",
+        ),
+        (
+            5,
+            "alter table logs add coupon varchar(255) null",
+            "INSTANT, no rebuild, writes continue",
+        ),
+    ] {
+        assert!(
+            text.contains(&format!("  line {line}: {statement}\n    {answer}\n")),
+            "{answer}: {text}"
+        );
+    }
+    assert!(text.contains("UNKNOWN: "), "{text}");
+    assert!(!text.contains("could not follow"), "{text}");
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+}
+
+#[test]
+fn the_exit_code_for_row_format_tables_follows_the_impact_with_and_without_strict() {
+    let schema = write_schema_with_row_formats("schema-with-row-formats-exit.sql");
+    for (sql, plain, strict) in ROW_FORMAT_STATEMENTS {
+        assert_eq!(json_against(&schema, false, sql).1, Some(plain), "{sql}");
+        let (json, status) = json_against(&schema, true, sql);
+        assert_eq!(status, Some(strict), "{sql}");
+        assert_eq!(json["exit_code"], strict, "{sql}");
+    }
+}
+
+#[test]
+fn the_same_schema_without_row_formats_keeps_the_dynamic_answers() {
+    // Regression: the INNODB tables of the 9a schema have no ROW_FORMAT.
+    let schema = write_schema_with_engine("schema-without-row-formats.sql", "InnoDB");
+    let (json, status) = json_against(
+        &schema,
+        false,
+        "alter table orders add coupon varchar(255) null;",
+    );
+    let statement = &json["sources"][0]["statements"][0];
+    assert_eq!(statement["impact"], "writes_continue");
+    assert_eq!(statement["algorithm"], "INSTANT");
+    assert_eq!(status, Some(0));
+}
+
+#[test]
+fn old_alter_table_on_makes_add_column_copy_the_table_and_the_exit_code_says_so() {
+    // SET SESSION old_alter_table = ON: an ALTER without ALGORITHM copies
+    // the table (lab: old-alter-table-add-nullable-column).
+    let schema = write_schema_with_engine("schema-for-old-alter-table.sql", "InnoDB");
+    let sql = "SET SESSION old_alter_table = ON;
+               alter table orders add coupon varchar(255) null;";
+    for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+        for strict in [false, true] {
+            let mut args = vec![
+                "check",
+                "--schema",
+                schema.to_str().unwrap(),
+                "--server",
+                server,
+                "--format",
+                "json",
+            ];
+            if strict {
+                args.push("--strict");
+            }
+            let output = kilit(&args, sql);
+            let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let statement = &json["sources"][0]["statements"][1];
+            assert_eq!(statement["impact"], "writes_wait", "{server}");
+            assert_eq!(statement["algorithm"], "COPY", "{server}");
+            assert_eq!(statement["copies_rows"], true, "{server}");
+            assert_eq!(statement["writes"], "blocked", "{server}");
+            assert_eq!(json["exit_code"], 1, "{server}");
+            assert_eq!(output.status.code(), Some(1), "{server}");
+        }
+    }
+    let output = kilit(&["check", "--schema", schema.to_str().unwrap()], sql);
+    let text = stdout(&output);
+    assert!(
+        text.contains(
+            "  line 2: alter table orders add coupon varchar(255) null\n    COPY, copies every row, writes wait\n"
+        ),
+        "{text}"
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+}
+
+#[test]
+fn the_same_alter_without_old_alter_table_is_instant_and_exits_with_0() {
+    let schema = write_schema_with_engine("schema-for-old-alter-table-off.sql", "InnoDB");
+    for sql in [
+        "alter table orders add coupon varchar(255) null;",
+        "SET SESSION old_alter_table = ON;
+         SET SESSION old_alter_table = OFF;
+         alter table orders add coupon varchar(255) null;",
+    ] {
+        let (json, status) = json_against(&schema, false, sql);
+        let statements = json["sources"][0]["statements"].as_array().unwrap();
+        let statement = statements.last().unwrap();
+        assert_eq!(statement["impact"], "writes_continue", "{sql}");
+        assert_eq!(statement["algorithm"], "INSTANT", "{sql}");
+        assert_eq!(status, Some(0), "{sql}");
+    }
+}
+
+#[test]
+fn a_written_algorithm_wins_over_old_alter_table_in_the_command_too() {
+    let schema = write_schema_with_engine("schema-for-old-alter-table-forced.sql", "InnoDB");
+    let sql = "SET SESSION old_alter_table = ON;
+               alter table orders add coupon varchar(255) null, algorithm=instant;";
+    let (json, status) = json_against(&schema, false, sql);
+    let statement = &json["sources"][0]["statements"][1];
+    assert_eq!(statement["impact"], "writes_continue");
+    assert_eq!(statement["algorithm"], "INSTANT");
+    assert_eq!(status, Some(0));
+}
+
+#[test]
+fn old_alter_table_set_globally_is_unknown_and_only_strict_exits_with_1() {
+    let schema = write_schema_with_engine("schema-for-old-alter-table-global.sql", "InnoDB");
+    let sql = "SET GLOBAL old_alter_table = ON;
+               alter table orders add coupon varchar(255) null;";
+    let (json, status) = json_against(&schema, false, sql);
+    let statement = &json["sources"][0]["statements"][1];
+    assert_eq!(statement["impact"], "unknown");
+    assert!(
+        statement["reason"]
+            .as_str()
+            .unwrap()
+            .contains("old_alter_table"),
+        "{statement}"
+    );
+    assert_eq!(json["exit_code"], 0);
+    assert_eq!(status, Some(0));
+    let (json, status) = json_against(&schema, true, sql);
+    assert_eq!(json["exit_code"], 1);
+    assert_eq!(status, Some(1));
+}

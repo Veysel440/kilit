@@ -1,0 +1,3 @@
+title = "Drop a column of a COMPACT table"
+row_format = "COMPACT"
+operation = "DROP COLUMN note"

@@ -1,0 +1,3 @@
+title = "Change a column type from INT to BIGINT on a COMPACT table"
+row_format = "COMPACT"
+operation = "MODIFY COLUMN amount BIGINT NOT NULL"

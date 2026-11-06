@@ -1,0 +1,3 @@
+title = "Drop a column of a REDUNDANT table"
+row_format = "REDUNDANT"
+operation = "DROP COLUMN note"

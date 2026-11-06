@@ -1,0 +1,3 @@
+title = "Set a column default on a COMPACT table"
+row_format = "COMPACT"
+operation = "ALTER COLUMN amount SET DEFAULT 0"

@@ -9,8 +9,9 @@ use std::fs;
 use std::path::Path;
 
 use kilit_core::{
-    CASES, Condition, Engine, Knowledge, MYISAM_CASES, Prediction, ScenarioResult, Schema,
-    Statement, TableState, Variant, Verdict, check, parse, read_pretend,
+    CASES, Condition, Engine, Impact, Knowledge, MYISAM_CASES, OLD_ALTER_TABLE_CASES,
+    OLD_ALTER_TABLE_TWINS, Outcome, Prediction, ROW_FORMAT_CASES, RowFormat, ScenarioResult,
+    Schema, Statement, TableState, Variant, Verdict, check, impacts, parse, read_pretend,
 };
 
 /// The tables every lab scenario starts from.
@@ -19,23 +20,40 @@ const LAB_TABLES: &str = include_str!("../../../scenarios/tables.sql");
 /// The text of tables.sql as the lab creates the tables for a scenario:
 /// with `orders` as MyISAM when the scenario says so, and only `orders`.
 fn lab_tables(engine: Option<&str>) -> String {
-    match engine {
-        None => LAB_TABLES.to_owned(),
-        Some("MyISAM") => {
-            let at = LAB_TABLES.find("CREATE TABLE orders").unwrap();
-            let (users, orders) = LAB_TABLES.split_at(at);
-            format!(
-                "{users}{}",
-                orders.replacen("ENGINE=InnoDB", "ENGINE=MyISAM", 1)
-            )
-        }
+    lab_tables_with(engine, "")
+}
+
+/// The same, with `options` (` ROW_FORMAT=COMPACT`, ` KEY_BLOCK_SIZE=8`)
+/// right after `DEFAULT CHARSET=utf8mb4` in the statement of `orders`, where
+/// the lab puts them.
+fn lab_tables_with(engine: Option<&str>, options: &str) -> String {
+    const CHARSET: &str = "DEFAULT CHARSET=utf8mb4";
+    let at = LAB_TABLES.find("CREATE TABLE orders").unwrap();
+    let (users, orders) = LAB_TABLES.split_at(at);
+    let orders = match engine {
+        None => orders.to_owned(),
+        Some("MyISAM") => orders.replacen("ENGINE=InnoDB", "ENGINE=MyISAM", 1),
         Some(other) => panic!("the lab has no engine {other} for orders"),
+    };
+    let orders = orders.replacen(CHARSET, &format!("{CHARSET}{options}"), 1);
+    format!("{users}{orders}")
+}
+
+/// The table options the lab gives `orders` for a scenario.
+fn lab_options(scenario: &ScenarioResult) -> String {
+    let mut options = String::new();
+    if let Some(row_format) = &scenario.row_format {
+        options.push_str(&format!(" ROW_FORMAT={row_format}"));
     }
+    if let Some(size) = scenario.key_block_size {
+        options.push_str(&format!(" KEY_BLOCK_SIZE={size}"));
+    }
+    options
 }
 
 /// The lab's tables as a scenario measured them: after its setup.
 fn lab_schema(scenario: &ScenarioResult) -> Schema {
-    let mut sql = lab_tables(scenario.engine.as_deref());
+    let mut sql = lab_tables_with(scenario.engine.as_deref(), &lab_options(scenario));
     for statement in &scenario.setup {
         sql.push_str(statement);
         sql.push_str(";\n");
@@ -81,12 +99,23 @@ fn every_result_file_is_built_in() {
     }
 }
 
+/// Every case kilit answers from: InnoDB's, MyISAM's, the row formats' and
+/// those of `old_alter_table`.
+fn every_case() -> Vec<&'static kilit_core::Case> {
+    CASES
+        .into_iter()
+        .chain(MYISAM_CASES)
+        .chain(ROW_FORMAT_CASES)
+        .chain(OLD_ALTER_TABLE_CASES)
+        .collect()
+}
+
 #[test]
 fn every_scenario_is_used() {
     for results in Knowledge::built_in().servers() {
         for scenario in results.scenarios() {
             let id = scenario.id.as_str();
-            let used = CASES.into_iter().chain(MYISAM_CASES).any(|case| {
+            let used = every_case().into_iter().any(|case| {
                 case.scenarios.contains(&id)
                     || case
                         .exceptions
@@ -105,7 +134,7 @@ fn every_scenario_is_used() {
 #[test]
 fn the_scenarios_of_a_case_agree() {
     for results in Knowledge::built_in().servers() {
-        for case in CASES.into_iter().chain(MYISAM_CASES) {
+        for case in every_case() {
             // The case's own scenarios, then each exception's.
             let groups = std::iter::once(case.scenarios)
                 .chain(case.exceptions.iter().map(|exception| exception.scenarios));
@@ -141,23 +170,43 @@ fn the_scenarios_of_a_case_agree() {
 fn kilit_predicts_what_the_lab_measured() {
     for results in Knowledge::built_in().servers() {
         let server = results.server.name();
-        for case in CASES.into_iter().chain(MYISAM_CASES) {
+        for case in every_case() {
             for id in case.scenarios {
                 let scenario = results.scenario(id).unwrap();
                 let schema = lab_schema(scenario);
+                // With old_alter_table on, a written ALGORITHM wins over the
+                // setting, so kilit answers it with the answer measured
+                // without the setting: the scenario's DYNAMIC twin. The
+                // lab's own verdict for such a variant derives its writes
+                // from the default algorithm, COPY.
+                let twin = OLD_ALTER_TABLE_TWINS
+                    .iter()
+                    .find(|(old, _)| old == id)
+                    .map(|(_, twin)| results.scenario(twin).unwrap());
                 for variant in Variant::ALL {
+                    let forced = variant.algorithm.is_some();
+                    let (expected, source) = match twin {
+                        Some(twin) if forced => {
+                            assert_eq!(
+                                observation(scenario, variant),
+                                observation(twin, variant),
+                                "{id} as {variant} on {server} should equal {}",
+                                twin.id
+                            );
+                            (twin.verdict_for(variant), twin)
+                        }
+                        _ => (scenario.verdict_for(variant), scenario),
+                    };
                     match predict(scenario, variant, &server, &schema) {
                         Prediction::Measured {
                             case: found,
                             verdict,
                             ..
                         } => {
-                            assert_eq!(found, case.id, "{id} as {variant} on {server}");
-                            assert_eq!(
-                                Some(verdict),
-                                scenario.verdict_for(variant),
-                                "{id} as {variant} on {server}"
-                            );
+                            if source.id == scenario.id {
+                                assert_eq!(found, case.id, "{id} as {variant} on {server}");
+                            }
+                            assert_eq!(Some(verdict), expected, "{id} as {variant} on {server}");
                         }
                         other => panic!("{id} as {variant} on {server}: {other:?}"),
                     }
@@ -165,6 +214,15 @@ fn kilit_predicts_what_the_lab_measured() {
             }
         }
     }
+}
+
+/// What the lab saw when it ran `scenario` as `variant`.
+fn observation(scenario: &ScenarioResult, variant: Variant) -> Option<&Outcome> {
+    scenario
+        .observations
+        .iter()
+        .find(|observation| observation.variant == variant)
+        .map(|observation| &observation.outcome)
 }
 
 #[test]
@@ -4015,5 +4073,1484 @@ fn an_earlier_statement_naming_binlog_format_makes_every_expression_default_unkn
             &format!("{set};\nALTER TABLE orders ADD COLUMN c INT NULL DEFAULT 0;"),
             INSTANT,
         );
+    }
+}
+
+// Step 9b: ROW_FORMAT, KEY_BLOCK_SIZE and old_alter_table.
+//
+// The expectations come from the lab's results for the compressed-*,
+// compact-*, redundant-*, key-block-size-* and old-alter-table-* scenarios,
+// and from the hand tests run on both servers for the spellings and SET
+// forms the lab does not cover. Where a test relies on a decision of the
+// step, the comment says so.
+
+const INPLACE_REBUILD: &str = "INPLACE, rebuilds the table, writes continue";
+const FAILS_1846: &str = "fails with error 1846";
+const UNKNOWN: &str = "unknown";
+
+const INDEX_ON_AMOUNT: &str = "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)";
+const ADD_COLUMN: &str = "ADD COLUMN coupon VARCHAR(255) NULL";
+
+/// The eight changes the lab measured on every row format and under
+/// old_alter_table: (name, setup, operation after `ALTER TABLE orders`).
+const EIGHT: [(&str, &[&str], &str); 8] = [
+    ("add column", &[], ADD_COLUMN),
+    ("drop column", &[], "DROP COLUMN note"),
+    ("rename column", &[], "RENAME COLUMN note TO memo"),
+    ("set default", &[], "ALTER COLUMN amount SET DEFAULT 0"),
+    ("add index", &[], "ADD INDEX idx_orders_amount (amount)"),
+    (
+        "add unique index",
+        &[],
+        "ADD UNIQUE INDEX uq_orders_email (email)",
+    ),
+    (
+        "drop index",
+        &[INDEX_ON_AMOUNT],
+        "DROP INDEX idx_orders_amount",
+    ),
+    ("int to bigint", &[], "MODIFY COLUMN amount BIGINT NOT NULL"),
+];
+
+/// The lab's tables with `options` after the character set of `orders`,
+/// where the lab puts them, then `setup`.
+fn lab_with_options(options: &str, setup: &[&str]) -> String {
+    let mut sql = lab_tables_with(None, options);
+    for statement in setup {
+        sql.push_str(statement);
+        sql.push_str(";\n");
+    }
+    sql
+}
+
+/// `orders` as mysqldump writes it, with `options` after the collation and
+/// `keys` (each starting with a comma and a new line) after the primary key.
+fn dump_orders(options: &str, keys: &str) -> String {
+    format!(
+        "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  `email` varchar(255) DEFAULT NULL,
+  `note` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`id`){keys}
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci{options};
+"
+    )
+}
+
+/// The same answer on both servers for `ALTER TABLE orders <operation>`.
+fn assert_orders(name: &str, schema: &str, operation: &str, answer: &str) {
+    assert_answer(
+        name,
+        schema,
+        &format!("ALTER TABLE orders {operation};"),
+        answer,
+    );
+}
+
+/// The impact of every statement of `sql` on MySQL 8.4.13, with no tables
+/// known.
+fn impacts_of(sql: &str) -> Vec<Impact> {
+    let statements = parse(sql);
+    let results = Knowledge::built_in().server(MYSQL_84).unwrap();
+    let findings = check(&statements, &Schema::new(), results);
+    impacts(&statements, &findings)
+}
+
+const COMPRESSED: &str = " ROW_FORMAT=COMPRESSED";
+const COMPACT_OPTION: &str = " ROW_FORMAT=COMPACT";
+const REDUNDANT_OPTION: &str = " ROW_FORMAT=REDUNDANT";
+
+/// Every way MySQL 8.0.46 and 8.4.13 accepted to make `orders` COMPRESSED
+/// (hand tests, both servers): the row format alone, a key block size
+/// alone, with ROW_FORMAT=DEFAULT, both, any letter case, no `=`, a comma
+/// between options, and the last of two row formats.
+const COMPRESSED_SPELLINGS: [&str; 13] = [
+    " ROW_FORMAT=COMPRESSED",
+    " KEY_BLOCK_SIZE=8",
+    " ROW_FORMAT=DEFAULT KEY_BLOCK_SIZE=8",
+    " ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+    " KEY_BLOCK_SIZE=8 ROW_FORMAT=COMPRESSED",
+    " row_format=compressed",
+    " Row_Format=Compressed Key_Block_Size=8",
+    " ROW_FORMAT COMPRESSED",
+    " KEY_BLOCK_SIZE 8",
+    " ROW_FORMAT=COMPRESSED, KEY_BLOCK_SIZE=8",
+    " ROW_FORMAT=COMPACT ROW_FORMAT=COMPRESSED",
+    " ROW_FORMAT=DYNAMIC ROW_FORMAT=COMPRESSED",
+    " COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+];
+
+#[test]
+fn the_lab_writes_the_table_options_after_the_character_set_of_orders_only() {
+    let text = lab_tables_with(None, " ROW_FORMAT=COMPACT KEY_BLOCK_SIZE=8");
+    assert_eq!(text.matches("ROW_FORMAT=COMPACT").count(), 1);
+    assert_eq!(text.matches("KEY_BLOCK_SIZE=8").count(), 1);
+    let (users, orders) = text.split_at(text.find("CREATE TABLE orders").unwrap());
+    assert!(!users.contains("ROW_FORMAT"), "{users}");
+    assert!(
+        orders.contains("DEFAULT CHARSET=utf8mb4 ROW_FORMAT=COMPACT KEY_BLOCK_SIZE=8;"),
+        "{orders}"
+    );
+    assert_eq!(lab_tables_with(None, ""), LAB_TABLES);
+}
+
+#[test]
+fn a_scenario_of_the_lab_starts_from_an_orders_with_the_row_format_it_asks_for() {
+    for results in Knowledge::built_in().servers() {
+        for scenario in results.scenarios() {
+            let id = scenario.id.as_str();
+            let schema = lab_schema(scenario);
+            let TableState::Known(orders) = schema.table("orders") else {
+                panic!("{id}: orders is not known");
+            };
+            let expected = match scenario.row_format.as_deref() {
+                None => None,
+                Some("COMPRESSED") => Some(RowFormat::Compressed),
+                Some("COMPACT") => Some(RowFormat::Compact),
+                Some("REDUNDANT") => Some(RowFormat::Redundant),
+                Some(other) => panic!("{id}: row format {other}"),
+            };
+            assert_eq!(orders.row_format, expected, "{id}");
+            assert_eq!(
+                orders.key_block_size,
+                scenario.key_block_size.map(|size| size.to_string()),
+                "{id}"
+            );
+            // The scenarios about a row format say so in their id.
+            let named = ["compressed-", "compact-", "redundant-", "key-block-size-"]
+                .into_iter()
+                .any(|prefix| id.starts_with(prefix));
+            assert_eq!(
+                named,
+                scenario.row_format.is_some() || scenario.key_block_size.is_some(),
+                "{id}"
+            );
+            // Only the table `orders` gets the options.
+            let TableState::Known(users) = schema.table("users") else {
+                panic!("{id}: users is not known");
+            };
+            assert_eq!(users.row_format, None, "{id}");
+            assert_eq!(users.key_block_size, None, "{id}");
+        }
+    }
+}
+
+#[test]
+fn an_old_alter_table_scenario_and_its_twin_ask_for_the_same_change() {
+    for results in Knowledge::built_in().servers() {
+        let server = results.server.name();
+        let mut old_ids: Vec<&str> = OLD_ALTER_TABLE_CASES
+            .iter()
+            .flat_map(|case| case.scenarios.iter().copied())
+            .collect();
+        old_ids.sort_unstable();
+        let mut twin_olds: Vec<&str> = OLD_ALTER_TABLE_TWINS.iter().map(|(old, _)| *old).collect();
+        twin_olds.sort_unstable();
+        assert_eq!(old_ids, twin_olds, "{server}");
+        assert_eq!(old_ids.len(), 8, "{server}");
+        for (old, twin) in OLD_ALTER_TABLE_TWINS {
+            let old = results.scenario(old).unwrap();
+            let twin = results.scenario(twin).unwrap();
+            assert!(
+                old.session
+                    .iter()
+                    .any(|statement| statement.contains("old_alter_table")),
+                "{} sets no old_alter_table on {server}",
+                old.id
+            );
+            assert!(twin.session.is_empty(), "{} on {server}", twin.id);
+            assert_eq!(old.setup, twin.setup, "{} on {server}", old.id);
+            assert_eq!(old.statement, twin.statement, "{} on {server}", old.id);
+            assert_eq!(old.engine, None, "{} on {server}", old.id);
+            assert_eq!(old.row_format, None, "{} on {server}", old.id);
+            assert_eq!(twin.row_format, None, "{} on {server}", twin.id);
+        }
+    }
+}
+
+#[test]
+fn old_alter_table_makes_the_lab_s_server_default_run_copy_for_all_eight_operations() {
+    // Lab result: without a clause every one of the eight copies the table
+    // and LOCK=NONE alone is refused with 1846; a forced ALGORITHM equals the
+    // DYNAMIC twin's run.
+    for results in Knowledge::built_in().servers() {
+        for (old, twin) in OLD_ALTER_TABLE_TWINS {
+            let old = results.scenario(old).unwrap();
+            let twin = results.scenario(twin).unwrap();
+            match &old.verdict {
+                Verdict::Runs {
+                    algorithm,
+                    copied_rows,
+                    writes,
+                    ..
+                } => {
+                    assert_eq!(
+                        algorithm.map(|algorithm| algorithm.to_string()),
+                        Some("COPY".to_owned()),
+                        "{}",
+                        old.id
+                    );
+                    assert!(copied_rows.is_some_and(|rows| rows > 0), "{}", old.id);
+                    assert_eq!(*writes, kilit_core::Writes::Blocked, "{}", old.id);
+                }
+                other => panic!("{}: {other:?}", old.id),
+            }
+            assert!(
+                matches!(
+                    old.verdict_for(Variant::LOCK_NONE),
+                    Some(Verdict::Fails { code: 1846, .. })
+                ),
+                "{}",
+                old.id
+            );
+            // INT to BIGINT copies the table with old_alter_table off as
+            // well (the DYNAMIC int-to-bigint scenario: COPY, 1000 rows,
+            // writes blocked), so its verdict equals its twin's. The other
+            // seven differ from theirs.
+            if old.id == "old-alter-table-int-to-bigint" {
+                assert_eq!(old.verdict, twin.verdict, "{}", old.id);
+            } else {
+                assert_ne!(old.verdict, twin.verdict, "{}", old.id);
+            }
+        }
+    }
+}
+
+#[test]
+fn compressed_tables_in_every_spelling_rebuild_for_add_and_drop_column_and_refuse_instant() {
+    for options in COMPRESSED_SPELLINGS {
+        let lab = lab_with_options(options, &[]);
+        for (name, operation, answer) in [
+            ("add column", ADD_COLUMN.to_owned(), INPLACE_REBUILD),
+            (
+                "drop column",
+                "DROP COLUMN note".to_owned(),
+                INPLACE_REBUILD,
+            ),
+            (
+                "add column, instant",
+                format!("{ADD_COLUMN}, ALGORITHM=INSTANT"),
+                FAILS_1845,
+            ),
+            (
+                "drop column, instant",
+                "DROP COLUMN note, ALGORITHM=INSTANT".to_owned(),
+                FAILS_1845,
+            ),
+            (
+                "add column, inplace",
+                format!("{ADD_COLUMN}, ALGORITHM=INPLACE"),
+                INPLACE_REBUILD,
+            ),
+        ] {
+            assert_orders(&format!("{options}: {name}"), &lab, &operation, answer);
+        }
+    }
+}
+
+#[test]
+fn compressed_tables_in_every_spelling_keep_the_dynamic_answers_for_the_other_six() {
+    // compressed-rename-column to compressed-int-to-bigint, as written:
+    // INSTANT, INSTANT, INPLACE, INPLACE, INPLACE, COPY.
+    for options in COMPRESSED_SPELLINGS {
+        for (name, setup, operation) in EIGHT {
+            let answer = match name {
+                "add column" | "drop column" => continue,
+                "rename column" | "set default" => INSTANT,
+                "add index" | "add unique index" | "drop index" => INPLACE,
+                "int to bigint" => COPY,
+                other => panic!("{other}"),
+            };
+            assert_orders(
+                &format!("{options}: {name}"),
+                &lab_with_options(options, setup),
+                operation,
+                answer,
+            );
+        }
+    }
+}
+
+#[test]
+fn a_compressed_table_from_a_mysqldump_schema_gets_the_compressed_answers() {
+    // mysqldump writes the options after the collation, in this order.
+    let schema = dump_orders(
+        " ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+        ",\n  KEY `idx_orders_amount` (`amount`)",
+    );
+    for (sql, answer) in [
+        (
+            "alter table `orders` add `coupon` varchar(255) null",
+            INPLACE_REBUILD,
+        ),
+        ("alter table `orders` drop `note`", INPLACE_REBUILD),
+        (
+            "alter table `orders` rename column `note` to `memo`",
+            INSTANT,
+        ),
+        (
+            "alter table `orders` add unique `orders_email_unique`(`email`)",
+            INPLACE,
+        ),
+        (
+            "alter table `orders` drop index `idx_orders_amount`",
+            INPLACE,
+        ),
+        ("alter table `orders` modify `amount` bigint not null", COPY),
+        (
+            "alter table `orders` add `coupon` varchar(255) null, algorithm=instant",
+            FAILS_1845,
+        ),
+    ] {
+        assert_answer(sql, &schema, sql, answer);
+    }
+}
+
+#[test]
+fn a_compressed_table_keeps_its_row_format_through_the_changes_the_lab_measured() {
+    // A rename does not change the row format: the add column after it
+    // still rebuilds.
+    assert_every_answer(
+        "rename, then add column",
+        &lab_with_options(COMPRESSED, &[]),
+        "ALTER TABLE orders RENAME COLUMN note TO memo;
+         ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;",
+        &[INSTANT, INPLACE_REBUILD],
+    );
+}
+
+#[test]
+fn compact_and_redundant_tables_give_the_dynamic_answers_for_the_eight_operations() {
+    // compact-* and redundant-* scenarios; the unique index goes on a
+    // 191-character column, the widest that fits 767 bytes.
+    for options in [
+        COMPACT_OPTION,
+        REDUNDANT_OPTION,
+        " row_format=compact",
+        " ROW_FORMAT redundant",
+    ] {
+        for (name, setup, operation) in EIGHT {
+            let (setup, operation): (Vec<&str>, &str) = if name == "add unique index" {
+                (
+                    vec!["ALTER TABLE orders ADD COLUMN code VARCHAR(191) NULL"],
+                    "ADD UNIQUE INDEX uq_code (code)",
+                )
+            } else {
+                (setup.to_vec(), operation)
+            };
+            let answer = match name {
+                "add column" | "drop column" | "rename column" | "set default" => INSTANT,
+                "add index" | "add unique index" | "drop index" => INPLACE,
+                "int to bigint" => COPY,
+                other => panic!("{other}"),
+            };
+            assert_orders(
+                &format!("{options}: {name}"),
+                &lab_with_options(options, &setup),
+                operation,
+                answer,
+            );
+        }
+    }
+}
+
+#[test]
+fn forcing_a_variant_on_a_compact_or_redundant_table_gives_the_lab_s_answer() {
+    // compact-add-nullable-column: INSTANT, INPLACE rebuilds; add-index:
+    // INSTANT is refused with 1845.
+    for options in [COMPACT_OPTION, REDUNDANT_OPTION] {
+        let lab = lab_with_options(options, &[]);
+        for (name, operation, answer) in [
+            (
+                "add column, instant",
+                format!("{ADD_COLUMN}, ALGORITHM=INSTANT"),
+                INSTANT,
+            ),
+            (
+                "drop column, instant",
+                "DROP COLUMN note, ALGORITHM=INSTANT".to_owned(),
+                INSTANT,
+            ),
+            (
+                "add column, inplace",
+                format!("{ADD_COLUMN}, ALGORITHM=INPLACE"),
+                INPLACE_REBUILD,
+            ),
+            (
+                "add index, instant",
+                "ADD INDEX idx_orders_amount (amount), ALGORITHM=INSTANT".to_owned(),
+                FAILS_1845,
+            ),
+            (
+                "add index, inplace",
+                "ADD INDEX idx_orders_amount (amount), ALGORITHM=INPLACE, LOCK=NONE".to_owned(),
+                INPLACE,
+            ),
+            (
+                "int to bigint, inplace",
+                "MODIFY COLUMN amount BIGINT NOT NULL, ALGORITHM=INPLACE".to_owned(),
+                FAILS_1846,
+            ),
+        ] {
+            assert_orders(&format!("{options}: {name}"), &lab, &operation, answer);
+        }
+    }
+}
+
+#[test]
+fn an_index_over_767_bytes_on_a_compact_or_redundant_table_fails_with_1071() {
+    // compact-add-index-key-over-limit and the hand tests: 192 characters of
+    // utf8mb4 are 768 bytes, 255 are 1020; all six variants gave 1071.
+    for options in [COMPACT_OPTION, REDUNDANT_OPTION] {
+        for length in [192, 255] {
+            let column = format!("ALTER TABLE orders ADD COLUMN code VARCHAR({length}) NULL");
+            let lab = lab_with_options(options, &[column.as_str()]);
+            for operation in [
+                "ADD INDEX idx_code (code)",
+                "ADD UNIQUE INDEX uq_code (code)",
+            ] {
+                for clause in [
+                    "",
+                    ", ALGORITHM=INSTANT",
+                    ", ALGORITHM=INPLACE",
+                    ", ALGORITHM=INPLACE, LOCK=NONE",
+                    ", ALGORITHM=COPY",
+                    ", LOCK=NONE",
+                ] {
+                    assert_orders(
+                        &format!("{options}: {length}: {operation}{clause}"),
+                        &lab,
+                        &format!("{operation}{clause}"),
+                        FAILS_1071,
+                    );
+                }
+            }
+        }
+        // The column the lab's tables have: email, 255 characters.
+        let lab = lab_with_options(options, &[]);
+        assert_orders(options, &lab, "ADD INDEX idx_email (email)", FAILS_1071);
+        assert_orders(
+            options,
+            &lab,
+            "ADD UNIQUE INDEX uq_orders_email (email)",
+            FAILS_1071,
+        );
+    }
+}
+
+#[test]
+fn an_index_of_191_characters_on_a_compact_or_redundant_table_gets_the_index_answer() {
+    // compact-add-index-key-at-limit: 191 characters are 764 bytes.
+    for options in [COMPACT_OPTION, REDUNDANT_OPTION] {
+        let column = "ALTER TABLE orders ADD COLUMN code VARCHAR(191) NULL";
+        let lab = lab_with_options(options, &[column]);
+        assert_orders(options, &lab, "ADD INDEX idx_code (code)", INPLACE);
+        assert_orders(options, &lab, "ADD UNIQUE INDEX uq_code (code)", INPLACE);
+        assert_orders(
+            options,
+            &lab,
+            "ADD INDEX idx_code (code), ALGORITHM=INSTANT",
+            FAILS_1845,
+        );
+    }
+}
+
+#[test]
+fn laravel_s_string_index_on_a_compact_table_fails_with_1071_for_255_characters() {
+    // $table->string('email')->index(); and ->unique(): Laravel's string()
+    // is varchar(255), which is 1020 bytes in utf8mb4.
+    let schema = dump_orders(COMPACT_OPTION, "");
+    for sql in [
+        "alter table `orders` add index `orders_email_index`(`email`)",
+        "alter table `orders` add unique `orders_email_unique`(`email`)",
+    ] {
+        assert_answer(sql, &schema, sql, FAILS_1071);
+    }
+    // The same tables with the server's default row format: accepted.
+    let dynamic = dump_orders("", "");
+    assert_answer(
+        "dynamic",
+        &dynamic,
+        "alter table `orders` add index `orders_email_index`(`email`)",
+        INPLACE,
+    );
+}
+
+#[test]
+fn a_key_that_fails_on_a_compact_table_leaves_the_table_as_it_was() {
+    // A measured failure leaves the tables as they were: after it the table has no idx_code and no code index,
+    // so the same name can be used again.
+    let column = "ALTER TABLE orders ADD COLUMN code VARCHAR(192) NULL";
+    for options in [COMPACT_OPTION, REDUNDANT_OPTION] {
+        assert_every_answer(
+            options,
+            &lab_with_options(options, &[column]),
+            "ALTER TABLE orders ADD INDEX idx_code (code);
+             ALTER TABLE orders ADD INDEX idx_code (amount);
+             ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;",
+            &[FAILS_1071, INPLACE, INSTANT],
+        );
+    }
+}
+
+#[test]
+fn tables_without_a_row_format_or_with_the_default_one_keep_their_answers() {
+    // Not written, DYNAMIC, DEFAULT and KEY_BLOCK_SIZE=0 all leave the table
+    // DYNAMIC (hand tests): the answers of the lab's own scenarios.
+    for options in [
+        "",
+        " ROW_FORMAT=DYNAMIC",
+        " row_format=dynamic",
+        " ROW_FORMAT=DEFAULT",
+        " KEY_BLOCK_SIZE=0",
+    ] {
+        for (name, setup, operation) in EIGHT {
+            let answer = match name {
+                "add column" | "drop column" | "rename column" | "set default" => INSTANT,
+                "add index" | "add unique index" | "drop index" => INPLACE,
+                "int to bigint" => COPY,
+                other => panic!("{other}"),
+            };
+            assert_orders(
+                &format!("{options}: {name}"),
+                &lab_with_options(options, setup),
+                operation,
+                answer,
+            );
+        }
+        // 192 and 255 characters of utf8mb4 are fine on DYNAMIC.
+        assert_orders(
+            options,
+            &lab_with_options(options, &[]),
+            "ADD INDEX idx_email (email)",
+            INPLACE,
+        );
+        assert_orders(
+            options,
+            &lab_with_options(
+                options,
+                &["ALTER TABLE orders ADD COLUMN code VARCHAR(192) NULL"],
+            ),
+            "ADD UNIQUE INDEX uq_code (code)",
+            INPLACE,
+        );
+        assert_orders(
+            options,
+            &lab_with_options(options, &[]),
+            "ADD COLUMN coupon VARCHAR(255) NULL, ALGORITHM=INSTANT",
+            INSTANT,
+        );
+    }
+}
+
+#[test]
+fn row_formats_and_block_sizes_the_lab_did_not_measure_make_every_alter_unknown() {
+    // Decision 2 and the hand tests: KEY_BLOCK_SIZE 1, 2, 4 and 16 (not
+    // measured), KEY_BLOCK_SIZE with another row format (MySQL: 1031 at
+    // CREATE, 1478 at ALTER), FIXED and a misspelling (1031), and quoted
+    // values (1064).
+    for options in [
+        " KEY_BLOCK_SIZE=1",
+        " KEY_BLOCK_SIZE=2",
+        " KEY_BLOCK_SIZE=4",
+        " KEY_BLOCK_SIZE=16",
+        " ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+        " ROW_FORMAT=DYNAMIC KEY_BLOCK_SIZE=8",
+        " ROW_FORMAT=COMPACT KEY_BLOCK_SIZE=8",
+        " ROW_FORMAT=REDUNDANT KEY_BLOCK_SIZE=8",
+        " ROW_FORMAT=FIXED",
+        " ROW_FORMAT=COMPRESED",
+        " ROW_FORMAT='COMPRESSED'",
+        " ROW_FORMAT=\"COMPRESSED\"",
+        " ROW_FORMAT='DYNAMIC'",
+        " KEY_BLOCK_SIZE='8'",
+    ] {
+        let lab = lab_with_options(options, &[INDEX_ON_AMOUNT]);
+        // Even the changes that are INSTANT on DYNAMIC.
+        for operation in [
+            ADD_COLUMN,
+            "RENAME COLUMN note TO memo",
+            "ADD INDEX idx_orders_note (note)",
+            "MODIFY COLUMN amount BIGINT NOT NULL",
+        ] {
+            assert_orders(&format!("{options}: {operation}"), &lab, operation, UNKNOWN);
+        }
+    }
+}
+
+#[test]
+fn a_quoted_row_format_or_block_size_says_the_servers_do_not_accept_it() {
+    // MySQL 8.0.46 and 8.4.13 give 1064 for both (hand tests).
+    for options in [" ROW_FORMAT='COMPRESSED'", " KEY_BLOCK_SIZE='8'"] {
+        let sql = format!("ALTER TABLE orders {ADD_COLUMN};");
+        for server in [MYSQL_80, MYSQL_84] {
+            let reason = unknown_reason_on(server, &lab_with_options(options, &[]), &sql);
+            assert!(
+                reason.contains("do not accept"),
+                "{server}: {options}: {reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_myisam_table_with_a_row_format_or_block_size_is_unknown() {
+    // Decision 6. Without the option the MyISAM answer is COPY.
+    assert_orders(
+        "no option",
+        &lab_tables_with(Some("MyISAM"), ""),
+        ADD_COLUMN,
+        COPY,
+    );
+    for options in [
+        " ROW_FORMAT=FIXED",
+        " ROW_FORMAT=DYNAMIC",
+        " ROW_FORMAT=DEFAULT",
+        " ROW_FORMAT=COMPRESSED",
+        " KEY_BLOCK_SIZE=8",
+        " row_format=fixed",
+    ] {
+        let lab = lab_tables_with(Some("MyISAM"), options);
+        assert_orders(options, &lab, ADD_COLUMN, UNKNOWN);
+        assert_orders(options, &lab, "RENAME COLUMN note TO memo", UNKNOWN);
+    }
+}
+
+#[test]
+fn a_change_outside_the_eight_on_a_compressed_compact_or_redundant_table_is_unknown() {
+    // Decision 2: only the measured operations get an answer, never a
+    // DYNAMIC one.
+    let add_foreign_key = MYISAM_ADD_FK;
+    for options in [COMPRESSED, COMPACT_OPTION, REDUNDANT_OPTION] {
+        for (name, setup, operation) in [
+            ("add foreign key", &[][..], add_foreign_key),
+            ("add fulltext", &[][..], "ADD FULLTEXT INDEX ft_note (note)"),
+            (
+                "lengthen a varchar",
+                &[][..],
+                "MODIFY COLUMN note VARCHAR(100) NULL",
+            ),
+            (
+                "int to smallint",
+                &[][..],
+                "MODIFY COLUMN amount SMALLINT NOT NULL",
+            ),
+            (
+                "change that renames",
+                &[][..],
+                "CHANGE COLUMN note memo VARCHAR(50) NULL",
+            ),
+            (
+                "drop an indexed column",
+                &[INDEX_ON_AMOUNT][..],
+                "DROP COLUMN amount",
+            ),
+        ] {
+            assert_orders(
+                &format!("{options}: {name}"),
+                &lab_with_options(options, setup),
+                operation,
+                UNKNOWN,
+            );
+        }
+    }
+}
+
+#[test]
+fn an_index_kilit_cannot_measure_the_key_bytes_of_on_a_compact_table_is_unknown() {
+    for options in [COMPACT_OPTION, REDUNDANT_OPTION] {
+        for (name, setup, operation) in [
+            (
+                "two columns",
+                &[][..],
+                "ADD INDEX idx_two (user_id, amount)",
+            ),
+            (
+                "a prefix",
+                &[][..],
+                "ADD INDEX idx_email_prefix (email(100))",
+            ),
+            (
+                "latin1 varchar",
+                &["ALTER TABLE orders ADD COLUMN code VARCHAR(255) CHARACTER SET latin1 NULL"][..],
+                "ADD INDEX idx_code (code)",
+            ),
+            (
+                "text",
+                &["ALTER TABLE orders ADD COLUMN body TEXT NULL"][..],
+                "ADD INDEX idx_body (body)",
+            ),
+            (
+                "text with a prefix",
+                &["ALTER TABLE orders ADD COLUMN body TEXT NULL"][..],
+                "ADD INDEX idx_body (body(100))",
+            ),
+        ] {
+            assert_orders(
+                &format!("{options}: {name}"),
+                &lab_with_options(options, setup),
+                operation,
+                UNKNOWN,
+            );
+        }
+    }
+}
+
+#[test]
+fn adding_a_column_to_a_non_dynamic_table_with_a_fulltext_index_is_unknown() {
+    // Decision 8: on DYNAMIC a FULLTEXT index changes the answer; nothing
+    // measured the combination.
+    let keys = ",\n  FULLTEXT KEY `ft_note` (`note`)";
+    for options in [COMPRESSED, COMPACT_OPTION, REDUNDANT_OPTION] {
+        assert_orders(options, &dump_orders(options, keys), ADD_COLUMN, UNKNOWN);
+    }
+    // The same table with the default row format: today's answer.
+    assert_orders("dynamic", &dump_orders("", keys), ADD_COLUMN, COPY);
+}
+
+#[test]
+fn naming_innodb_default_row_format_makes_tables_without_a_row_format_unknown() {
+    // A rebuild takes the new default, so every table that
+    // writes no ROW_FORMAT, old or new, known or not, has an unknown format.
+    for set in [
+        "SET GLOBAL innodb_default_row_format = COMPACT",
+        "SET GLOBAL innodb_default_row_format = 'REDUNDANT'",
+        "SET PERSIST innodb_default_row_format = COMPACT",
+        "SET @@global.innodb_default_row_format = COMPACT",
+        "set global INNODB_DEFAULT_ROW_FORMAT=compact",
+        "SET GLOBAL innodb_default_row_format = DYNAMIC",
+    ] {
+        let alter = "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;";
+        // A table of the schema.
+        assert_answer(set, LAB_TABLES, &format!("{set};\n{alter}"), UNKNOWN);
+        // A table that kilit does not know.
+        assert_answer(set, "", &format!("{set};\n{alter}"), UNKNOWN);
+        // A table created before and after the setting.
+        let create = "CREATE TABLE orders (id BIGINT UNSIGNED PRIMARY KEY, \
+                      amount INT NOT NULL) DEFAULT CHARSET=utf8mb4;";
+        assert_answer(set, "", &format!("{create}\n{set};\n{alter}"), UNKNOWN);
+        assert_answer(set, "", &format!("{set};\n{create}\n{alter}"), UNKNOWN);
+        // A table that lost its definition.
+        assert_answer(
+            set,
+            LAB_TABLES,
+            &format!("ALTER TABLE orders DROP COLUMN no_such_column;\n{set};\n{alter}"),
+            UNKNOWN,
+        );
+        // What ran before the setting keeps its answer.
+        let answers = on_mysql_84(LAB_TABLES, &format!("{alter}\n{set};\n{alter}"));
+        assert_eq!(answers.first().map(String::as_str), Some(INSTANT), "{set}");
+        assert_eq!(answers.last().map(String::as_str), Some(UNKNOWN), "{set}");
+    }
+}
+
+#[test]
+fn after_innodb_default_row_format_a_dynamic_table_keeps_all_its_answers_and_a_compact_one_all_but_its_indexes()
+ {
+    // Decision 5: a written ROW_FORMAT does not depend on the
+    // default. kilit has no key-byte rule on DYNAMIC, so its index answer
+    // stays; on COMPACT the index answers depend on the 767-byte limit and
+    // are unknown.
+    let set = "SET GLOBAL innodb_default_row_format = COMPACT";
+    let seven = [
+        (ADD_COLUMN, INSTANT),
+        ("DROP COLUMN note", INSTANT),
+        ("RENAME COLUMN note TO memo", INSTANT),
+        ("ALTER COLUMN amount SET DEFAULT 0", INSTANT),
+        ("MODIFY COLUMN amount BIGINT NOT NULL", COPY),
+    ];
+    let dynamic = lab_with_options(" ROW_FORMAT=DYNAMIC", &[]);
+    let compact = lab_with_options(COMPACT_OPTION, &[]);
+    for (operation, answer) in seven {
+        for schema in [&dynamic, &compact] {
+            assert_answer(
+                operation,
+                schema,
+                &format!("{set};\nALTER TABLE orders {operation};"),
+                answer,
+            );
+        }
+    }
+    for (operation, dynamic_answer) in [
+        ("ADD INDEX idx_orders_amount (amount)", INPLACE),
+        ("ADD UNIQUE INDEX uq_orders_email (email)", INPLACE),
+        ("ADD INDEX idx_email (email)", INPLACE),
+    ] {
+        assert_answer(
+            operation,
+            &dynamic,
+            &format!("{set};\nALTER TABLE orders {operation};"),
+            dynamic_answer,
+        );
+        assert_answer(
+            operation,
+            &compact,
+            &format!("{set};\nALTER TABLE orders {operation};"),
+            UNKNOWN,
+        );
+    }
+}
+
+#[test]
+fn naming_innodb_strict_mode_makes_tables_created_after_it_without_a_row_format_unknown() {
+    // Decision 5. Tables created before the setting keep their answers.
+    let create = "CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, amount INT NOT NULL, \
+                  email VARCHAR(255) NULL) DEFAULT CHARSET=utf8mb4";
+    for set in [
+        "SET innodb_strict_mode = OFF",
+        "SET SESSION innodb_strict_mode = 0",
+        "SET GLOBAL innodb_strict_mode = OFF",
+        "SET @@innodb_strict_mode = ON",
+    ] {
+        // Created after, no ROW_FORMAT: unknown, even for a rename.
+        for operation in ["ADD COLUMN c INT NULL", "RENAME COLUMN amount TO total"] {
+            assert_answer(
+                set,
+                "",
+                &format!("{set};\n{create};\nALTER TABLE t {operation};"),
+                UNKNOWN,
+            );
+        }
+        // Created before: today's answers.
+        assert_answer(
+            set,
+            "",
+            &format!("{create};\n{set};\nALTER TABLE t ADD COLUMN c INT NULL;"),
+            INSTANT,
+        );
+        assert_answer(
+            set,
+            LAB_TABLES,
+            &format!("{set};\nALTER TABLE orders ADD COLUMN c INT NULL;"),
+            INSTANT,
+        );
+        assert_answer(
+            set,
+            LAB_TABLES,
+            &format!("{set};\nALTER TABLE orders ADD INDEX idx_orders_amount (amount);"),
+            INPLACE,
+        );
+    }
+}
+
+#[test]
+fn naming_innodb_strict_mode_makes_index_answers_on_other_row_formats_unknown() {
+    // Decision 5: without strict mode MySQL cuts a too long key instead of
+    // failing with 1071. The tables are created after the setting.
+    let set = "SET SESSION innodb_strict_mode = OFF";
+    for options in [COMPACT_OPTION, REDUNDANT_OPTION, COMPRESSED] {
+        let create = format!(
+            "CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, amount INT NOT NULL, \
+             email VARCHAR(255) NULL) DEFAULT CHARSET=utf8mb4{options}"
+        );
+        for operation in [
+            "ADD INDEX idx_amount (amount)",
+            "ADD INDEX idx_email (email)",
+            "ADD UNIQUE INDEX uq_email (email)",
+        ] {
+            assert_answer(
+                &format!("{options}: {operation}"),
+                "",
+                &format!("{set};\n{create};\nALTER TABLE t {operation};"),
+                UNKNOWN,
+            );
+        }
+    }
+    // The answers that depend on no key limit stay: COMPACT adds a column
+    // instantly, COMPRESSED rebuilds.
+    let compact = format!(
+        "{set};\nCREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, amount INT NOT NULL) \
+         DEFAULT CHARSET=utf8mb4{COMPACT_OPTION};\nALTER TABLE t ADD COLUMN c INT NULL;"
+    );
+    assert_answer("compact", "", &compact, INSTANT);
+    let compressed = format!(
+        "{set};\nCREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, amount INT NOT NULL) \
+         DEFAULT CHARSET=utf8mb4{COMPRESSED};\nALTER TABLE t ADD COLUMN c INT NULL;"
+    );
+    assert_answer("compressed", "", &compressed, INPLACE_REBUILD);
+}
+
+#[test]
+fn an_unreadable_alter_that_writes_a_row_format_or_block_size_loses_the_table_as_unknown() {
+    // Decision 4: ALTER TABLE ... ROW_FORMAT=... is not
+    // read, and nothing says what the table is now.
+    let then = "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;";
+    for option in [
+        "ROW_FORMAT=COMPRESSED",
+        "ROW_FORMAT=DYNAMIC",
+        "ROW_FORMAT=COMPACT",
+        "ROW_FORMAT=DEFAULT",
+        "row_format=compressed",
+        "KEY_BLOCK_SIZE=8",
+        "KEY_BLOCK_SIZE=0",
+    ] {
+        assert_every_answer(
+            option,
+            LAB_TABLES,
+            &format!("ALTER TABLE orders {option};\n{then}"),
+            &[UNKNOWN, UNKNOWN],
+        );
+    }
+}
+
+#[test]
+fn an_unreadable_alter_that_writes_neither_keeps_the_answer_of_a_dynamic_table() {
+    let lose = "ALTER TABLE orders DROP COLUMN no_such_column;";
+    let then = "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;";
+    assert_answer("dynamic", LAB_TABLES, &format!("{lose}\n{then}"), INSTANT);
+    assert_answer(
+        "dynamic written",
+        &lab_with_options(" ROW_FORMAT=DYNAMIC", &[]),
+        &format!("{lose}\n{then}"),
+        INSTANT,
+    );
+}
+
+#[test]
+fn a_known_compressed_compact_or_redundant_table_lost_by_any_unreadable_statement_is_unknown() {
+    let lose = "ALTER TABLE orders DROP COLUMN no_such_column;";
+    let then = "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;";
+    for options in [
+        COMPRESSED,
+        COMPACT_OPTION,
+        REDUNDANT_OPTION,
+        " KEY_BLOCK_SIZE=8",
+    ] {
+        assert_answer(
+            options,
+            &lab_with_options(options, &[]),
+            &format!("{lose}\n{then}"),
+            UNKNOWN,
+        );
+    }
+}
+
+#[test]
+fn a_new_compressed_table_is_never_waited_for_and_a_new_compact_table_can_still_fail() {
+    // Decision 9: the new-table rule uses the measurement for the table's
+    // row format.
+    let create = |options: &str| {
+        format!(
+            "CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, amount INT NOT NULL, \
+             code VARCHAR(255) NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4{options};\n"
+        )
+    };
+    // The measured success on a new table: new_table.
+    assert_eq!(
+        impacts_of(&format!(
+            "{}ALTER TABLE t ADD COLUMN c INT NULL;",
+            create(COMPRESSED)
+        )),
+        [Impact::NotChecked, Impact::NewTable]
+    );
+    assert_eq!(
+        impacts_of(&format!(
+            "{}ALTER TABLE t ADD COLUMN c INT NULL;",
+            create(COMPACT_OPTION)
+        )),
+        [Impact::NotChecked, Impact::NewTable]
+    );
+    // The measured failure on a new table: still fails.
+    assert_eq!(
+        impacts_of(&format!(
+            "{}ALTER TABLE t ADD INDEX idx_code (code);",
+            create(COMPACT_OPTION)
+        )),
+        [Impact::NotChecked, Impact::Fails]
+    );
+    assert_answer(
+        "answer",
+        "",
+        &format!(
+            "{}ALTER TABLE t ADD INDEX idx_code (code);",
+            create(REDUNDANT_OPTION)
+        ),
+        FAILS_1071,
+    );
+    // What is not measured stays unknown there too; the default row format
+    // keeps its answers.
+    assert_eq!(
+        impacts_of(&format!(
+            "{}ALTER TABLE t MODIFY COLUMN amount SMALLINT NOT NULL;",
+            create(COMPRESSED)
+        )),
+        [Impact::NotChecked, Impact::Unknown]
+    );
+    assert_eq!(
+        impacts_of(&format!(
+            "{}ALTER TABLE t ADD INDEX idx_code (code);",
+            create("")
+        )),
+        [Impact::NotChecked, Impact::NewTable]
+    );
+}
+
+/// The clauses an ALTER can end with besides the operation.
+const NO_ALGORITHM: [&str; 2] = ["", ", ALGORITHM=DEFAULT"];
+const LOCK_NONE_ONLY: [&str; 2] = [", LOCK=NONE", ", ALGORITHM=DEFAULT, LOCK=NONE"];
+const FORCED: [&str; 6] = [
+    ", ALGORITHM=INSTANT",
+    ", ALGORITHM=INPLACE",
+    ", ALGORITHM=INPLACE, LOCK=NONE",
+    ", ALGORITHM=COPY",
+    ", ALGORITHM=COPY, LOCK=NONE",
+    ", ALGORITHM=INSTANT, LOCK=NONE",
+];
+
+/// Every way the hand tests turned old_alter_table on for the session.
+const OLD_ALTER_TABLE_ON: [&str; 8] = [
+    "SET SESSION old_alter_table = ON",
+    "SET old_alter_table = 1",
+    "SET @@old_alter_table = ON",
+    "SET @@session.old_alter_table = TRUE",
+    "SET old_alter_table = 'ON'",
+    "SET old_alter_table = 'on'",
+    "SET LOCAL old_alter_table = ON",
+    "SET old_alter_table = ON, foreign_key_checks = 0",
+];
+
+const OLD_ALTER_TABLE_OFF: [&str; 5] = [
+    "SET old_alter_table = OFF",
+    "SET old_alter_table = 0",
+    "SET old_alter_table = FALSE",
+    "SET old_alter_table = 'OFF'",
+    "SET @@session.old_alter_table = off",
+];
+
+#[test]
+fn with_old_alter_table_on_the_eight_operations_copy_the_table_in_every_spelling() {
+    // old-alter-table-* scenarios: as written and ALGORITHM=DEFAULT copy
+    // the table and writes wait.
+    for set in OLD_ALTER_TABLE_ON {
+        for (name, setup, operation) in EIGHT {
+            for clause in NO_ALGORITHM {
+                assert_answer(
+                    &format!("{set}: {name}{clause}"),
+                    &lab_after(setup),
+                    &format!("{set};\nALTER TABLE orders {operation}{clause};"),
+                    COPY,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn with_old_alter_table_on_lock_none_alone_fails_with_1846() {
+    // old-alter-table-*: LOCK=NONE with no ALGORITHM, and with
+    // ALGORITHM=DEFAULT, gave 1846 "COPY algorithm requires a lock".
+    for set in OLD_ALTER_TABLE_ON {
+        for (name, setup, operation) in EIGHT {
+            for clause in LOCK_NONE_ONLY {
+                assert_answer(
+                    &format!("{set}: {name}{clause}"),
+                    &lab_after(setup),
+                    &format!("{set};\nALTER TABLE orders {operation}{clause};"),
+                    FAILS_1846,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn with_old_alter_table_on_a_written_algorithm_wins_and_gets_the_dynamic_answer() {
+    // The manual: a written ALGORITHM other than DEFAULT takes precedence.
+    // The forced runs of the old-alter-table scenarios equal their twins'.
+    for (set, operation, answer) in [
+        ("SET SESSION old_alter_table = ON", ADD_COLUMN, INSTANT),
+        (
+            "SET SESSION old_alter_table = ON",
+            "ADD INDEX idx_orders_amount (amount)",
+            INPLACE,
+        ),
+    ] {
+        assert_orders(
+            set,
+            &lab_after(&[]),
+            &format!("{operation}, ALGORITHM=INPLACE"),
+            if operation == ADD_COLUMN {
+                INPLACE_REBUILD
+            } else {
+                answer
+            },
+        );
+        // Prefixed with the SET statement.
+        assert_answer(
+            set,
+            &lab_after(&[]),
+            &format!("{set};\nALTER TABLE orders {operation}, ALGORITHM=INPLACE;"),
+            if operation == ADD_COLUMN {
+                INPLACE_REBUILD
+            } else {
+                answer
+            },
+        );
+    }
+    let on = "SET SESSION old_alter_table = ON;\n";
+    for (operation, answer) in [
+        (
+            "ADD COLUMN coupon VARCHAR(255) NULL, ALGORITHM=INSTANT",
+            INSTANT,
+        ),
+        (
+            "ADD COLUMN coupon VARCHAR(255) NULL, ALGORITHM=INPLACE",
+            INPLACE_REBUILD,
+        ),
+        (
+            "ADD INDEX idx_orders_amount (amount), ALGORITHM=INSTANT",
+            FAILS_1845,
+        ),
+        (
+            "ADD INDEX idx_orders_amount (amount), ALGORITHM=INPLACE",
+            INPLACE,
+        ),
+        (
+            "ADD INDEX idx_orders_amount (amount), ALGORITHM=INPLACE, LOCK=NONE",
+            INPLACE,
+        ),
+        ("RENAME COLUMN note TO memo, ALGORITHM=INSTANT", INSTANT),
+    ] {
+        assert_answer(
+            operation,
+            &lab_after(&[]),
+            &format!("{on}ALTER TABLE orders {operation};"),
+            answer,
+        );
+    }
+}
+
+#[test]
+fn with_old_alter_table_on_every_forced_algorithm_gives_the_answer_it_gives_with_it_off() {
+    // Hand tests, both servers: for all eight operations the forced runs
+    // under ON equal the runs under OFF.
+    for set in OLD_ALTER_TABLE_ON {
+        for (name, setup, operation) in EIGHT {
+            for clause in FORCED {
+                let alter = format!("ALTER TABLE orders {operation}{clause};");
+                let schema = lab_after(setup);
+                assert_eq!(
+                    on_both(&schema, &format!("{set};\n{alter}")),
+                    on_both(&schema, &alter),
+                    "{set}: {name}{clause}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn old_alter_table_stays_on_for_every_later_alter_until_it_is_turned_off() {
+    let sql = "SET SESSION old_alter_table = ON;
+               ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;
+               ALTER TABLE orders RENAME COLUMN note TO memo;";
+    for answers in all_on_both(LAB_TABLES, sql) {
+        assert_eq!(&answers[1..], [COPY, COPY], "{answers:?}");
+    }
+}
+
+#[test]
+fn turning_old_alter_table_off_again_gives_the_normal_answers() {
+    for off in OLD_ALTER_TABLE_OFF {
+        for (operation, answer) in [
+            (ADD_COLUMN, INSTANT),
+            ("RENAME COLUMN note TO memo", INSTANT),
+            ("ADD INDEX idx_orders_amount (amount)", INPLACE),
+            ("MODIFY COLUMN amount BIGINT NOT NULL", COPY),
+        ] {
+            // Turned on, then off.
+            assert_answer(
+                &format!("{off}: {operation}"),
+                LAB_TABLES,
+                &format!(
+                    "SET SESSION old_alter_table = ON;\n{off};\nALTER TABLE orders {operation};"
+                ),
+                answer,
+            );
+            // Off from the start.
+            assert_answer(
+                &format!("{off}: {operation}"),
+                LAB_TABLES,
+                &format!("{off};\nALTER TABLE orders {operation};"),
+                answer,
+            );
+        }
+        // LOCK=NONE works again, too.
+        assert_orders(
+            off,
+            LAB_TABLES,
+            "ADD INDEX idx_orders_amount (amount), LOCK=NONE",
+            INPLACE,
+        );
+    }
+}
+
+#[test]
+fn old_alter_table_set_in_a_way_kilit_cannot_follow_makes_every_later_alter_unknown() {
+    // Decision 1: GLOBAL, PERSIST, PERSIST_ONLY, DEFAULT, a value that is
+    // neither on nor off, and a multi-assignment that names the global
+    // variable. Hand tests: SET GLOBAL is not seen by the session, DEFAULT
+    // takes the global value, = 2 and = YES give 1231.
+    for set in [
+        "SET GLOBAL old_alter_table = ON",
+        "SET GLOBAL old_alter_table = OFF",
+        "SET PERSIST old_alter_table = ON",
+        "SET PERSIST_ONLY old_alter_table = ON",
+        "SET @@global.old_alter_table = ON",
+        "SET old_alter_table = DEFAULT",
+        "SET old_alter_table = 2",
+        "SET old_alter_table = YES",
+        "SET foreign_key_checks = 1, @@global.old_alter_table = ON",
+    ] {
+        for (operation, clause) in [
+            (ADD_COLUMN, ""),
+            (ADD_COLUMN, ", ALGORITHM=DEFAULT"),
+            (ADD_COLUMN, ", ALGORITHM=INSTANT"),
+            (ADD_COLUMN, ", ALGORITHM=INPLACE"),
+            (ADD_COLUMN, ", ALGORITHM=COPY"),
+            (ADD_COLUMN, ", LOCK=NONE"),
+            ("RENAME COLUMN note TO memo", ", ALGORITHM=INSTANT"),
+            ("ADD INDEX idx_orders_amount (amount)", ""),
+            ("MODIFY COLUMN amount BIGINT NOT NULL", ""),
+        ] {
+            let alter = format!("ALTER TABLE orders {operation}{clause};");
+            assert_answer(
+                &format!("{set}: {operation}{clause}"),
+                LAB_TABLES,
+                &format!("{set};\n{alter}"),
+                UNKNOWN,
+            );
+            // Sticky: neither a later OFF nor a later ON brings it back.
+            for later in ["SET old_alter_table = OFF", "SET old_alter_table = ON"] {
+                assert_answer(
+                    &format!("{set}, then {later}: {operation}{clause}"),
+                    LAB_TABLES,
+                    &format!("{set};\n{later};\n{alter}"),
+                    UNKNOWN,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn what_ran_before_an_unreadable_old_alter_table_setting_keeps_its_answer() {
+    assert_every_answer(
+        "before",
+        LAB_TABLES,
+        "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;
+         SET GLOBAL old_alter_table = ON;
+         ALTER TABLE orders ADD COLUMN other VARCHAR(255) NULL;",
+        &[INSTANT, "not checked", UNKNOWN],
+    );
+}
+
+#[test]
+fn with_old_alter_table_on_a_change_outside_the_eight_is_unknown_even_with_an_algorithm() {
+    let set = "SET SESSION old_alter_table = ON";
+    for (name, setup, operation) in [
+        ("add foreign key", &[][..], MYISAM_ADD_FK),
+        ("add fulltext", &[][..], "ADD FULLTEXT INDEX ft_note (note)"),
+        (
+            "lengthen a varchar",
+            &[][..],
+            "MODIFY COLUMN note VARCHAR(100) NULL",
+        ),
+        (
+            "int to smallint",
+            &[][..],
+            "MODIFY COLUMN amount SMALLINT NOT NULL",
+        ),
+        (
+            "change that renames",
+            &[][..],
+            "CHANGE COLUMN note memo VARCHAR(50) NULL",
+        ),
+        (
+            "an expression default",
+            &[][..],
+            "ADD COLUMN token CHAR(36) NULL DEFAULT (UUID())",
+        ),
+        (
+            "drop an indexed column",
+            &[INDEX_ON_AMOUNT][..],
+            "DROP COLUMN amount",
+        ),
+    ] {
+        for clause in ["", ", ALGORITHM=INPLACE", ", ALGORITHM=INSTANT"] {
+            assert_answer(
+                &format!("{name}{clause}"),
+                &lab_after(setup),
+                &format!("{set};\nALTER TABLE orders {operation}{clause};"),
+                UNKNOWN,
+            );
+        }
+    }
+}
+
+#[test]
+fn with_old_alter_table_on_a_table_kilit_cannot_vouch_for_is_unknown() {
+    let set = "SET SESSION old_alter_table = ON;\n";
+    let alter = format!("ALTER TABLE orders {ADD_COLUMN}");
+    for clause in ["", ", ALGORITHM=INSTANT"] {
+        let sql = format!("{set}{alter}{clause};");
+        // MyISAM (decision 6), COMPRESSED, COMPACT and REDUNDANT (decision 8).
+        for (name, schema) in [
+            ("myisam", lab_tables_with(Some("MyISAM"), "")),
+            ("compressed", lab_with_options(COMPRESSED, &[])),
+            ("key block size", lab_with_options(" KEY_BLOCK_SIZE=8", &[])),
+            ("compact", lab_with_options(COMPACT_OPTION, &[])),
+            ("redundant", lab_with_options(REDUNDANT_OPTION, &[])),
+            // Decision 8: a FULLTEXT index changes the DYNAMIC answer.
+            (
+                "fulltext",
+                dump_orders("", ",\n  FULLTEXT KEY `ft_note` (`note`)"),
+            ),
+            // A table kilit has not seen.
+            ("missing", String::new()),
+        ] {
+            assert_answer(&format!("{name}{clause}"), &schema, &sql, UNKNOWN);
+        }
+    }
+}
+
+#[test]
+fn laravel_s_foreign_key_checks_lines_are_not_mistaken_for_old_alter_table() {
+    // The set forms Laravel writes do not name old_alter_table.
+    assert_eq!(
+        on_mysql_84(
+            "",
+            "SET FOREIGN_KEY_CHECKS=0;
+             alter table `orders` add `coupon` varchar(255) null;
+             SET FOREIGN_KEY_CHECKS=1;"
+        ),
+        ["not checked", INSTANT, "not checked"]
+    );
+}
+
+// Regression tests for what the step 9b review found. The server runs are
+// the review's: the results below are what MySQL 8.0.46 and 8.4.13 did.
+
+#[test]
+fn a_global_keyword_in_front_of_a_list_carries_to_old_alter_table_and_makes_it_unknown() {
+    // SET GLOBAL foreign_key_checks = 1, old_alter_table = ON: the GLOBAL
+    // keyword applies to every assignment of the list, the session keeps
+    // old_alter_table = OFF. kilit cannot tell which variable is which.
+    for set in [
+        "SET GLOBAL foreign_key_checks = 1, old_alter_table = ON",
+        "SET PERSIST foreign_key_checks = 1, old_alter_table = ON",
+        "SET PERSIST_ONLY foreign_key_checks = 1, old_alter_table = ON",
+        "SET GLOBAL old_alter_table = ON, foreign_key_checks = 1",
+    ] {
+        assert_answer(
+            set,
+            LAB_TABLES,
+            &format!("{set};\nALTER TABLE orders {ADD_COLUMN};"),
+            UNKNOWN,
+        );
+    }
+}
+
+#[test]
+fn a_string_value_the_server_refuses_for_old_alter_table_makes_every_later_alter_unknown() {
+    // MySQL gives 1231 for '1', 'TRUE', '0' and 'FALSE' and keeps the old
+    // value; only the words ON and OFF are accepted as strings.
+    for value in ["'1'", "'TRUE'", "'true'", "'0'", "'FALSE'", "'false'"] {
+        assert_answer(
+            value,
+            LAB_TABLES,
+            &format!(
+                "SET SESSION old_alter_table = ON;\nSET old_alter_table = {value};\n\
+                 ALTER TABLE orders {ADD_COLUMN};"
+            ),
+            UNKNOWN,
+        );
+    }
+    // 'OFF' in any letter case turns it off.
+    for value in ["'OFF'", "'off'", "'Off'", "'oFF'"] {
+        assert_answer(
+            value,
+            LAB_TABLES,
+            &format!(
+                "SET SESSION old_alter_table = ON;\nSET old_alter_table = {value};\n\
+                 ALTER TABLE orders {ADD_COLUMN};"
+            ),
+            INSTANT,
+        );
+    }
+}
+
+#[test]
+fn a_changed_sql_mode_makes_an_index_on_a_compact_table_unknown() {
+    // MySQL shortens the key and gives warning 1071 instead of failing when
+    // sql_mode is not strict.
+    for options in [COMPACT_OPTION, REDUNDANT_OPTION] {
+        let schema = lab_with_options(options, &[]);
+        for operation in [
+            "ADD INDEX idx_email (email)",
+            "ADD UNIQUE INDEX uq_email (email)",
+        ] {
+            assert_answer(
+                &format!("{options}: {operation}"),
+                &schema,
+                &format!("SET SESSION sql_mode = '';\nALTER TABLE orders {operation};"),
+                UNKNOWN,
+            );
+        }
+    }
+}
+
+#[test]
+fn a_descending_index_on_a_compact_table_is_unknown() {
+    for options in [COMPACT_OPTION, REDUNDANT_OPTION] {
+        let schema = lab_with_options(options, &[]);
+        for operation in [
+            "ADD INDEX idx_email (email DESC)",
+            "ADD INDEX idx_email (email(100) DESC)",
+        ] {
+            assert_answer(
+                &format!("{options}: {operation}"),
+                &schema,
+                &format!("ALTER TABLE orders {operation};"),
+                UNKNOWN,
+            );
+        }
+    }
+}
+
+#[test]
+fn a_1071_on_a_compact_table_has_no_note_about_duplicate_values() {
+    // The key is too long whatever the data holds: the only note is the
+    // assumption of a strict SQL mode.
+    let schema = lab_with_options(COMPACT_OPTION, &[]);
+    for operation in [
+        "ALTER TABLE orders ADD UNIQUE INDEX uq_email (email);",
+        "ALTER TABLE orders ADD INDEX idx_email (email);",
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            match predictions_on(server, &schema, operation).pop().unwrap() {
+                Prediction::Measured {
+                    verdict: Verdict::Fails { code, .. },
+                    notes,
+                    ..
+                } => {
+                    assert_eq!(code, 1071, "{operation} on {server}");
+                    assert_eq!(notes.len(), 1, "{operation} on {server}: {notes:?}");
+                    assert!(
+                        notes[0].contains("strict SQL mode"),
+                        "{operation} on {server}: {notes:?}"
+                    );
+                }
+                other => panic!("{operation} on {server}: {other:?}"),
+            }
+        }
     }
 }

@@ -1,0 +1,6 @@
+title = "Drop a secondary index of a COMPACT table"
+row_format = "COMPACT"
+setup = [
+    "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)",
+]
+operation = "DROP INDEX idx_orders_amount"

@@ -6654,6 +6654,1775 @@
       ]
     },
     {
+      "id": "compact-add-index",
+      "title": "Add a secondary index to a COMPACT table",
+      "session": [],
+      "row_format": "COMPACT",
+      "statement": "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "compact-add-index-key-at-limit",
+      "title": "Add an index of 764 bytes to a COMPACT table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(191) NULL"
+      ],
+      "session": [],
+      "row_format": "COMPACT",
+      "statement": "ALTER TABLE orders ADD INDEX idx_code (code)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "compact-add-index-key-over-limit",
+      "title": "Add an index of more than 767 bytes to a COMPACT table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(192) NULL"
+      ],
+      "session": [],
+      "row_format": "COMPACT",
+      "statement": "ALTER TABLE orders ADD INDEX idx_code (code)",
+      "verdict": {
+        "result": "fails",
+        "code": 1071,
+        "message": "Specified key was too long; max key length is 767 bytes"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        }
+      ]
+    },
+    {
+      "id": "compact-add-nullable-column",
+      "title": "Add a nullable column to a COMPACT table",
+      "session": [],
+      "row_format": "COMPACT",
+      "statement": "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "compact-add-unique-index",
+      "title": "Add a unique index on a 255-character utf8mb4 column of a COMPACT table",
+      "session": [],
+      "row_format": "COMPACT",
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_email (email)",
+      "verdict": {
+        "result": "fails",
+        "code": 1071,
+        "message": "Specified key was too long; max key length is 767 bytes"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        }
+      ]
+    },
+    {
+      "id": "compact-add-unique-index-key-at-limit",
+      "title": "Add a unique index of 764 bytes to a COMPACT table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(191) NULL"
+      ],
+      "session": [],
+      "row_format": "COMPACT",
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_code (code)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "compact-add-unique-index-key-over-limit",
+      "title": "Add a unique index of more than 767 bytes to a COMPACT table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(192) NULL"
+      ],
+      "session": [],
+      "row_format": "COMPACT",
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_code (code)",
+      "verdict": {
+        "result": "fails",
+        "code": 1071,
+        "message": "Specified key was too long; max key length is 767 bytes"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        }
+      ]
+    },
+    {
+      "id": "compact-drop-column",
+      "title": "Drop a column of a COMPACT table",
+      "session": [],
+      "row_format": "COMPACT",
+      "statement": "ALTER TABLE orders DROP COLUMN note",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "compact-drop-index",
+      "title": "Drop a secondary index of a COMPACT table",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)"
+      ],
+      "session": [],
+      "row_format": "COMPACT",
+      "statement": "ALTER TABLE orders DROP INDEX idx_orders_amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "compact-int-to-bigint",
+      "title": "Change a column type from INT to BIGINT on a COMPACT table",
+      "session": [],
+      "row_format": "COMPACT",
+      "statement": "ALTER TABLE orders MODIFY COLUMN amount BIGINT NOT NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Need to rebuild the table to change column type. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Cannot change column type INPLACE. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Cannot change column type INPLACE. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Cannot change column type INPLACE. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "compact-rename-column",
+      "title": "Rename a column of a COMPACT table",
+      "session": [],
+      "row_format": "COMPACT",
+      "statement": "ALTER TABLE orders RENAME COLUMN note TO memo",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "compact-set-column-default",
+      "title": "Set a column default on a COMPACT table",
+      "session": [],
+      "row_format": "COMPACT",
+      "statement": "ALTER TABLE orders ALTER COLUMN amount SET DEFAULT 0",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "compressed-add-index",
+      "title": "Add a secondary index to a COMPRESSED table",
+      "session": [],
+      "row_format": "COMPRESSED",
+      "statement": "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "compressed-add-nullable-column",
+      "title": "Add a nullable column to a COMPRESSED table",
+      "session": [],
+      "row_format": "COMPRESSED",
+      "statement": "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": true,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "compressed-add-unique-index",
+      "title": "Add a unique index on a 255-character utf8mb4 column of a COMPRESSED table",
+      "session": [],
+      "row_format": "COMPRESSED",
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_email (email)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "compressed-drop-column",
+      "title": "Drop a column of a COMPRESSED table",
+      "session": [],
+      "row_format": "COMPRESSED",
+      "statement": "ALTER TABLE orders DROP COLUMN note",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": true,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "compressed-drop-index",
+      "title": "Drop a secondary index of a COMPRESSED table",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)"
+      ],
+      "session": [],
+      "row_format": "COMPRESSED",
+      "statement": "ALTER TABLE orders DROP INDEX idx_orders_amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "compressed-int-to-bigint",
+      "title": "Change a column type from INT to BIGINT on a COMPRESSED table",
+      "session": [],
+      "row_format": "COMPRESSED",
+      "statement": "ALTER TABLE orders MODIFY COLUMN amount BIGINT NOT NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Need to rebuild the table to change column type. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Cannot change column type INPLACE. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Cannot change column type INPLACE. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Cannot change column type INPLACE. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "compressed-rename-column",
+      "title": "Rename a column of a COMPRESSED table",
+      "session": [],
+      "row_format": "COMPRESSED",
+      "statement": "ALTER TABLE orders RENAME COLUMN note TO memo",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "compressed-set-column-default",
+      "title": "Set a column default on a COMPRESSED table",
+      "session": [],
+      "row_format": "COMPRESSED",
+      "statement": "ALTER TABLE orders ALTER COLUMN amount SET DEFAULT 0",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
       "id": "drop-column",
       "title": "Drop a column",
       "session": [],
@@ -10475,6 +12244,97 @@
       ]
     },
     {
+      "id": "key-block-size-add-nullable-column",
+      "title": "Add a nullable column to a table with KEY_BLOCK_SIZE=8 and no ROW_FORMAT",
+      "session": [],
+      "key_block_size": 8,
+      "statement": "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": true,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
       "id": "make-column-nullable",
       "title": "Make a NOT NULL column nullable",
       "session": [],
@@ -13116,6 +14976,1763 @@
           "result": "rejected",
           "code": 1138,
           "message": "Invalid use of NULL value"
+        }
+      ]
+    },
+    {
+      "id": "old-alter-table-add-index",
+      "title": "Add a secondary index with old_alter_table on",
+      "session": [
+        "SET SESSION old_alter_table = ON"
+      ],
+      "statement": "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "old-alter-table-add-nullable-column",
+      "title": "Add a nullable column with old_alter_table on",
+      "session": [
+        "SET SESSION old_alter_table = ON"
+      ],
+      "statement": "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "old-alter-table-add-unique-index",
+      "title": "Add a unique index on a 255-character utf8mb4 column with old_alter_table on",
+      "session": [
+        "SET SESSION old_alter_table = ON"
+      ],
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_email (email)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "old-alter-table-drop-column",
+      "title": "Drop a column with old_alter_table on",
+      "session": [
+        "SET SESSION old_alter_table = ON"
+      ],
+      "statement": "ALTER TABLE orders DROP COLUMN note",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "old-alter-table-drop-index",
+      "title": "Drop a secondary index with old_alter_table on",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)"
+      ],
+      "session": [
+        "SET SESSION old_alter_table = ON"
+      ],
+      "statement": "ALTER TABLE orders DROP INDEX idx_orders_amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "old-alter-table-int-to-bigint",
+      "title": "Change a column type from INT to BIGINT with old_alter_table on",
+      "session": [
+        "SET SESSION old_alter_table = ON"
+      ],
+      "statement": "ALTER TABLE orders MODIFY COLUMN amount BIGINT NOT NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Need to rebuild the table to change column type. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Cannot change column type INPLACE. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Cannot change column type INPLACE. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "old-alter-table-rename-column",
+      "title": "Rename a column with old_alter_table on",
+      "session": [
+        "SET SESSION old_alter_table = ON"
+      ],
+      "statement": "ALTER TABLE orders RENAME COLUMN note TO memo",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "old-alter-table-set-column-default",
+      "title": "Set a column default with old_alter_table on",
+      "session": [
+        "SET SESSION old_alter_table = ON"
+      ],
+      "statement": "ALTER TABLE orders ALTER COLUMN amount SET DEFAULT 0",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "redundant-add-index",
+      "title": "Add a secondary index to a REDUNDANT table",
+      "session": [],
+      "row_format": "REDUNDANT",
+      "statement": "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "redundant-add-index-key-at-limit",
+      "title": "Add an index of 764 bytes to a REDUNDANT table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(191) NULL"
+      ],
+      "session": [],
+      "row_format": "REDUNDANT",
+      "statement": "ALTER TABLE orders ADD INDEX idx_code (code)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "redundant-add-index-key-over-limit",
+      "title": "Add an index of more than 767 bytes to a REDUNDANT table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(192) NULL"
+      ],
+      "session": [],
+      "row_format": "REDUNDANT",
+      "statement": "ALTER TABLE orders ADD INDEX idx_code (code)",
+      "verdict": {
+        "result": "fails",
+        "code": 1071,
+        "message": "Specified key was too long; max key length is 767 bytes"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        }
+      ]
+    },
+    {
+      "id": "redundant-add-nullable-column",
+      "title": "Add a nullable column to a REDUNDANT table",
+      "session": [],
+      "row_format": "REDUNDANT",
+      "statement": "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "redundant-add-unique-index",
+      "title": "Add a unique index on a 255-character utf8mb4 column of a REDUNDANT table",
+      "session": [],
+      "row_format": "REDUNDANT",
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_email (email)",
+      "verdict": {
+        "result": "fails",
+        "code": 1071,
+        "message": "Specified key was too long; max key length is 767 bytes"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        }
+      ]
+    },
+    {
+      "id": "redundant-add-unique-index-key-at-limit",
+      "title": "Add a unique index of 764 bytes to a REDUNDANT table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(191) NULL"
+      ],
+      "session": [],
+      "row_format": "REDUNDANT",
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_code (code)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "redundant-add-unique-index-key-over-limit",
+      "title": "Add a unique index of more than 767 bytes to a REDUNDANT table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(192) NULL"
+      ],
+      "session": [],
+      "row_format": "REDUNDANT",
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_code (code)",
+      "verdict": {
+        "result": "fails",
+        "code": 1071,
+        "message": "Specified key was too long; max key length is 767 bytes"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 767 bytes"
+        }
+      ]
+    },
+    {
+      "id": "redundant-drop-column",
+      "title": "Drop a column of a REDUNDANT table",
+      "session": [],
+      "row_format": "REDUNDANT",
+      "statement": "ALTER TABLE orders DROP COLUMN note",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "redundant-drop-index",
+      "title": "Drop a secondary index of a REDUNDANT table",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)"
+      ],
+      "session": [],
+      "row_format": "REDUNDANT",
+      "statement": "ALTER TABLE orders DROP INDEX idx_orders_amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "redundant-int-to-bigint",
+      "title": "Change a column type from INT to BIGINT on a REDUNDANT table",
+      "session": [],
+      "row_format": "REDUNDANT",
+      "statement": "ALTER TABLE orders MODIFY COLUMN amount BIGINT NOT NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Need to rebuild the table to change column type. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Cannot change column type INPLACE. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Cannot change column type INPLACE. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Cannot change column type INPLACE. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "redundant-rename-column",
+      "title": "Rename a column of a REDUNDANT table",
+      "session": [],
+      "row_format": "REDUNDANT",
+      "statement": "ALTER TABLE orders RENAME COLUMN note TO memo",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "redundant-set-column-default",
+      "title": "Set a column default on a REDUNDANT table",
+      "session": [],
+      "row_format": "REDUNDANT",
+      "statement": "ALTER TABLE orders ALTER COLUMN amount SET DEFAULT 0",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
         }
       ]
     },

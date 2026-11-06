@@ -1,0 +1,6 @@
+title = "Drop a secondary index with old_alter_table on"
+setup = [
+    "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)",
+]
+session = ["SET SESSION old_alter_table = ON"]
+operation = "DROP INDEX idx_orders_amount"

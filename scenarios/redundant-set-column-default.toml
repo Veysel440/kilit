@@ -1,0 +1,3 @@
+title = "Set a column default on a REDUNDANT table"
+row_format = "REDUNDANT"
+operation = "ALTER COLUMN amount SET DEFAULT 0"

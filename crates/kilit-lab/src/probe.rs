@@ -32,7 +32,13 @@ pub async fn measure<'a>(conn: &mut Conn, scenario: &'a Scenario) -> Result<Meas
     for variant in Variant::ALL {
         observations.push(run(conn, scenario, variant).await?);
     }
-    let verdict = verdict::decide(&observations);
+    // Only a session with old_alter_table runs without an ALGORITHM clause
+    // differently from the variants that force one.
+    let verdict = if scenario.sets_old_alter_table() {
+        verdict::decide_as_run(&observations)
+    } else {
+        verdict::decide(&observations)
+    };
     Ok(Measurement {
         scenario,
         observations,
@@ -47,7 +53,7 @@ async fn run(conn: &mut Conn, scenario: &Scenario, variant: Variant) -> Result<O
     if !conn.reset().await? {
         return Err("the server cannot reset a session (COM_RESET_CONNECTION)".into());
     }
-    fixture::reset(conn, scenario.engine).await?;
+    fixture::reset(conn, scenario.engine, &scenario.table_options()).await?;
     for statement in &scenario.setup {
         conn.query_drop(statement.as_str())
             .await
@@ -57,6 +63,9 @@ async fn run(conn: &mut Conn, scenario: &Scenario, variant: Variant) -> Result<O
         conn.query_drop(statement.as_str()).await?;
     }
 
+    if scenario.engine.is_none() {
+        check_row_format(conn, scenario.innodb_row_format()).await?;
+    }
     let before = table_state(conn, scenario.engine).await?;
     let outcome = match conn.query_drop(scenario.statement(variant)).await {
         Ok(()) => {
@@ -130,6 +139,23 @@ async fn table_state(conn: &mut Conn, engine: Option<&str>) -> Result<TableState
         .await?;
     let copies = copies.ok_or("performance_schema does not count the stage `copy to tmp table`")?;
     Ok(TableState::Copies(copies))
+}
+
+/// Checks that InnoDB gave `orders` the row format the scenario asks for,
+/// the server's default included, so that an option the server ignored
+/// cannot pass for a measurement of it.
+async fn check_row_format(conn: &mut Conn, expected: &str) -> Result<()> {
+    let actual: Option<String> = conn
+        .query_first(format!(
+            "SELECT ROW_FORMAT FROM information_schema.INNODB_TABLES
+             WHERE NAME = '{DATABASE}/orders'"
+        ))
+        .await?;
+    if actual.as_deref() == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!("orders should be {expected}, but InnoDB says {actual:?}").into())
+    }
 }
 
 async fn innodb_state(conn: &mut Conn) -> Result<TableState> {

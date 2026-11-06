@@ -1,0 +1,3 @@
+title = "Change a column type from INT to BIGINT on a REDUNDANT table"
+row_format = "REDUNDANT"
+operation = "MODIFY COLUMN amount BIGINT NOT NULL"

@@ -1,0 +1,3 @@
+title = "Change a column type from INT to BIGINT on a COMPRESSED table"
+row_format = "COMPRESSED"
+operation = "MODIFY COLUMN amount BIGINT NOT NULL"

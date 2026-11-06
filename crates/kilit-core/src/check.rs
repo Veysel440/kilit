@@ -15,11 +15,13 @@ use std::fmt::Write as _;
 
 use crate::knowledge::ServerResults;
 use crate::modify::{Change, changes};
+use crate::parse::REJECTED_BY;
 use crate::results::{Server, Variant, Verdict};
 use crate::schema::{ConstraintKind, Schema, TableState, has_descending, names_foreign_key_index};
 use crate::statement::{
     Alter, Check, CheckColumns, Column, DataType, Engine, ForeignKey, ForeignKeyAction, Index,
-    IndexKind, IntegerSize, Lock, Operation, Position, Statement, StatementKind, Table, Variable,
+    IndexKind, IntegerSize, Lock, Operation, Position, RowFormat, Statement, StatementKind, Table,
+    Variable,
 };
 
 /// What kilit says about one statement of the input.
@@ -825,6 +827,387 @@ const ON_MYISAM: [(&str, &Case, &[Condition]); 11] = [
     ("drop-foreign-key", &MYISAM_DROP_FOREIGN_KEY, &[]),
 ];
 
+/// Tables with a row format other than DYNAMIC, the server's default, and
+/// changes run with `old_alter_table` on. The lab measured each change on
+/// its own: no answer measured on DYNAMIC, or with old_alter_table off, is
+/// given to them, and one change measured there says nothing about another.
+/// See [`Measured`] and [`measured_case`].
+///
+/// MySQL refuses INSTANT ADD and DROP COLUMN on a COMPRESSED table, and
+/// rebuilds it in place instead. `KEY_BLOCK_SIZE=8` without `ROW_FORMAT`
+/// makes a table COMPRESSED too.
+const COMPRESSED_ADD_COLUMN: Case = Case {
+    id: "compressed-add-column",
+    scenarios: &[
+        "compressed-add-nullable-column",
+        "key-block-size-add-nullable-column",
+    ],
+    exceptions: &[],
+};
+
+const COMPRESSED_DROP_COLUMN: Case = Case {
+    id: "compressed-drop-column",
+    scenarios: &["compressed-drop-column"],
+    exceptions: &[],
+};
+
+const COMPRESSED_RENAME_COLUMN: Case = Case {
+    id: "compressed-rename-column",
+    scenarios: &["compressed-rename-column"],
+    exceptions: &[],
+};
+
+const COMPRESSED_SET_COLUMN_DEFAULT: Case = Case {
+    id: "compressed-set-column-default",
+    scenarios: &["compressed-set-column-default"],
+    exceptions: &[],
+};
+
+const COMPRESSED_CHANGE_INTEGER_TYPE: Case = Case {
+    id: "compressed-change-integer-type",
+    scenarios: &["compressed-int-to-bigint"],
+    exceptions: &[],
+};
+
+const COMPRESSED_ADD_INDEX: Case = Case {
+    id: "compressed-add-index",
+    scenarios: &["compressed-add-index"],
+    exceptions: &[],
+};
+
+const COMPRESSED_ADD_UNIQUE_INDEX: Case = Case {
+    id: "compressed-add-unique-index",
+    scenarios: &["compressed-add-unique-index"],
+    exceptions: &[],
+};
+
+const COMPRESSED_DROP_INDEX: Case = Case {
+    id: "compressed-drop-index",
+    scenarios: &["compressed-drop-index"],
+    exceptions: &[],
+};
+
+const COMPACT_ADD_COLUMN: Case = Case {
+    id: "compact-add-column",
+    scenarios: &["compact-add-nullable-column"],
+    exceptions: &[],
+};
+
+const COMPACT_DROP_COLUMN: Case = Case {
+    id: "compact-drop-column",
+    scenarios: &["compact-drop-column"],
+    exceptions: &[],
+};
+
+const COMPACT_RENAME_COLUMN: Case = Case {
+    id: "compact-rename-column",
+    scenarios: &["compact-rename-column"],
+    exceptions: &[],
+};
+
+const COMPACT_SET_COLUMN_DEFAULT: Case = Case {
+    id: "compact-set-column-default",
+    scenarios: &["compact-set-column-default"],
+    exceptions: &[],
+};
+
+const COMPACT_CHANGE_INTEGER_TYPE: Case = Case {
+    id: "compact-change-integer-type",
+    scenarios: &["compact-int-to-bigint"],
+    exceptions: &[],
+};
+
+/// A key of one integer column, or of one utf8mb4 VARCHAR column of at most
+/// 767 bytes: see [`key_bytes`].
+const COMPACT_ADD_INDEX: Case = Case {
+    id: "compact-add-index",
+    scenarios: &["compact-add-index", "compact-add-index-key-at-limit"],
+    exceptions: &[],
+};
+
+const COMPACT_ADD_UNIQUE_INDEX: Case = Case {
+    id: "compact-add-unique-index",
+    scenarios: &["compact-add-unique-index-key-at-limit"],
+    exceptions: &[],
+};
+
+const COMPACT_DROP_INDEX: Case = Case {
+    id: "compact-drop-index",
+    scenarios: &["compact-drop-index"],
+    exceptions: &[],
+};
+
+/// A key of a COMPACT table holds at most 767 bytes: one utf8mb4 VARCHAR
+/// column longer than 191 characters, such as `email` VARCHAR(255).
+const COMPACT_ADD_KEY_TOO_LONG: Case = Case {
+    id: "compact-add-key-too-long",
+    scenarios: &[
+        "compact-add-index-key-over-limit",
+        "compact-add-unique-index-key-over-limit",
+        "compact-add-unique-index",
+    ],
+    exceptions: &[],
+};
+
+const REDUNDANT_ADD_COLUMN: Case = Case {
+    id: "redundant-add-column",
+    scenarios: &["redundant-add-nullable-column"],
+    exceptions: &[],
+};
+
+const REDUNDANT_DROP_COLUMN: Case = Case {
+    id: "redundant-drop-column",
+    scenarios: &["redundant-drop-column"],
+    exceptions: &[],
+};
+
+const REDUNDANT_RENAME_COLUMN: Case = Case {
+    id: "redundant-rename-column",
+    scenarios: &["redundant-rename-column"],
+    exceptions: &[],
+};
+
+const REDUNDANT_SET_COLUMN_DEFAULT: Case = Case {
+    id: "redundant-set-column-default",
+    scenarios: &["redundant-set-column-default"],
+    exceptions: &[],
+};
+
+const REDUNDANT_CHANGE_INTEGER_TYPE: Case = Case {
+    id: "redundant-change-integer-type",
+    scenarios: &["redundant-int-to-bigint"],
+    exceptions: &[],
+};
+
+/// A key of one integer column, or of one utf8mb4 VARCHAR column of at most
+/// 767 bytes: see [`key_bytes`].
+const REDUNDANT_ADD_INDEX: Case = Case {
+    id: "redundant-add-index",
+    scenarios: &["redundant-add-index", "redundant-add-index-key-at-limit"],
+    exceptions: &[],
+};
+
+const REDUNDANT_ADD_UNIQUE_INDEX: Case = Case {
+    id: "redundant-add-unique-index",
+    scenarios: &["redundant-add-unique-index-key-at-limit"],
+    exceptions: &[],
+};
+
+const REDUNDANT_DROP_INDEX: Case = Case {
+    id: "redundant-drop-index",
+    scenarios: &["redundant-drop-index"],
+    exceptions: &[],
+};
+
+/// A key of a REDUNDANT table holds at most 767 bytes: one utf8mb4 VARCHAR
+/// column longer than 191 characters, such as `email` VARCHAR(255).
+const REDUNDANT_ADD_KEY_TOO_LONG: Case = Case {
+    id: "redundant-add-key-too-long",
+    scenarios: &[
+        "redundant-add-index-key-over-limit",
+        "redundant-add-unique-index-key-over-limit",
+        "redundant-add-unique-index",
+    ],
+    exceptions: &[],
+};
+
+/// Every case of a table with a row format other than DYNAMIC.
+pub const ROW_FORMAT_CASES: [&Case; 26] = [
+    &COMPRESSED_ADD_COLUMN,
+    &COMPRESSED_DROP_COLUMN,
+    &COMPRESSED_RENAME_COLUMN,
+    &COMPRESSED_SET_COLUMN_DEFAULT,
+    &COMPRESSED_CHANGE_INTEGER_TYPE,
+    &COMPRESSED_ADD_INDEX,
+    &COMPRESSED_ADD_UNIQUE_INDEX,
+    &COMPRESSED_DROP_INDEX,
+    &COMPACT_ADD_COLUMN,
+    &COMPACT_DROP_COLUMN,
+    &COMPACT_RENAME_COLUMN,
+    &COMPACT_SET_COLUMN_DEFAULT,
+    &COMPACT_CHANGE_INTEGER_TYPE,
+    &COMPACT_ADD_INDEX,
+    &COMPACT_ADD_UNIQUE_INDEX,
+    &COMPACT_DROP_INDEX,
+    &COMPACT_ADD_KEY_TOO_LONG,
+    &REDUNDANT_ADD_COLUMN,
+    &REDUNDANT_DROP_COLUMN,
+    &REDUNDANT_RENAME_COLUMN,
+    &REDUNDANT_SET_COLUMN_DEFAULT,
+    &REDUNDANT_CHANGE_INTEGER_TYPE,
+    &REDUNDANT_ADD_INDEX,
+    &REDUNDANT_ADD_UNIQUE_INDEX,
+    &REDUNDANT_DROP_INDEX,
+    &REDUNDANT_ADD_KEY_TOO_LONG,
+];
+
+/// Without an `ALGORITHM` clause, or with `ALGORITHM=DEFAULT`, a session
+/// with `old_alter_table` on copies the table for every change.
+const OLD_ALTER_TABLE_ADD_COLUMN: Case = Case {
+    id: "old-alter-table-add-column",
+    scenarios: &["old-alter-table-add-nullable-column"],
+    exceptions: &[],
+};
+
+const OLD_ALTER_TABLE_DROP_COLUMN: Case = Case {
+    id: "old-alter-table-drop-column",
+    scenarios: &["old-alter-table-drop-column"],
+    exceptions: &[],
+};
+
+const OLD_ALTER_TABLE_RENAME_COLUMN: Case = Case {
+    id: "old-alter-table-rename-column",
+    scenarios: &["old-alter-table-rename-column"],
+    exceptions: &[],
+};
+
+const OLD_ALTER_TABLE_SET_COLUMN_DEFAULT: Case = Case {
+    id: "old-alter-table-set-column-default",
+    scenarios: &["old-alter-table-set-column-default"],
+    exceptions: &[],
+};
+
+const OLD_ALTER_TABLE_CHANGE_INTEGER_TYPE: Case = Case {
+    id: "old-alter-table-change-integer-type",
+    scenarios: &["old-alter-table-int-to-bigint"],
+    exceptions: &[],
+};
+
+const OLD_ALTER_TABLE_ADD_INDEX: Case = Case {
+    id: "old-alter-table-add-index",
+    scenarios: &["old-alter-table-add-index"],
+    exceptions: &[],
+};
+
+const OLD_ALTER_TABLE_ADD_UNIQUE_INDEX: Case = Case {
+    id: "old-alter-table-add-unique-index",
+    scenarios: &["old-alter-table-add-unique-index"],
+    exceptions: &[],
+};
+
+const OLD_ALTER_TABLE_DROP_INDEX: Case = Case {
+    id: "old-alter-table-drop-index",
+    scenarios: &["old-alter-table-drop-index"],
+    exceptions: &[],
+};
+
+/// Every case of a change run with `old_alter_table` on.
+pub const OLD_ALTER_TABLE_CASES: [&Case; 8] = [
+    &OLD_ALTER_TABLE_ADD_COLUMN,
+    &OLD_ALTER_TABLE_DROP_COLUMN,
+    &OLD_ALTER_TABLE_RENAME_COLUMN,
+    &OLD_ALTER_TABLE_SET_COLUMN_DEFAULT,
+    &OLD_ALTER_TABLE_CHANGE_INTEGER_TYPE,
+    &OLD_ALTER_TABLE_ADD_INDEX,
+    &OLD_ALTER_TABLE_ADD_UNIQUE_INDEX,
+    &OLD_ALTER_TABLE_DROP_INDEX,
+];
+
+/// Each scenario of [`OLD_ALTER_TABLE_CASES`] with the scenario that made
+/// the same change with old_alter_table off. A written `ALGORITHM` other
+/// than `DEFAULT` wins over old_alter_table: kilit gives the answer for the
+/// change without it only where the lab saw the forced run of the one leave
+/// exactly the traces of the other's.
+pub const OLD_ALTER_TABLE_TWINS: [(&str, &str); 8] = [
+    ("old-alter-table-add-nullable-column", "add-nullable-column"),
+    ("old-alter-table-drop-column", "drop-column"),
+    ("old-alter-table-rename-column", "rename-column"),
+    ("old-alter-table-set-column-default", "set-column-default"),
+    ("old-alter-table-add-index", "add-index"),
+    ("old-alter-table-add-unique-index", "add-unique-index"),
+    ("old-alter-table-drop-index", "drop-index"),
+    ("old-alter-table-int-to-bigint", "int-to-bigint"),
+];
+
+/// A situation the lab measured apart: its cases, by the InnoDB case each
+/// stands for, and what it measured about keys.
+struct Measured {
+    /// As kilit says it after "has not been measured": `on a COMPACT table`.
+    name: &'static str,
+    /// Where the InnoDB case's own measurements come from, for a note:
+    /// `on a DYNAMIC table`.
+    instead: &'static str,
+    cases: [(&'static str, &'static Case); 8],
+    /// The most bytes an index key holds.
+    key_bytes: u64,
+    /// The case of a longer key, if the lab measured one.
+    key_too_long: Option<&'static Case>,
+    /// Whether it is old_alter_table, which a written `ALGORITHM` overrides.
+    old_alter_table: bool,
+}
+
+const ON_COMPRESSED: Measured = Measured {
+    name: "on a COMPRESSED table",
+    instead: "on a DYNAMIC table",
+    cases: [
+        ("add-column", &COMPRESSED_ADD_COLUMN),
+        ("drop-column", &COMPRESSED_DROP_COLUMN),
+        ("rename-column", &COMPRESSED_RENAME_COLUMN),
+        ("set-column-default", &COMPRESSED_SET_COLUMN_DEFAULT),
+        ("change-integer-type", &COMPRESSED_CHANGE_INTEGER_TYPE),
+        ("add-index", &COMPRESSED_ADD_INDEX),
+        ("add-unique-index", &COMPRESSED_ADD_UNIQUE_INDEX),
+        ("drop-index", &COMPRESSED_DROP_INDEX),
+    ],
+    key_bytes: MAX_INDEX_BYTES,
+    key_too_long: None,
+    old_alter_table: false,
+};
+
+const ON_COMPACT: Measured = Measured {
+    name: "on a COMPACT table",
+    instead: "on a DYNAMIC table",
+    cases: [
+        ("add-column", &COMPACT_ADD_COLUMN),
+        ("drop-column", &COMPACT_DROP_COLUMN),
+        ("rename-column", &COMPACT_RENAME_COLUMN),
+        ("set-column-default", &COMPACT_SET_COLUMN_DEFAULT),
+        ("change-integer-type", &COMPACT_CHANGE_INTEGER_TYPE),
+        ("add-index", &COMPACT_ADD_INDEX),
+        ("add-unique-index", &COMPACT_ADD_UNIQUE_INDEX),
+        ("drop-index", &COMPACT_DROP_INDEX),
+    ],
+    key_bytes: 767,
+    key_too_long: Some(&COMPACT_ADD_KEY_TOO_LONG),
+    old_alter_table: false,
+};
+
+const ON_REDUNDANT: Measured = Measured {
+    name: "on a REDUNDANT table",
+    instead: "on a DYNAMIC table",
+    cases: [
+        ("add-column", &REDUNDANT_ADD_COLUMN),
+        ("drop-column", &REDUNDANT_DROP_COLUMN),
+        ("rename-column", &REDUNDANT_RENAME_COLUMN),
+        ("set-column-default", &REDUNDANT_SET_COLUMN_DEFAULT),
+        ("change-integer-type", &REDUNDANT_CHANGE_INTEGER_TYPE),
+        ("add-index", &REDUNDANT_ADD_INDEX),
+        ("add-unique-index", &REDUNDANT_ADD_UNIQUE_INDEX),
+        ("drop-index", &REDUNDANT_DROP_INDEX),
+    ],
+    key_bytes: 767,
+    key_too_long: Some(&REDUNDANT_ADD_KEY_TOO_LONG),
+    old_alter_table: false,
+};
+
+const WITH_OLD_ALTER_TABLE: Measured = Measured {
+    name: "with old_alter_table ON",
+    instead: "with it OFF",
+    cases: [
+        ("add-column", &OLD_ALTER_TABLE_ADD_COLUMN),
+        ("drop-column", &OLD_ALTER_TABLE_DROP_COLUMN),
+        ("rename-column", &OLD_ALTER_TABLE_RENAME_COLUMN),
+        ("set-column-default", &OLD_ALTER_TABLE_SET_COLUMN_DEFAULT),
+        ("change-integer-type", &OLD_ALTER_TABLE_CHANGE_INTEGER_TYPE),
+        ("add-index", &OLD_ALTER_TABLE_ADD_INDEX),
+        ("add-unique-index", &OLD_ALTER_TABLE_ADD_UNIQUE_INDEX),
+        ("drop-index", &OLD_ALTER_TABLE_DROP_INDEX),
+    ],
+    key_bytes: MAX_INDEX_BYTES,
+    key_too_long: None,
+    old_alter_table: true,
+};
+
 /// The cases a MODIFY or CHANGE can fall into, listed when kilit does not
 /// know the table.
 const MODIFY_CASES: [&Case; 12] = [
@@ -872,6 +1255,33 @@ pub fn check(statements: &[Statement], schema: &Schema, results: &ServerResults)
             if sql.contains("binlog_format") {
                 session.binlog_format_set = true;
             }
+            // Any scope, any value: a table without `ROW_FORMAT` may get
+            // another row format, and its keys another limit.
+            if sql.contains("innodb_default_row_format") {
+                session.default_row_format_set = true;
+                schema.default_row_format_changes();
+            }
+            if sql.contains("innodb_strict_mode") {
+                session.strict_mode_set = true;
+                schema.default_row_format_changes();
+            }
+            // Only a session value kilit reads counts: a global one, a
+            // PERSIST, or any form kilit cannot read leaves the session's
+            // value unknown.
+            let named = sql.matches("old_alter_table").count();
+            let read = match &statement.kind {
+                StatementKind::Set { variables } => variables
+                    .iter()
+                    .filter(|variable| variable.name == "old_alter_table")
+                    .count(),
+                _ => 0,
+            };
+            // `SET GLOBAL a = 1, old_alter_table = ON` sets the global value
+            // of both: a scope keyword carries to the assignments after it.
+            let scoped = sql.contains("global") || sql.contains("persist");
+            if named != read || (named > 0 && scoped) {
+                session.old_alter_table = OldAlterTable::Unknown(statement.line);
+            }
         }
         let prediction = match &statement.kind {
             StatementKind::Alter(alter) => predict(
@@ -883,7 +1293,7 @@ pub fn check(statements: &[Statement], schema: &Schema, results: &ServerResults)
                 &mut agreements,
             ),
             StatementKind::Set { variables } => {
-                session.apply(variables);
+                session.apply(variables, statement.line);
                 not_checked(format!(
                     "sets {} for the statements after it",
                     variables
@@ -965,6 +1375,28 @@ struct Session {
     /// MySQL refuses an expression default as unsafe for the binary log
     /// depends on it, and the lab measured it as `ROW`, the default.
     binlog_format_set: bool,
+    /// `old_alter_table`, which makes MySQL copy the table for a change
+    /// without an `ALGORITHM` clause.
+    old_alter_table: OldAlterTable,
+    /// The input names `innodb_default_row_format`, in any form kilit can
+    /// see. A table without `ROW_FORMAT` may then have any row format, old
+    /// tables too: MySQL gives a table it rebuilds the new default.
+    default_row_format_set: bool,
+    /// The input names `innodb_strict_mode`, in any form kilit can see. The
+    /// lab measured the default, which is ON.
+    strict_mode_set: bool,
+}
+
+/// `old_alter_table` in this session, as far as the input says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum OldAlterTable {
+    /// OFF, the MySQL default, or set to OFF.
+    #[default]
+    Off,
+    On,
+    /// The statement on this line sets it globally, to `DEFAULT`, or in a
+    /// form kilit cannot read. It stays unknown from there on.
+    Unknown(usize),
 }
 
 /// Whether the session's statements go to the binary log, as far as the
@@ -993,7 +1425,7 @@ enum Setting {
 }
 
 impl Session {
-    fn apply(&mut self, variables: &[Variable]) {
+    fn apply(&mut self, variables: &[Variable], line: usize) {
         for variable in variables {
             match variable.name.as_str() {
                 // A global value does not change this session's.
@@ -1006,6 +1438,21 @@ impl Session {
                         BinaryLog::On
                     } else {
                         BinaryLog::Other(variable.to_string())
+                    };
+                }
+                // `DEFAULT` takes the global value, which kilit cannot see.
+                // MySQL takes ON and OFF in quotes, but refuses '1' or 'TRUE'
+                // and keeps the value it had.
+                "old_alter_table" if !matches!(self.old_alter_table, OldAlterTable::Unknown(_)) => {
+                    let quoted = variable.value.starts_with(['\'', '"']);
+                    let word = variable.value.trim_matches(['\'', '"']);
+                    let refused = quoted
+                        && !(word.eq_ignore_ascii_case("ON") || word.eq_ignore_ascii_case("OFF"));
+                    self.old_alter_table = match Setting::parse(&variable.value) {
+                        _ if variable.global || refused => OldAlterTable::Unknown(line),
+                        Setting::On => OldAlterTable::On,
+                        Setting::Off => OldAlterTable::Off,
+                        Setting::ServerDefault | Setting::Unclear => OldAlterTable::Unknown(line),
                     };
                 }
                 _ => {}
@@ -1051,10 +1498,51 @@ fn predict<'r>(
         }
     };
     let table = schema.table(&alter.table);
+    if let OldAlterTable::Unknown(line) = session.old_alter_table {
+        return unknown(format!(
+            "line {line} sets old_alter_table globally, to DEFAULT, or in a form kilit cannot \
+             read, and with it ON MySQL copies the table"
+        ));
+    }
     // The engine decides which measurements apply, before any case.
     let myisam = match measured_engine(table, &alter.table) {
         Ok(myisam) => myisam,
         Err(reason) => return unknown(reason),
+    };
+    if let Some(known) = myisam {
+        if known.row_format.is_some() || known.key_block_size.is_some() {
+            return unknown(format!(
+                "{} is a MyISAM table with ROW_FORMAT or KEY_BLOCK_SIZE, which the lab has \
+                 not measured",
+                alter.table
+            ));
+        }
+        if session.old_alter_table == OldAlterTable::On {
+            return unknown(
+                "the input sets old_alter_table ON, which the lab has not measured on a MyISAM \
+                 table",
+            );
+        }
+    }
+    // So does the row format, and old_alter_table.
+    let measured = if myisam.is_some() {
+        None
+    } else {
+        match (
+            measured_row_format(table, &alter.table, session),
+            session.old_alter_table == OldAlterTable::On,
+        ) {
+            (Err(reason), _) => return unknown(reason),
+            (Ok(Some(row_format)), true) => {
+                return unknown(format!(
+                    "the input sets old_alter_table ON, which the lab has not measured {}",
+                    row_format.name
+                ));
+            }
+            (Ok(Some(row_format)), false) => Some(row_format),
+            (Ok(None), true) => Some(&WITH_OLD_ALTER_TABLE),
+            (Ok(None), false) => None,
+        }
     };
     if myisam.is_none()
         && let Operation::AddForeignKey(key) = operation
@@ -1098,11 +1586,14 @@ fn predict<'r>(
         session,
         schema,
     };
-    match myisam {
-        None => answer(case, &situation, variant, results, agreements, notes),
-        Some(table) => on_myisam(
+    match (myisam, measured) {
+        (Some(table), _) => on_myisam(
             operation, sql, case, table, &situation, variant, results, agreements, notes,
         ),
+        (None, Some(measured)) => measured_apart(
+            measured, operation, sql, case, &situation, variant, results, agreements, notes,
+        ),
+        (None, None) => answer(case, &situation, variant, results, agreements, notes),
     }
 }
 
@@ -1235,6 +1726,306 @@ fn parent_engine(key: &ForeignKey, schema: &Schema) -> Result<(), String> {
             key.referenced_table
         )),
     }
+}
+
+/// Which measurements an InnoDB table gets for its row format: `None` for
+/// DYNAMIC's, the server's default, the row format's own, or why there are
+/// none. A table without `ROW_FORMAT`, or with `ROW_FORMAT=DEFAULT`, is
+/// DYNAMIC, unless the input names `innodb_default_row_format`, and so is
+/// one kilit does not know or lost track of, unless something may have
+/// given it another row format.
+fn measured_row_format(
+    table: TableState<'_>,
+    name: &str,
+    session: &Session,
+) -> Result<Option<&'static Measured>, String> {
+    let default_changed = || {
+        Err(format!(
+            "the input names innodb_default_row_format, so {name} may have any row format: \
+             it writes none kilit knows"
+        ))
+    };
+    let known = match table {
+        TableState::Known(known) => known,
+        TableState::Lost {
+            row_format_unclear: true,
+            ..
+        } => {
+            return Err(format!(
+                "kilit lost track of {name}, which may have a row format other than DYNAMIC, \
+                 and answers for other row formats only when it knows the table"
+            ));
+        }
+        TableState::Lost { .. } | TableState::Missing if session.default_row_format_set => {
+            return default_changed();
+        }
+        TableState::Lost { .. } | TableState::Missing => return Ok(None),
+    };
+    let row_format = known.row_format.as_ref();
+    let key_block_size = known.key_block_size.as_deref();
+    if let Some(size) = key_block_size
+        && size.starts_with(['\'', '"', '`'])
+    {
+        return Err(format!(
+            "{REJECTED_BY} a quoted KEY_BLOCK_SIZE, such as {name}'s {size}"
+        ));
+    }
+    if let Some(size) = key_block_size
+        && size != "0"
+    {
+        // Any valid KEY_BLOCK_SIZE compresses the table; the lab measured 8.
+        return match row_format {
+            None | Some(RowFormat::Default | RowFormat::Compressed) if size == "8" => {
+                Ok(Some(&ON_COMPRESSED))
+            }
+            None | Some(RowFormat::Default | RowFormat::Compressed) => Err(format!(
+                "{name} is COMPRESSED with KEY_BLOCK_SIZE={size}, and the lab has measured \
+                 KEY_BLOCK_SIZE=8 only"
+            )),
+            Some(other @ (RowFormat::Dynamic | RowFormat::Compact | RowFormat::Redundant)) => {
+                Err(format!(
+                    "{name} writes KEY_BLOCK_SIZE={size} with ROW_FORMAT={other}, which MySQL \
+                     8.0.46 and 8.4.13 refuse unless innodb_strict_mode is OFF"
+                ))
+            }
+            Some(other) => Err(unmeasured_row_format(name, other)),
+        };
+    }
+    match row_format {
+        None | Some(RowFormat::Default) if session.default_row_format_set => default_changed(),
+        None | Some(RowFormat::Default | RowFormat::Dynamic) => Ok(None),
+        Some(_) if key_block_size.is_some() => Err(format!(
+            "{name} writes KEY_BLOCK_SIZE=0 with ROW_FORMAT={}, which the lab has not measured",
+            row_format.map(ToString::to_string).unwrap_or_default()
+        )),
+        Some(RowFormat::Compressed) => Ok(Some(&ON_COMPRESSED)),
+        Some(RowFormat::Compact) => Ok(Some(&ON_COMPACT)),
+        Some(RowFormat::Redundant) => Ok(Some(&ON_REDUNDANT)),
+        Some(other) => Err(unmeasured_row_format(name, other)),
+    }
+}
+
+/// Why a row format kilit does not know gets no answer.
+fn unmeasured_row_format(name: &str, row_format: &RowFormat) -> String {
+    match row_format {
+        RowFormat::Unknown => format!(
+            "kilit cannot tell the row format of {name}: the input names innodb_strict_mode or \
+             innodb_default_row_format before creating it without ROW_FORMAT"
+        ),
+        RowFormat::Other(written) if written.starts_with(['\'', '"', '`']) => {
+            format!("{REJECTED_BY} a quoted ROW_FORMAT, such as {name}'s {written}")
+        }
+        other => format!(
+            "{name} has ROW_FORMAT={other}, which the lab has not measured; it measured \
+             DYNAMIC, COMPRESSED, COMPACT and REDUNDANT"
+        ),
+    }
+}
+
+/// The answer in a situation the lab measured apart, a row format or
+/// old_alter_table: its own case of the change, if the lab measured it in
+/// this shape and situation, never the InnoDB case's answer. With
+/// old_alter_table, a written `ALGORITHM` other than `DEFAULT` wins, where
+/// the lab saw it win: see [`clause_wins`].
+#[allow(clippy::too_many_arguments)]
+fn measured_apart<'r>(
+    measured: &Measured,
+    operation: &Operation,
+    sql: &str,
+    innodb: &'static Case,
+    situation: &Situation<'_>,
+    variant: Variant,
+    results: &'r ServerResults,
+    agreements: &mut Agreements<'r>,
+    mut notes: Vec<String>,
+) -> Prediction {
+    let case = match measured_case(measured, operation, sql, innodb, situation, &mut notes) {
+        Ok(case) => case,
+        Err(reason) => return unknown(reason),
+    };
+    // A situation of the InnoDB case's that holds, or may hold, has not
+    // been measured here. The hidden ones become notes, from the InnoDB
+    // case's measurements, saying where they come from.
+    let mut hidden = Vec::new();
+    for (at, exception) in innodb.exceptions.iter().enumerate() {
+        if exception
+            .conditions
+            .iter()
+            .all(|condition| *condition == Condition::Hidden)
+        {
+            hidden.push((at, exception));
+            continue;
+        }
+        match holds(exception, situation) {
+            Applies::No => {}
+            Applies::Unmeasured(reason) => return unknown(reason),
+            Applies::Yes(why) => {
+                return unknown(format!(
+                    "{}, and the lab has not measured that {}",
+                    why.join(", and "),
+                    measured.name
+                ));
+            }
+            Applies::Maybe => {
+                return unknown(format!(
+                    "kilit cannot tell {}, and the lab has not measured that {}",
+                    exception.when, measured.name
+                ));
+            }
+        }
+    }
+    if measured.old_alter_table && variant.algorithm.is_some() {
+        if let Err(reason) = clause_wins(case, variant, results) {
+            return unknown(reason);
+        }
+        return answer(innodb, situation, variant, results, agreements, notes);
+    }
+    // A key too long fails whatever the rows hold.
+    let too_long = measured
+        .key_too_long
+        .is_some_and(|too_long| too_long.id == case.id);
+    for (at, exception) in hidden.into_iter().filter(|_| !too_long) {
+        let Ok(other) = agreements.agreed(innodb, Group::Exception(at), variant, results) else {
+            continue;
+        };
+        notes.push(format!(
+            "{}: not measured {}; {}, {} ({})",
+            exception.when,
+            measured.name,
+            measured.instead,
+            brief(&other),
+            scenario_list(exception.scenarios)
+        ));
+    }
+    answer(case, situation, variant, results, agreements, notes)
+}
+
+/// The case of a change in the InnoDB case `innodb` in a situation measured
+/// apart, if the lab measured that shape there: the shapes of its scenarios.
+fn measured_case(
+    measured: &Measured,
+    operation: &Operation,
+    sql: &str,
+    innodb: &Case,
+    situation: &Situation<'_>,
+    notes: &mut Vec<String>,
+) -> Result<&'static Case, String> {
+    let not_measured = |what: &str| Err(format!("{what} has not been measured {}", measured.name));
+    let Some(&(_, case)) = measured.cases.iter().find(|(id, _)| *id == innodb.id) else {
+        return not_measured(innodb.id);
+    };
+    let table = || match situation.table {
+        TableState::Known(table) => Ok(table),
+        _ => Err(format!(
+            "kilit does not know the table, and needs it for {}, which the lab measured in one \
+             shape {}",
+            innodb.id, measured.name
+        )),
+    };
+    match (innodb.id, operation) {
+        ("add-column", Operation::AddColumn { .. })
+        | ("drop-column", Operation::DropColumn { .. })
+        | ("rename-column", Operation::RenameColumn { .. })
+        | ("set-column-default", Operation::SetColumnDefault { .. }) => Ok(case),
+        ("change-integer-type", Operation::ModifyColumn { column, .. }) => {
+            let int = DataType::Integer {
+                size: IntegerSize::Int,
+                unsigned: false,
+            };
+            let bigint = DataType::Integer {
+                size: IntegerSize::Big,
+                unsigned: false,
+            };
+            let old = table()?.column(&column.name).map(|old| &old.data_type);
+            if old == Some(&int) && column.data_type == bigint {
+                Ok(case)
+            } else {
+                not_measured("an integer change other than INT to BIGINT")
+            }
+        }
+        ("add-index" | "add-unique-index", Operation::AddIndex(index)) => {
+            let table = table()?;
+            let [entry] = index.columns.as_slice() else {
+                return not_measured("an index of several columns");
+            };
+            if has_descending(sql) {
+                return not_measured("a descending index");
+            }
+            let session = situation.session;
+            if session.default_row_format_set || session.strict_mode_set {
+                return Err(
+                    "the input names innodb_default_row_format or innodb_strict_mode, which the \
+                     lab has not measured, and the most bytes a key holds may depend on them"
+                        .to_owned(),
+                );
+            }
+            let bytes = key_bytes(table, entry, measured.name)?;
+            if bytes <= measured.key_bytes {
+                return Ok(case);
+            }
+            let Some(too_long) = measured.key_too_long else {
+                return not_measured(&format!("a key longer than {} bytes", measured.key_bytes));
+            };
+            if session.sql_mode_set {
+                return not_measured(&format!(
+                    "a key longer than {} bytes after the input sets sql_mode",
+                    measured.key_bytes
+                ));
+            }
+            notes.push(ASSUMES_STRICT_SQL_MODE.to_owned());
+            Ok(too_long)
+        }
+        ("drop-index", Operation::DropIndex { name }) => {
+            let plain = table()?.indexes.iter().any(|index| {
+                index.kind == IndexKind::Plain
+                    && index
+                        .name
+                        .as_deref()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
+            });
+            if plain {
+                Ok(case)
+            } else {
+                not_measured(&format!(
+                    "dropping {name}, which is not a plain index kilit knows,"
+                ))
+            }
+        }
+        _ => not_measured(&format!("this form of {}", innodb.id)),
+    }
+}
+
+/// Whether a written `ALGORITHM` wins over old_alter_table for every
+/// scenario of `case` on this server: the lab's run of `variant` with
+/// old_alter_table on left exactly the traces of its run with it off.
+fn clause_wins(case: &Case, variant: Variant, results: &ServerResults) -> Result<(), String> {
+    let observed = |id: &str| {
+        results.scenario(id).and_then(|scenario| {
+            scenario
+                .observations
+                .iter()
+                .find(|observation| observation.variant == variant)
+                .map(|observation| &observation.outcome)
+        })
+    };
+    for id in case.scenarios {
+        let twin = OLD_ALTER_TABLE_TWINS
+            .iter()
+            .find(|(scenario, _)| scenario == id)
+            .map(|(_, twin)| *twin);
+        let same = twin.is_some_and(|twin| {
+            let (with, without) = (observed(id), observed(twin));
+            with.is_some() && with == without
+        });
+        if !same {
+            return Err(format!(
+                "the lab has not seen {variant} win over old_alter_table for {} on {}",
+                case.id,
+                results.server.name()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The answer for a MyISAM table: the MyISAM case of the change, if the lab
@@ -1464,13 +2255,18 @@ const ASSUMES_STRICT_SQL_MODE: &str = "assumes strict SQL mode, the MySQL defaul
 /// The most bytes a MyISAM key holds.
 const MYISAM_KEY_BYTES: u64 = 1000;
 
-/// The bytes a key of one column of a MyISAM table takes, for the types the
-/// lab measured: an integer, which is far below the limit, and a utf8mb4
-/// VARCHAR, at 4 bytes a character. A prefix, any other type, and any other
-/// character set have not been measured.
+/// The bytes a key of one column of a MyISAM table takes: see [`key_bytes`].
 fn myisam_key(table: &Table, entry: &str) -> Result<u64, String> {
-    let not_measured =
-        |what: String| Err(format!("{what} has not been measured on a MyISAM table"));
+    key_bytes(table, entry, "on a MyISAM table")
+}
+
+/// The bytes a key of one column takes, for the types the lab measured in
+/// a situation measured apart (`on a MyISAM table`): an integer, which is far
+/// below every limit, and a utf8mb4 VARCHAR, at 4 bytes a character. A
+/// prefix, any other type, and any other character set have not been
+/// measured.
+fn key_bytes(table: &Table, entry: &str, measured_on: &str) -> Result<u64, String> {
+    let not_measured = |what: String| Err(format!("{what} has not been measured {measured_on}"));
     if is_expression(entry) || has_prefix(entry) {
         return not_measured(format!("a key on {entry}"));
     }
@@ -8160,6 +8956,454 @@ mod tests {
         ] {
             assert!(
                 matches!(last_with(MYISAM_ORDERS, sql), Prediction::Unknown { .. }),
+                "{sql}"
+            );
+        }
+    }
+
+    /// [`SHOP`] with `options` after the character set of `orders`.
+    fn shop_with(options: &str) -> String {
+        let marker = "note VARCHAR(50) NULL\n        ) DEFAULT CHARSET=utf8mb4";
+        assert!(SHOP.contains(marker));
+        SHOP.replace(marker, &format!("{marker}{options}"))
+    }
+
+    /// The prediction for the last statement of `sql`, on [`SHOP`] with
+    /// `options` on `orders`.
+    fn on_orders_with(options: &str, sql: &str) -> Prediction {
+        predictions_with(&shop_with(options), sql).pop().unwrap()
+    }
+
+    fn case_id(prediction: &Prediction) -> &'static str {
+        match prediction {
+            Prediction::Measured { case, .. } => case,
+            other => panic!("expected a measured prediction, got {other:?}"),
+        }
+    }
+
+    const ADD_COUPON: &str = "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL";
+
+    #[test]
+    fn old_alter_table_on_in_each_session_form_copies_the_table() {
+        for set in [
+            "SET SESSION old_alter_table = ON",
+            "SET old_alter_table = 1",
+            "SET @@old_alter_table = ON",
+            "SET @@session.old_alter_table = TRUE",
+            "SET old_alter_table = 'ON'",
+            "SET old_alter_table = 'on'",
+            "SET LOCAL old_alter_table = ON",
+            "SET old_alter_table = ON, foreign_key_checks = 0",
+        ] {
+            for alter in [ADD_COUPON, &format!("{ADD_COUPON}, ALGORITHM=DEFAULT")] {
+                let prediction = on_shop("", &format!("{set};\n{alter}"));
+                assert_eq!(
+                    case_id(&prediction),
+                    "old-alter-table-add-column",
+                    "{set}; {alter}"
+                );
+                assert!(
+                    said(&prediction).starts_with("COPY"),
+                    "{set}: {prediction:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn old_alter_table_off_keeps_the_answer_without_it() {
+        for set in [
+            "SET old_alter_table = OFF",
+            "SET old_alter_table = 0",
+            "SET old_alter_table = FALSE",
+            "SET old_alter_table = 'OFF'",
+        ] {
+            let sql = format!("SET old_alter_table = ON;\n{set};\n{ADD_COUPON}");
+            assert_eq!(case_id(&on_shop("", &sql)), "add-column", "{set}");
+        }
+    }
+
+    #[test]
+    fn old_alter_table_set_in_a_form_kilit_cannot_follow_is_unknown_from_there_on() {
+        for set in [
+            "SET GLOBAL old_alter_table = ON",
+            "SET @@global.old_alter_table = ON",
+            "SET PERSIST old_alter_table = ON",
+            "SET PERSIST_ONLY old_alter_table = ON",
+            "SET old_alter_table = DEFAULT",
+            "SET old_alter_table = 2",
+            "SET old_alter_table = YES",
+            "SET old_alter_table = ON, @@global.old_alter_table = OFF",
+            "SET foreign_key_checks = 0, GLOBAL old_alter_table = ON",
+        ] {
+            for later in [
+                ADD_COUPON.to_owned(),
+                format!("{ADD_COUPON}, ALGORITHM=INSTANT"),
+                format!("SET old_alter_table = OFF;\n{ADD_COUPON}"),
+                "ALTER TABLE orders ADD INDEX idx_amount (amount)".to_owned(),
+            ] {
+                let sql = format!("{set};\n{later}");
+                let reason = reason(on_shop("", &sql));
+                assert!(reason.contains("sets old_alter_table"), "{sql}: {reason}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_written_algorithm_wins_over_old_alter_table_where_the_lab_saw_it() {
+        let on = "SET SESSION old_alter_table = ON;\n";
+        for (alter, case) in [
+            (format!("{ADD_COUPON}, ALGORITHM=INSTANT"), "add-column"),
+            (format!("{ADD_COUPON}, ALGORITHM=INPLACE"), "add-column"),
+            (
+                format!("{ADD_COUPON}, ALGORITHM=INPLACE, LOCK=NONE"),
+                "add-column",
+            ),
+            (format!("{ADD_COUPON}, ALGORITHM=COPY"), "add-column"),
+            (
+                "ALTER TABLE orders ADD INDEX idx_amount (amount), ALGORITHM=INPLACE".to_owned(),
+                "add-index",
+            ),
+            (
+                format!("{ADD_COUPON}, LOCK=NONE"),
+                "old-alter-table-add-column",
+            ),
+        ] {
+            let with = on_shop("", &format!("{on}{alter}"));
+            assert_eq!(case_id(&with), case, "{alter}");
+            if case == "add-column" || case == "add-index" {
+                assert_eq!(with, on_shop("", &alter), "{alter}");
+            }
+        }
+        let lock_none = on_shop("", &format!("{on}{ADD_COUPON}, LOCK=NONE"));
+        assert!(said(&lock_none).contains("1846"), "{lock_none:?}");
+    }
+
+    #[test]
+    fn with_old_alter_table_changes_the_lab_has_not_measured_are_unknown() {
+        let on = "SET SESSION old_alter_table = ON;\n";
+        for alter in [
+            "ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note)",
+            "ALTER TABLE orders MODIFY COLUMN amount SMALLINT NOT NULL",
+            "ALTER TABLE orders ADD COLUMN created DATE DEFAULT (CURDATE())",
+            "ALTER TABLE orders CHANGE COLUMN note memo VARCHAR(50) NULL",
+            "ALTER TABLE orders ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users (id), \
+             ALGORITHM=INPLACE",
+            "ALTER TABLE orders ADD INDEX idx_both (amount, note)",
+            "ALTER TABLE orders DROP COLUMN email, ALGORITHM=INSTANT",
+        ] {
+            let prediction = on_shop(
+                "ALTER TABLE orders ADD INDEX idx_email (email);",
+                &format!("{on}{alter}"),
+            );
+            assert!(
+                matches!(prediction, Prediction::Unknown { .. }),
+                "{alter}: {prediction:?}"
+            );
+        }
+        // A table kilit does not know may have a FULLTEXT index.
+        assert!(matches!(
+            predictions(&format!("{on}{ADD_COUPON}")).pop(),
+            Some(Prediction::Unknown { .. })
+        ));
+        // MyISAM was not measured with it.
+        let myisam = predictions_with(
+            "CREATE TABLE logs (id INT PRIMARY KEY, note VARCHAR(50)) ENGINE=MyISAM;",
+            &format!("{on}ALTER TABLE logs ADD COLUMN coupon INT NULL"),
+        );
+        assert!(matches!(myisam.last(), Some(Prediction::Unknown { .. })));
+    }
+
+    #[test]
+    fn each_row_format_gets_its_own_measurements() {
+        let compact_email = "ALTER TABLE orders ADD INDEX idx_email (email)";
+        for (options, alter, case) in [
+            (
+                " ROW_FORMAT=COMPRESSED",
+                ADD_COUPON,
+                "compressed-add-column",
+            ),
+            (" KEY_BLOCK_SIZE=8", ADD_COUPON, "compressed-add-column"),
+            (
+                " ROW_FORMAT=DEFAULT KEY_BLOCK_SIZE=8",
+                ADD_COUPON,
+                "compressed-add-column",
+            ),
+            (
+                " row_format=compressed, key_block_size 8",
+                ADD_COUPON,
+                "compressed-add-column",
+            ),
+            (" ROW_FORMAT=COMPACT", ADD_COUPON, "compact-add-column"),
+            (" ROW_FORMAT=REDUNDANT", ADD_COUPON, "redundant-add-column"),
+            (
+                " ROW_FORMAT=COMPACT",
+                compact_email,
+                "compact-add-key-too-long",
+            ),
+            (
+                " ROW_FORMAT=REDUNDANT",
+                compact_email,
+                "redundant-add-key-too-long",
+            ),
+            (
+                " ROW_FORMAT=COMPRESSED",
+                compact_email,
+                "compressed-add-index",
+            ),
+            (
+                " ROW_FORMAT=COMPACT",
+                "ALTER TABLE orders ADD INDEX idx_amount (amount)",
+                "compact-add-index",
+            ),
+            (
+                " ROW_FORMAT=COMPRESSED",
+                "ALTER TABLE orders MODIFY COLUMN amount BIGINT NOT NULL",
+                "compressed-change-integer-type",
+            ),
+            (" ROW_FORMAT=DYNAMIC", ADD_COUPON, "add-column"),
+            (" ROW_FORMAT=DEFAULT", ADD_COUPON, "add-column"),
+            (" KEY_BLOCK_SIZE=0", ADD_COUPON, "add-column"),
+            (
+                " ROW_FORMAT=DYNAMIC KEY_BLOCK_SIZE=0",
+                ADD_COUPON,
+                "add-column",
+            ),
+        ] {
+            let prediction = on_orders_with(options, alter);
+            assert_eq!(case_id(&prediction), case, "{options}: {alter}");
+        }
+        let too_long = on_orders_with(" ROW_FORMAT=COMPACT", compact_email);
+        let (_, verdict, notes) = measured(too_long);
+        assert!(verdict.contains("1071"), "{verdict}");
+        assert_eq!(notes, [ASSUMES_STRICT_SQL_MODE]);
+    }
+
+    #[test]
+    fn a_situation_measured_only_on_dynamic_is_a_note_that_says_so() {
+        let prediction = on_orders_with(
+            " ROW_FORMAT=COMPRESSED",
+            "ALTER TABLE orders ADD UNIQUE INDEX uq_email (email)",
+        );
+        let (case, _, notes) = measured(prediction);
+        assert_eq!(case, "compressed-add-unique-index");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].starts_with(
+                "if the columns hold duplicate values: not measured on a COMPRESSED table; \
+                 on a DYNAMIC table, fails with error 1062"
+            ),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn row_formats_the_lab_has_not_measured_are_unknown() {
+        for (options, says) in [
+            (" KEY_BLOCK_SIZE=4", "KEY_BLOCK_SIZE=8 only"),
+            (
+                " ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=16",
+                "KEY_BLOCK_SIZE=8 only",
+            ),
+            (" ROW_FORMAT=DYNAMIC KEY_BLOCK_SIZE=8", "refuse"),
+            (" ROW_FORMAT=COMPACT KEY_BLOCK_SIZE=8", "refuse"),
+            (" ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=0", "not measured"),
+            (" ROW_FORMAT=FIXED", "has not measured"),
+            (" ROW_FORMAT=COMPRESED", "has not measured"),
+            (
+                " ROW_FORMAT='COMPRESSED'",
+                "do not accept a quoted ROW_FORMAT",
+            ),
+            (
+                " KEY_BLOCK_SIZE='8'",
+                "do not accept a quoted KEY_BLOCK_SIZE",
+            ),
+        ] {
+            let reason = reason(on_orders_with(options, ADD_COUPON));
+            assert!(reason.contains(says), "{options}: {reason}");
+        }
+        let myisam = predictions_with(
+            "CREATE TABLE logs (id INT PRIMARY KEY) ENGINE=MyISAM ROW_FORMAT=FIXED;",
+            "ALTER TABLE logs ADD COLUMN coupon INT NULL",
+        );
+        assert!(matches!(myisam.as_slice(), [Prediction::Unknown { .. }]));
+    }
+
+    #[test]
+    fn changes_not_measured_on_a_row_format_are_unknown() {
+        for (setup, alter) in [
+            ("", "ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note)"),
+            ("", "ALTER TABLE orders MODIFY COLUMN note VARCHAR(60) NULL"),
+            (
+                "",
+                "ALTER TABLE orders MODIFY COLUMN amount SMALLINT NOT NULL",
+            ),
+            (
+                "",
+                "ALTER TABLE orders CHANGE COLUMN note memo VARCHAR(50) NULL",
+            ),
+            ("", "ALTER TABLE orders ADD INDEX idx_both (amount, note)"),
+            ("", "ALTER TABLE orders ADD INDEX idx_note (note(10))"),
+            (
+                "ALTER TABLE orders ADD INDEX idx_note (note);",
+                "ALTER TABLE orders DROP COLUMN note",
+            ),
+            (
+                "ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note);",
+                "ALTER TABLE orders ADD COLUMN coupon INT NULL",
+            ),
+            (
+                "ALTER TABLE orders ADD COLUMN body TEXT;",
+                "ALTER TABLE orders ADD INDEX idx_body (body(100))",
+            ),
+        ] {
+            for options in [" ROW_FORMAT=COMPACT", " ROW_FORMAT=COMPRESSED"] {
+                let prediction =
+                    predictions_with(&format!("{}\n{setup}", shop_with(options)), alter)
+                        .pop()
+                        .unwrap();
+                assert!(
+                    matches!(prediction, Prediction::Unknown { .. }),
+                    "{options}: {setup} {alter}: {prediction:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn innodb_default_row_format_makes_tables_without_a_row_format_unknown() {
+        for set in [
+            "SET GLOBAL innodb_default_row_format = COMPACT",
+            "SET PERSIST innodb_default_row_format = 'compact'",
+        ] {
+            // Old tables too: MySQL gives a table it rebuilds the new default.
+            let sql = format!("{set};\n{ADD_COUPON}");
+            assert!(
+                matches!(on_shop("", &sql), Prediction::Unknown { .. }),
+                "{set}"
+            );
+            assert!(matches!(
+                predictions(&sql).pop(),
+                Some(Prediction::Unknown { .. })
+            ));
+            // A written one stays, but not the limit of a key.
+            assert_eq!(
+                case_id(&on_orders_with(" ROW_FORMAT=COMPACT", &sql)),
+                "compact-add-column"
+            );
+            assert_eq!(
+                case_id(&on_orders_with(" ROW_FORMAT=DYNAMIC", &sql)),
+                "add-column"
+            );
+            let index = format!("{set};\nALTER TABLE orders ADD INDEX idx_amount (amount)");
+            assert!(matches!(
+                on_orders_with(" ROW_FORMAT=COMPACT", &index),
+                Prediction::Unknown { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn innodb_strict_mode_makes_new_tables_without_a_row_format_unknown() {
+        let sql = "SET SESSION innodb_strict_mode = OFF;
+            CREATE TABLE coupons (id INT PRIMARY KEY, code VARCHAR(20));
+            ALTER TABLE coupons ADD COLUMN note VARCHAR(50) NULL;
+            ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;
+            ALTER TABLE orders ADD INDEX idx_amount (amount)";
+        let predictions = predictions_with(&shop_with(" ROW_FORMAT=COMPACT"), sql);
+        assert!(
+            matches!(predictions[2], Prediction::Unknown { .. }),
+            "{predictions:?}"
+        );
+        assert_eq!(case_id(&predictions[3]), "compact-add-column");
+        assert!(
+            matches!(predictions[4], Prediction::Unknown { .. }),
+            "{predictions:?}"
+        );
+    }
+
+    #[test]
+    fn a_table_lost_with_a_written_row_format_is_unknown() {
+        for (options, setup, unknown_after) in [
+            ("", "ALTER TABLE orders ROW_FORMAT=COMPRESSED;", true),
+            ("", "ALTER TABLE orders KEY_BLOCK_SIZE=8;", true),
+            ("", "ALTER TABLE orders ENGINE=InnoDB;", false),
+            (
+                " ROW_FORMAT=COMPACT",
+                "ALTER TABLE orders ENGINE=InnoDB;",
+                true,
+            ),
+        ] {
+            let prediction =
+                predictions_with(&format!("{}\n{setup}", shop_with(options)), ADD_COUPON)
+                    .pop()
+                    .unwrap();
+            if unknown_after {
+                assert!(
+                    reason(prediction).contains("row format other than DYNAMIC"),
+                    "{options} {setup}"
+                );
+            } else {
+                assert_eq!(case_id(&prediction), "add-column", "{options} {setup}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_scope_keyword_carries_to_old_alter_table_after_it() {
+        // MySQL: the last GLOBAL or PERSIST keyword of a SET applies to the
+        // assignments after it that have none.
+        for set in [
+            "SET GLOBAL foreign_key_checks = 1, old_alter_table = ON",
+            "SET PERSIST foreign_key_checks = 1, old_alter_table = ON",
+        ] {
+            let reason = reason(on_shop("", &format!("{set};\n{ADD_COUPON}")));
+            assert!(reason.contains("sets old_alter_table"), "{set}: {reason}");
+        }
+    }
+
+    #[test]
+    fn a_quoted_value_mysql_refuses_for_old_alter_table_is_unknown() {
+        // MySQL refuses '1', 'TRUE', '0' and 'FALSE' with 1231 and keeps the
+        // value it had; it takes 'ON' and 'OFF'.
+        for value in ["'1'", "'TRUE'", "'0'", "'FALSE'", "'YES'"] {
+            let sql =
+                format!("SET old_alter_table = ON;\nSET old_alter_table = {value};\n{ADD_COUPON}");
+            assert!(
+                reason(on_shop("", &sql)).contains("sets old_alter_table"),
+                "{value}"
+            );
+        }
+        let sql = format!("SET old_alter_table = ON;\nSET old_alter_table = 'off';\n{ADD_COUPON}");
+        assert_eq!(case_id(&on_shop("", &sql)), "add-column");
+    }
+
+    #[test]
+    fn a_key_too_long_on_a_compact_table_has_no_note_about_the_rows() {
+        let prediction = on_orders_with(
+            " ROW_FORMAT=COMPACT",
+            "ALTER TABLE orders ADD UNIQUE INDEX uq_email (email)",
+        );
+        let (case, verdict, notes) = measured(prediction);
+        assert_eq!(case, "compact-add-key-too-long");
+        assert!(verdict.contains("1071"), "{verdict}");
+        assert_eq!(notes, [ASSUMES_STRICT_SQL_MODE]);
+    }
+
+    #[test]
+    fn a_compact_key_over_the_limit_after_sql_mode_or_descending_is_unknown() {
+        // With sql_mode '' MySQL shortens a plain key to 767 bytes, with a
+        // warning, instead of refusing it.
+        for sql in [
+            "SET SESSION sql_mode = '';\nALTER TABLE orders ADD INDEX idx_email (email)",
+            "ALTER TABLE orders ADD INDEX idx_email (email DESC)",
+            "ALTER TABLE orders ADD INDEX idx_amount (amount DESC)",
+        ] {
+            assert!(
+                matches!(
+                    on_orders_with(" ROW_FORMAT=COMPACT", sql),
+                    Prediction::Unknown { .. }
+                ),
                 "{sql}"
             );
         }

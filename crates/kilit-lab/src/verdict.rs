@@ -7,6 +7,11 @@
 //! server accepted is the default. That is checked, not assumed: the
 //! default run must leave exactly the same traces as the forced run of
 //! that algorithm, or the verdict is marked inconsistent.
+//!
+//! A session with `old_alter_table` on is the exception: without an
+//! `ALGORITHM` clause the server then copies the table, while a forced
+//! algorithm still wins. For such a scenario, [`decide_as_run`] takes the
+//! algorithm whose forced run left exactly the traces of the default run.
 
 use kilit_core::{Algorithm, Observation, Outcome, Variant, Verdict, Writes};
 
@@ -24,6 +29,32 @@ const NOT_SUPPORTED: [u16; 2] = [1845, 1846];
 /// If there is no server-default observation. The lab always runs every
 /// variant in `Variant::ALL`, so that would be a bug in the lab.
 pub fn decide(observations: &[Observation]) -> Verdict {
+    decide_by(observations, Pick::FirstAccepted)
+}
+
+/// Decides the verdict of a scenario whose session sets `old_alter_table`:
+/// the algorithm is the first, cheapest first, whose forced run left
+/// exactly the traces of the default run. The verdict is inconsistent when
+/// none did.
+///
+/// # Panics
+///
+/// As [`decide`].
+pub fn decide_as_run(observations: &[Observation]) -> Verdict {
+    decide_by(observations, Pick::SameAsDefault)
+}
+
+/// How a verdict picks the algorithm of the default run.
+#[derive(Clone, Copy)]
+enum Pick {
+    /// The first algorithm the server accepted when forced, which must have
+    /// left the traces of the default run.
+    FirstAccepted,
+    /// The first algorithm whose forced run left the traces of the default run.
+    SameAsDefault,
+}
+
+fn decide_by(observations: &[Observation], pick: Pick) -> Verdict {
     let outcome = |variant: Variant| {
         observations
             .iter()
@@ -44,10 +75,11 @@ pub fn decide(observations: &[Observation]) -> Verdict {
             ..
         } => {
             let algorithm = CHEAPEST_FIRST.into_iter().find(|&algorithm| {
-                matches!(
-                    outcome(Variant::forced(algorithm)),
-                    Some(Outcome::Accepted { .. })
-                )
+                let forced = outcome(Variant::forced(algorithm));
+                match pick {
+                    Pick::FirstAccepted => matches!(forced, Some(Outcome::Accepted { .. })),
+                    Pick::SameAsDefault => forced == Some(default),
+                }
             });
             let consistent = algorithm
                 .is_some_and(|algorithm| outcome(Variant::forced(algorithm)) == Some(default));
@@ -196,6 +228,96 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// What the lab saw for ADD COLUMN after `SET SESSION old_alter_table =
+    /// ON`, on both servers: the default run copies, a forced algorithm wins.
+    fn with_old_alter_table() -> Vec<Observation> {
+        observations([
+            accepted(1000, true, (0, 0)),
+            accepted(0, false, (0, 1)),
+            accepted(0, true, (0, 0)),
+            accepted(0, true, (0, 0)),
+            accepted(1000, true, (0, 0)),
+            rejected(1846),
+        ])
+    }
+
+    #[test]
+    fn with_old_alter_table_the_default_run_decides_the_algorithm() {
+        assert_eq!(
+            decide_as_run(&with_old_alter_table()),
+            Verdict::Runs {
+                algorithm: Some(Algorithm::Copy),
+                rebuilds_table: true,
+                copied_rows: Some(1000),
+                writes: Writes::Blocked,
+                consistent: true,
+            }
+        );
+        // The rule for every other scenario finds it inconsistent.
+        assert!(matches!(
+            decide(&with_old_alter_table()),
+            Verdict::Runs {
+                algorithm: Some(Algorithm::Instant),
+                consistent: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_default_run_like_no_forced_run_is_inconsistent_with_old_alter_table() {
+        let verdict = decide_as_run(&observations([
+            accepted(500, true, (0, 0)),
+            accepted(0, false, (0, 1)),
+            accepted(0, true, (0, 0)),
+            accepted(0, true, (0, 0)),
+            accepted(1000, true, (0, 0)),
+            rejected(1846),
+        ]));
+        assert!(matches!(
+            verdict,
+            Verdict::Runs {
+                algorithm: None,
+                consistent: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn both_rules_agree_where_the_first_accepted_run_is_the_default_run() {
+        let cases = [
+            [
+                accepted(0, false, (0, 1)),
+                accepted(0, false, (0, 1)),
+                accepted(0, true, (0, 0)),
+                accepted(0, true, (0, 0)),
+                accepted(1000, true, (0, 0)),
+                accepted(0, false, (0, 1)),
+            ],
+            [
+                accepted(1000, true, (0, 0)),
+                rejected(1846),
+                rejected(1846),
+                rejected(1846),
+                accepted(1000, true, (0, 0)),
+                rejected(1846),
+            ],
+            [
+                rejected(1138),
+                rejected(1138),
+                rejected(1138),
+                rejected(1138),
+                rejected(1265),
+                rejected(1138),
+            ],
+        ];
+        for outcomes in cases {
+            let observations = observations(outcomes);
+            assert_eq!(decide_as_run(&observations), decide(&observations));
+        }
     }
 
     #[test]

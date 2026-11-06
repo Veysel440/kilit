@@ -1,0 +1,3 @@
+title = "Add a nullable column to a table with KEY_BLOCK_SIZE=8 and no ROW_FORMAT"
+key_block_size = 8
+operation = "ADD COLUMN coupon VARCHAR(255) NULL"

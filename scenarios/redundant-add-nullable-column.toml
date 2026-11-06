@@ -1,0 +1,3 @@
+title = "Add a nullable column to a REDUNDANT table"
+row_format = "REDUNDANT"
+operation = "ADD COLUMN coupon VARCHAR(255) NULL"

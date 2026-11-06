@@ -23,40 +23,51 @@ const USERS_ROWS: u32 = 100;
 const TABLES: &str = include_str!("../../../scenarios/tables.sql");
 
 /// The statements that create the tables, with `orders` of `engine` when
-/// one is given. kilit-core's tests make the same one change to the same
-/// file: `ENGINE=InnoDB` becomes `ENGINE=<engine>` in `orders`' statement.
-pub fn tables(engine: Option<&str>) -> Result<Vec<String>> {
+/// one is given, and with `options` (such as ` ROW_FORMAT=COMPACT`) after its
+/// character set, where mysqldump writes them. kilit-core's tests make the
+/// same changes to the same file: `ENGINE=InnoDB` becomes `ENGINE=<engine>`
+/// and `DEFAULT CHARSET=utf8mb4` gets the options, in `orders`' statement.
+pub fn tables(engine: Option<&str>, options: &str) -> Result<Vec<String>> {
+    const CHARSET: &str = "DEFAULT CHARSET=utf8mb4";
     let mut statements = Vec::new();
     for statement in kilit_core::parse(TABLES) {
         let orders = matches!(
             &statement.kind,
             StatementKind::CreateTable { table, .. } if table.name == "orders"
         );
-        match engine {
-            Some(engine) if orders => {
-                let sql = statement
-                    .sql
-                    .replacen("ENGINE=InnoDB", &format!("ENGINE={engine}"), 1);
-                if sql == statement.sql {
-                    return Err("orders in scenarios/tables.sql writes no ENGINE=InnoDB".into());
-                }
-                statements.push(sql);
-            }
-            _ => statements.push(statement.sql),
+        if !orders {
+            statements.push(statement.sql);
+            continue;
         }
+        let mut sql = statement.sql.clone();
+        if let Some(engine) = engine {
+            sql = sql.replacen("ENGINE=InnoDB", &format!("ENGINE={engine}"), 1);
+            if sql == statement.sql {
+                return Err("orders in scenarios/tables.sql writes no ENGINE=InnoDB".into());
+            }
+        }
+        if !options.is_empty() {
+            let before = sql.clone();
+            sql = sql.replacen(CHARSET, &format!("{CHARSET}{options}"), 1);
+            if sql == before {
+                return Err(format!("orders in scenarios/tables.sql writes no {CHARSET}").into());
+            }
+        }
+        statements.push(sql);
     }
     Ok(statements)
 }
 
 /// Builds fresh `users` and `orders` tables, so every run starts the same
-/// way; `orders` of `engine` when one is given, else InnoDB.
+/// way; `orders` of `engine` when one is given, else InnoDB, and with the
+/// table `options` after its character set.
 ///
 /// What scenarios can rely on (also listed in `scenarios/README.md`):
 /// - `orders.user_id` repeats (1 to 100), so a UNIQUE index on it fails;
 /// - `orders.email` is nullable, but filled in every row and unique;
 /// - `orders.note` is NULL in every 10th row.
-pub async fn reset(conn: &mut Conn, engine: Option<&str>) -> Result<()> {
-    let tables = tables(engine)?;
+pub async fn reset(conn: &mut Conn, engine: Option<&str>, options: &str) -> Result<()> {
+    let tables = tables(engine, options)?;
     conn.query_drop(format!("DROP DATABASE IF EXISTS {DATABASE}"))
         .await?;
     conn.query_drop(format!("CREATE DATABASE {DATABASE}"))
@@ -115,8 +126,8 @@ mod tests {
     fn a_myisam_scenario_changes_only_the_engine_of_orders() {
         use kilit_core::Engine;
 
-        let innodb = Schema::from_sql(&tables(None).unwrap().join(";\n"));
-        let myisam = Schema::from_sql(&tables(Some("MyISAM")).unwrap().join(";\n"));
+        let innodb = Schema::from_sql(&tables(None, "").unwrap().join(";\n"));
+        let myisam = Schema::from_sql(&tables(Some("MyISAM"), "").unwrap().join(";\n"));
         let (TableState::Known(before), TableState::Known(after)) =
             (innodb.table("orders"), myisam.table("orders"))
         else {
@@ -138,5 +149,25 @@ mod tests {
             panic!("users is not known");
         };
         assert_eq!(users.engine, Some(Engine::InnoDb));
+    }
+
+    #[test]
+    fn table_options_go_after_the_character_set_of_orders_only() {
+        let statements = tables(None, " ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8").unwrap();
+        let orders = statements
+            .iter()
+            .find(|sql| sql.contains("TABLE orders"))
+            .unwrap();
+        assert!(
+            orders.ends_with(
+                "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8"
+            ),
+            "{orders}"
+        );
+        let users = statements
+            .iter()
+            .find(|sql| sql.contains("TABLE users"))
+            .unwrap();
+        assert!(!users.contains("ROW_FORMAT"), "{users}");
     }
 }

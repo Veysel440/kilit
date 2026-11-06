@@ -12,6 +12,9 @@ title = "Add a foreign key when a row points to a missing parent"
 setup = ["INSERT INTO orders (user_id, amount) VALUES (9999, 1)"]
 
 # Optional: statements run in the same session right before the ALTER.
+# With `old_alter_table` set here, the server copies the table unless an
+# ALGORITHM is forced, so the lab takes the algorithm whose forced run did
+# exactly what the run without a clause did.
 session = ["SET foreign_key_checks = 1"]
 
 # Everything that follows `ALTER TABLE orders`.
@@ -20,6 +23,14 @@ operation = "ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES user
 # Optional: "MyISAM" creates `orders` with ENGINE=MyISAM instead of
 # ENGINE=InnoDB. Nothing else about the tables changes.
 engine = "MyISAM"
+
+# Optional, InnoDB only: "COMPRESSED", "COMPACT" or "REDUNDANT" creates
+# `orders` with that ROW_FORMAT instead of the server's default, DYNAMIC.
+row_format = "COMPACT"
+
+# Optional, InnoDB only: 8 creates `orders` with KEY_BLOCK_SIZE=8, which
+# makes it COMPRESSED even without row_format.
+key_block_size = 8
 ```
 
 Every run starts from fresh `users` and `orders` tables, defined in
@@ -33,7 +44,10 @@ they judge every scenario on the tables it was measured on.
 | `orders` | 1000 | `user_id` repeats (1–100); `amount` is 1–1000; `email` is filled in every row and unique; `note` looks like `note 123` and is NULL in every 10th row |
 
 Both tables are `utf8mb4`, so a character can take up to 4 bytes. Both
-are InnoDB, unless a scenario makes `orders` MyISAM with `engine`. MySQL
+are InnoDB, unless a scenario makes `orders` MyISAM with `engine`. The lab
+writes `row_format` and `key_block_size` after the character set of
+`orders`, where mysqldump writes them, and checks the row format InnoDB
+reports before every run. MySQL
 gives a MyISAM table no table id, so the lab tells a copy of it from the
 server's count of its `copy to tmp table` stage, and checks that against
 the `Records: N` it reports.

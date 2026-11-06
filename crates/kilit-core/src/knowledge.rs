@@ -138,6 +138,13 @@ pub struct ScenarioResult {
     /// the InnoDB tables of `scenarios/tables.sql`.
     #[serde(default)]
     pub engine: Option<String>,
+    /// `COMPRESSED`, `COMPACT` or `REDUNDANT` when the lab created `orders`
+    /// with that `ROW_FORMAT`; `None` for the server's default, DYNAMIC.
+    #[serde(default)]
+    pub row_format: Option<String>,
+    /// The `KEY_BLOCK_SIZE` the lab created `orders` with, if any.
+    #[serde(default)]
+    pub key_block_size: Option<u8>,
     /// The ALTER statement, as run without forcing anything.
     pub statement: String,
     /// What the server does with `statement`.

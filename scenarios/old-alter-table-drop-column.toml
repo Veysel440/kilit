@@ -1,0 +1,3 @@
+title = "Drop a column with old_alter_table on"
+session = ["SET SESSION old_alter_table = ON"]
+operation = "DROP COLUMN note"

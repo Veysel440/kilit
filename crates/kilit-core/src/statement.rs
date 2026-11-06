@@ -18,6 +18,9 @@ pub struct Statement {
     pub kind: StatementKind,
 }
 
+// A whole table is larger than the other kinds, but boxing it would change
+// the public type for no measurable gain: statements are read once.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StatementKind {
     /// `ALTER TABLE`, and also `CREATE INDEX` and `DROP INDEX`, which MySQL
@@ -77,6 +80,63 @@ pub struct Table {
     /// `None` when the statement writes none: MySQL then uses the server's
     /// `default_storage_engine`, InnoDB unless something changed it.
     pub engine: Option<Engine>,
+    /// `ROW_FORMAT=...`, the last one when written twice, as MySQL takes it.
+    /// `None` when the statement writes none: MySQL then uses the server's
+    /// `innodb_default_row_format`, DYNAMIC unless something changed it.
+    pub row_format: Option<RowFormat>,
+    /// `KEY_BLOCK_SIZE=...` as written, the last one when written twice:
+    /// `8`. Any value but 0 makes an InnoDB table without `ROW_FORMAT`
+    /// COMPRESSED.
+    pub key_block_size: Option<String>,
+}
+
+/// A table's `ROW_FORMAT`, as written. The lab measured DYNAMIC, the
+/// server's default, and COMPRESSED, COMPACT and REDUNDANT for the changes
+/// listed in their cases.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RowFormat {
+    /// `ROW_FORMAT=DEFAULT`: the server's default, as if none were written.
+    Default,
+    Dynamic,
+    Compressed,
+    Compact,
+    Redundant,
+    /// Any other value, as written: `FIXED`, a misspelling, or a quoted
+    /// value, which MySQL does not accept.
+    Other(String),
+    /// A row format kilit cannot tell: the table was created without one
+    /// after the input named `innodb_default_row_format` or
+    /// `innodb_strict_mode`.
+    Unknown,
+}
+
+impl RowFormat {
+    /// The row format a `ROW_FORMAT=...` option names, in any letter case.
+    /// `written` is the value as written, quotes included.
+    pub fn named(written: &str) -> RowFormat {
+        match written.to_ascii_uppercase().as_str() {
+            "DEFAULT" => RowFormat::Default,
+            "DYNAMIC" => RowFormat::Dynamic,
+            "COMPRESSED" => RowFormat::Compressed,
+            "COMPACT" => RowFormat::Compact,
+            "REDUNDANT" => RowFormat::Redundant,
+            _ => RowFormat::Other(written.to_owned()),
+        }
+    }
+}
+
+impl fmt::Display for RowFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RowFormat::Default => f.write_str("DEFAULT"),
+            RowFormat::Dynamic => f.write_str("DYNAMIC"),
+            RowFormat::Compressed => f.write_str("COMPRESSED"),
+            RowFormat::Compact => f.write_str("COMPACT"),
+            RowFormat::Redundant => f.write_str("REDUNDANT"),
+            RowFormat::Other(written) => f.write_str(written),
+            RowFormat::Unknown => f.write_str("an unknown row format"),
+        }
+    }
 }
 
 /// A table's storage engine. The lab measured InnoDB tables, and MyISAM

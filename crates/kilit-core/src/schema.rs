@@ -12,7 +12,7 @@ use crate::charset::{Charset, canonical};
 use crate::parse::parse;
 use crate::statement::{
     Alter, Check, CheckColumns, Column, Engine, ForeignKey, Index, IndexKind, Operation, Position,
-    Statement, StatementKind, Table,
+    RowFormat, Statement, StatementKind, Table,
 };
 
 /// The tables kilit knows at one point of the input.
@@ -29,8 +29,14 @@ pub struct Schema {
     /// [`check`](crate::check) sets it: a schema dump writes `ENGINE` on
     /// every table.
     default_engine_changed: bool,
+    /// A statement before this point names `innodb_default_row_format` or
+    /// `innodb_strict_mode`, so a table created without `ROW_FORMAT` may
+    /// have any row format. Only [`check`](crate::check) sets it.
+    default_row_format_changed: bool,
 }
 
+// Most tables are known; a lost one is rare, so its smaller size saves little.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 enum Entry {
     Known(Table),
@@ -40,6 +46,8 @@ enum Entry {
         /// The engine kilit last knew it to have; `None` when no statement
         /// wrote one.
         engine: Option<Engine>,
+        /// See [`TableState::Lost`].
+        row_format_unclear: bool,
     },
 }
 
@@ -54,6 +62,10 @@ pub enum TableState<'a> {
         /// wrote, or the last one a statement kilit could not read wrote.
         /// `None` when no statement wrote one.
         engine: Option<&'a Engine>,
+        /// The table may have a row format other than the server's default:
+        /// kilit knew it to have another one, or a statement kilit could not
+        /// read writes `ROW_FORMAT` or `KEY_BLOCK_SIZE`.
+        row_format_unclear: bool,
     },
     /// Nothing kilit has read defines the table.
     Missing,
@@ -81,9 +93,14 @@ impl Schema {
     pub fn table(&self, name: &str) -> TableState<'_> {
         match self.tables.get(&key(name)) {
             Some(Entry::Known(table)) => TableState::Known(table),
-            Some(Entry::Lost { reason, engine }) => TableState::Lost {
+            Some(Entry::Lost {
+                reason,
+                engine,
+                row_format_unclear,
+            }) => TableState::Lost {
                 reason,
                 engine: engine.as_ref(),
+                row_format_unclear: *row_format_unclear,
             },
             None => TableState::Missing,
         }
@@ -92,6 +109,12 @@ impl Schema {
     /// From here on, a table created without `ENGINE` has an unknown engine.
     pub(crate) fn default_engine_changes(&mut self) {
         self.default_engine_changed = true;
+    }
+
+    /// From here on, a table created without `ROW_FORMAT` has an unknown
+    /// row format.
+    pub(crate) fn default_row_format_changes(&mut self) {
+        self.default_row_format_changed = true;
     }
 
     /// Whether a foreign key may point at the table `name`. If not, none does.
@@ -130,6 +153,9 @@ impl Schema {
                 if table.engine.is_none() && self.default_engine_changed {
                     table.engine = Some(Engine::Unknown);
                 }
+                if table.row_format.is_none() && self.default_row_format_changed {
+                    table.row_format = Some(RowFormat::Unknown);
+                }
                 if table.engine == Some(Engine::MyIsam) {
                     // MySQL keeps no foreign key on a MyISAM table, only its index.
                     for foreign_key in std::mem::take(&mut table.foreign_keys) {
@@ -140,7 +166,13 @@ impl Schema {
                         };
                         if let Err(reason) = indexed {
                             let line = statement.line;
-                            self.lose(&table.name, format!("line {line}: {reason}"), table.engine);
+                            let unclear = row_format_unclear(&table);
+                            self.lose(
+                                &table.name,
+                                format!("line {line}: {reason}"),
+                                table.engine,
+                                unclear,
+                            );
                             return;
                         }
                     }
@@ -179,6 +211,19 @@ impl Schema {
                     },
                     None => self.engine_of(name).cloned(),
                 };
+                let unclear = if exists && creates(&statement.sql) {
+                    self.row_format_unclear_of(name)
+                } else if writes_row_format(&statement.sql) {
+                    true
+                } else if creates(&statement.sql) {
+                    match like_source(&statement.sql) {
+                        // `CREATE TABLE new LIKE old` copies old's row format.
+                        Some(source) => self.row_format_unclear_of(source),
+                        None => self.default_row_format_changed,
+                    }
+                } else {
+                    self.row_format_unclear_of(name)
+                };
                 self.lose(
                     name,
                     format!(
@@ -186,6 +231,7 @@ impl Schema {
                         statement.line
                     ),
                     engine,
+                    unclear,
                 );
             }
             StatementKind::Unparsed { table: None, .. }
@@ -204,9 +250,34 @@ impl Schema {
         }
     }
 
-    fn lose(&mut self, name: &str, reason: String, engine: Option<Engine>) {
-        self.tables
-            .insert(key(name), Entry::Lost { reason, engine });
+    fn lose(
+        &mut self,
+        name: &str,
+        reason: String,
+        engine: Option<Engine>,
+        row_format_unclear: bool,
+    ) {
+        self.tables.insert(
+            key(name),
+            Entry::Lost {
+                reason,
+                engine,
+                row_format_unclear,
+            },
+        );
+    }
+
+    /// Whether the table `name` may have a row format other than the
+    /// server's default, as far as kilit knows it. `false` for a table kilit
+    /// does not know.
+    fn row_format_unclear_of(&self, name: &str) -> bool {
+        match self.tables.get(&key(name)) {
+            Some(Entry::Known(table)) => row_format_unclear(table),
+            Some(Entry::Lost {
+                row_format_unclear, ..
+            }) => *row_format_unclear,
+            None => false,
+        }
     }
 
     /// The engine kilit last knew the table `name` to have.
@@ -244,7 +315,13 @@ impl Schema {
             };
             if let Err(reason) = changed {
                 let engine = table.engine.clone();
-                self.lose(&alter.table, format!("line {line}: {reason}"), engine);
+                let unclear = row_format_unclear(table);
+                self.lose(
+                    &alter.table,
+                    format!("line {line}: {reason}"),
+                    engine,
+                    unclear,
+                );
                 return;
             }
             if let Operation::AddForeignKey(foreign_key) = operation
@@ -644,6 +721,29 @@ fn written_engine(sql: &str) -> Option<Engine> {
         });
     }
     engine
+}
+
+/// Whether a table may have a row format other than the server's default:
+/// its `ROW_FORMAT` names another one or none kilit knows, or it has a
+/// `KEY_BLOCK_SIZE` other than 0, which compresses it.
+fn row_format_unclear(table: &Table) -> bool {
+    let written = table
+        .row_format
+        .as_ref()
+        .is_some_and(|format| !matches!(format, RowFormat::Default | RowFormat::Dynamic));
+    written
+        || table
+            .key_block_size
+            .as_deref()
+            .is_some_and(|size| size != "0")
+}
+
+/// Whether a statement kilit could not read writes `ROW_FORMAT` or
+/// `KEY_BLOCK_SIZE`, outside quotes: the table it names may have any row
+/// format after it.
+fn writes_row_format(sql: &str) -> bool {
+    word_starts(sql, "ROW_FORMAT").next().is_some()
+        || word_starts(sql, "KEY_BLOCK_SIZE").next().is_some()
 }
 
 /// Where the word `word` (in uppercase) starts in `sql`, in any letter
@@ -1724,5 +1824,83 @@ ALTER TABLE t ADD CONSTRAINT C CHECK (a > 1);",
         // A schema dump is read without it.
         let dump = Schema::from_sql("CREATE TABLE a (id INT);");
         assert_eq!(known(&dump, "a").engine, None);
+    }
+
+    fn row_format_unclear_of_lost(schema: &Schema, name: &str) -> bool {
+        match schema.table(name) {
+            TableState::Lost {
+                row_format_unclear, ..
+            } => row_format_unclear,
+            other => panic!("{name}: expected lost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn written_row_formats_are_seen_outside_quotes() {
+        for (sql, written) in [
+            ("ALTER TABLE t ROW_FORMAT=COMPRESSED", true),
+            ("ALTER TABLE t row_format = dynamic", true),
+            ("ALTER TABLE t KEY_BLOCK_SIZE 8", true),
+            ("ALTER TABLE t ADD COLUMN c INT, ROW_FORMAT=COMPACT", true),
+            ("ALTER TABLE t COMMENT 'ROW_FORMAT=COMPACT'", false),
+            ("ALTER TABLE t ADD COLUMN row_format_x INT", false),
+            ("ALTER TABLE t ENGINE=InnoDB", false),
+        ] {
+            assert_eq!(writes_row_format(sql), written, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_lost_table_remembers_whether_it_may_have_another_row_format() {
+        let schema = from_sql(
+            "CREATE TABLE plain (id INT);
+             CREATE TABLE dynamic (id INT) ROW_FORMAT=DYNAMIC;
+             CREATE TABLE compact (id INT) ROW_FORMAT=COMPACT;
+             CREATE TABLE sized (id INT) KEY_BLOCK_SIZE=8;
+             CREATE TABLE unsized (id INT) KEY_BLOCK_SIZE=0;
+             CREATE TABLE rewritten (id INT);
+             ALTER TABLE plain ENGINE=InnoDB;
+             ALTER TABLE dynamic ENGINE=InnoDB;
+             ALTER TABLE compact ENGINE=InnoDB;
+             ALTER TABLE sized ENGINE=InnoDB;
+             ALTER TABLE unsized ENGINE=InnoDB;
+             ALTER TABLE rewritten ROW_FORMAT=DYNAMIC;
+             CREATE TABLE copy LIKE compact;
+             CREATE TABLE other_copy LIKE plain;",
+        );
+        for (name, unclear) in [
+            ("plain", false),
+            ("dynamic", false),
+            ("compact", true),
+            ("sized", true),
+            ("unsized", false),
+            // Any value written by a statement kilit could not read.
+            ("rewritten", true),
+            ("copy", true),
+            ("other_copy", false),
+        ] {
+            assert_eq!(row_format_unclear_of_lost(&schema, name), unclear, "{name}");
+        }
+    }
+
+    #[test]
+    fn after_the_default_row_format_changes_a_new_table_without_one_has_an_unknown_one() {
+        let mut schema = Schema::new();
+        schema.default_row_format_changes();
+        for statement in parse(
+            "CREATE TABLE a (id INT);
+             CREATE TABLE b (id INT) ROW_FORMAT=COMPACT;
+             CREATE TABLE c (id INT) KEY_BLOCK_SIZE=8;
+             CREATE TABLE d (id INT) COMMENT 'x', PARTITION;",
+        ) {
+            schema.apply(&statement);
+        }
+        assert_eq!(known(&schema, "a").row_format, Some(RowFormat::Unknown));
+        assert_eq!(known(&schema, "b").row_format, Some(RowFormat::Compact));
+        assert_eq!(known(&schema, "c").row_format, Some(RowFormat::Unknown));
+        assert!(row_format_unclear_of_lost(&schema, "d"));
+        // A schema dump is read without it.
+        let dump = Schema::from_sql("CREATE TABLE a (id INT);");
+        assert_eq!(known(&dump, "a").row_format, None);
     }
 }

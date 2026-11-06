@@ -1,0 +1,3 @@
+title = "Drop a column of a COMPRESSED table"
+row_format = "COMPRESSED"
+operation = "DROP COLUMN note"

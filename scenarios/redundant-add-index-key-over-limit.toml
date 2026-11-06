@@ -1,0 +1,8 @@
+# Each key length scenario indexes a column code: 191 characters of utf8mb4
+# take 764 bytes, within the 767 bytes of this row format; 192 take 768.
+title = "Add an index of more than 767 bytes to a REDUNDANT table"
+row_format = "REDUNDANT"
+setup = [
+    "ALTER TABLE orders ADD COLUMN code VARCHAR(192) NULL",
+]
+operation = "ADD INDEX idx_code (code)"

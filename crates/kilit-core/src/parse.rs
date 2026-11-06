@@ -22,8 +22,8 @@ use sqlparser::tokenizer::{Location, Token, Tokenizer};
 use crate::split::split;
 use crate::statement::{
     Algorithm, Alter, Check, CheckColumns, Column, DataType, Engine, ForeignKey, ForeignKeyAction,
-    Generated, Index, IndexKind, IntegerSize, Lock, Operation, Position, Rename, Statement,
-    StatementKind, Table, Variable,
+    Generated, Index, IndexKind, IntegerSize, Lock, Operation, Position, Rename, RowFormat,
+    Statement, StatementKind, Table, Variable,
 };
 
 /// Reads every statement in `sql`, in order.
@@ -224,7 +224,7 @@ fn convert(statement: ast::Statement, sql: &str) -> StatementKind {
 /// was run by hand on both servers and failed with error 1064, or 1067 for
 /// a date or time literal as a default; the lab has no fact for it yet, so
 /// kilit says no more than that.
-const REJECTED_BY: &str = "MySQL 8.0.46 and 8.4.13 do not accept";
+pub(crate) const REJECTED_BY: &str = "MySQL 8.0.46 and 8.4.13 do not accept";
 
 /// Why kilit gives no answer for `statement`, which sqlparser reads from
 /// `sql`: MySQL 8.0.46 and 8.4.13 do not accept it, or kilit has not
@@ -753,6 +753,7 @@ fn create_table(create: ast::CreateTable) -> StatementKind {
     table.checks = checks.into_iter().map(|(_, check)| check).collect();
     (table.charset, table.collation) = table_charset(&create.table_options);
     table.engine = table_engine(&create.table_options);
+    (table.row_format, table.key_block_size) = table_row_format(&create.table_options);
     StatementKind::CreateTable {
         table,
         if_not_exists: create.if_not_exists,
@@ -810,6 +811,32 @@ fn table_engine(options: &CreateTableOptions) -> Option<Engine> {
         }
     }
     engine
+}
+
+/// The table's `ROW_FORMAT` and `KEY_BLOCK_SIZE`, in any letter case, with
+/// or without `=`; the last one when written twice, as MySQL takes it. A
+/// quoted value, which MySQL does not accept, is kept with its quotes, so
+/// it names no row format.
+fn table_row_format(options: &CreateTableOptions) -> (Option<RowFormat>, Option<String>) {
+    let (CreateTableOptions::Plain(options)
+    | CreateTableOptions::With(options)
+    | CreateTableOptions::Options(options)
+    | CreateTableOptions::TableProperties(options)) = options
+    else {
+        return (None, None);
+    };
+    let (mut row_format, mut key_block_size) = (None, None);
+    for option in options {
+        let SqlOption::KeyValue { key, value } = option else {
+            continue;
+        };
+        if key.value.eq_ignore_ascii_case("ROW_FORMAT") {
+            row_format = Some(RowFormat::named(&value.to_string()));
+        } else if key.value.eq_ignore_ascii_case("KEY_BLOCK_SIZE") {
+            key_block_size = Some(value.to_string());
+        }
+    }
+    (row_format, key_block_size)
 }
 
 /// `utf8mb4`, whether written as a name or as a string.
@@ -2915,5 +2942,76 @@ SET FOREIGN_KEY_CHECKS=1;
             panic!("expected an unreadable statement");
         };
         assert_eq!(table.as_deref(), Some("t"));
+    }
+
+    fn row_format(sql: &str) -> (Option<RowFormat>, Option<String>) {
+        match kind(sql) {
+            StatementKind::CreateTable { table, .. } => (table.row_format, table.key_block_size),
+            other => panic!("{sql}: expected a CREATE TABLE, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reads_the_row_format_and_key_block_size_in_each_spelling() {
+        for (tail, expected, size) in [
+            (
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci \
+                 ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+                Some(RowFormat::Compressed),
+                Some("8"),
+            ),
+            (") row_format=compressed", Some(RowFormat::Compressed), None),
+            (") ROW_FORMAT COMPACT", Some(RowFormat::Compact), None),
+            (") ROW_FORMAT=Redundant", Some(RowFormat::Redundant), None),
+            (") ROW_FORMAT=DYNAMIC", Some(RowFormat::Dynamic), None),
+            (
+                ") ROW_FORMAT=DEFAULT KEY_BLOCK_SIZE=8",
+                Some(RowFormat::Default),
+                Some("8"),
+            ),
+            (") KEY_BLOCK_SIZE 8", None, Some("8")),
+            (") key_block_size=0", None, Some("0")),
+            (
+                ") ROW_FORMAT=COMPRESSED, KEY_BLOCK_SIZE=4",
+                Some(RowFormat::Compressed),
+                Some("4"),
+            ),
+            // MySQL takes the last one.
+            (
+                ") ROW_FORMAT=COMPRESSED ROW_FORMAT=DYNAMIC",
+                Some(RowFormat::Dynamic),
+                None,
+            ),
+            (
+                ") ROW_FORMAT=FIXED",
+                Some(RowFormat::Other("FIXED".into())),
+                None,
+            ),
+            (
+                ") ROW_FORMAT=COMPRESED",
+                Some(RowFormat::Other("COMPRESED".into())),
+                None,
+            ),
+            // MySQL does not accept a quoted value: it names no row format.
+            (
+                ") ROW_FORMAT='COMPRESSED'",
+                Some(RowFormat::Other("'COMPRESSED'".into())),
+                None,
+            ),
+            (
+                ") ROW_FORMAT=\"COMPACT\"",
+                Some(RowFormat::Other("\"COMPACT\"".into())),
+                None,
+            ),
+            (") KEY_BLOCK_SIZE='8'", None, Some("'8'")),
+            (") DEFAULT CHARSET=utf8mb4", None, None),
+        ] {
+            let sql = format!("CREATE TABLE t (id INT{tail}");
+            assert_eq!(
+                row_format(&sql),
+                (expected, size.map(str::to_owned)),
+                "{sql}"
+            );
+        }
     }
 }
