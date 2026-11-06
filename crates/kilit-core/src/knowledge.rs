@@ -4,6 +4,7 @@
 //! gives. They are compiled into the program, so kilit needs no files and
 //! no database at run time.
 
+use std::fmt;
 use std::sync::OnceLock;
 
 use serde::Deserialize;
@@ -54,10 +55,51 @@ impl Knowledge {
 }
 
 /// Everything the lab measured on one server.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(from = "file::ServerResults")]
 pub struct ServerResults {
     pub server: Server,
     scenarios: Vec<ScenarioResult>,
+    /// Positions in `scenarios`, ordered by id and, for one id, by
+    /// position, so that a lookup is a binary search.
+    by_id: Vec<usize>,
+}
+
+mod file {
+    use serde::Deserialize;
+
+    use super::{ScenarioResult, Server};
+
+    /// A result file as written: the public `ServerResults` without its
+    /// index. Same name, so that errors read as before.
+    #[derive(Deserialize)]
+    pub(super) struct ServerResults {
+        pub(super) server: Server,
+        pub(super) scenarios: Vec<ScenarioResult>,
+    }
+}
+
+impl From<file::ServerResults> for ServerResults {
+    fn from(file: file::ServerResults) -> ServerResults {
+        let mut by_id: Vec<usize> = (0..file.scenarios.len()).collect();
+        // Stable: the same id keeps the order of the file.
+        by_id.sort_by(|a, b| file.scenarios[*a].id.cmp(&file.scenarios[*b].id));
+        ServerResults {
+            server: file.server,
+            scenarios: file.scenarios,
+            by_id,
+        }
+    }
+}
+
+/// The index is left out: it only repeats `scenarios`.
+impl fmt::Debug for ServerResults {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServerResults")
+            .field("server", &self.server)
+            .field("scenarios", &self.scenarios)
+            .finish()
+    }
 }
 
 impl ServerResults {
@@ -70,8 +112,14 @@ impl ServerResults {
         &self.scenarios
     }
 
+    /// The scenario with this id; the first one in the file if the id is
+    /// there twice.
     pub fn scenario(&self, id: &str) -> Option<&ScenarioResult> {
-        self.scenarios.iter().find(|scenario| scenario.id == id)
+        let first = self
+            .by_id
+            .partition_point(|at| self.scenarios[*at].id.as_str() < id);
+        let scenario = &self.scenarios[*self.by_id.get(first)?];
+        (scenario.id == id).then_some(scenario)
     }
 }
 
@@ -191,6 +239,74 @@ mod tests {
         for results in knowledge.servers() {
             assert!(!results.scenarios().is_empty(), "{}", results.server.name());
         }
+    }
+
+    #[test]
+    fn scenario_ids_are_unique_on_each_server() {
+        for results in Knowledge::built_in().servers() {
+            let mut ids: Vec<&str> = results.scenarios().iter().map(|s| s.id.as_str()).collect();
+            ids.sort_unstable();
+            for pair in ids.windows(2) {
+                assert_ne!(pair[0], pair[1], "{}", results.server.name());
+            }
+        }
+    }
+
+    #[test]
+    fn every_scenario_is_found_by_its_id() {
+        for results in Knowledge::built_in().servers() {
+            for scenario in results.scenarios() {
+                assert_eq!(results.scenario(&scenario.id), Some(scenario));
+            }
+            assert_eq!(results.scenario(""), None);
+            assert_eq!(results.scenario("add-colum"), None);
+            assert_eq!(results.scenario("zzz"), None);
+        }
+    }
+
+    #[test]
+    fn a_repeated_id_finds_the_first_scenario_in_the_file() {
+        let scenario = |id: &str, title: &str| {
+            format!(
+                r#"{{"id": "{id}", "title": "{title}", "statement": "ALTER TABLE orders DROP note",
+                    "verdict": {{"result": "runs", "algorithm": "COPY", "rebuilds_table": true,
+                                 "copied_rows": 0, "writes": "blocked", "consistent": true}},
+                    "observations": []}}"#
+            )
+        };
+        let json = format!(
+            r#"{{"server": {{"product": "mysql", "version": "8.4.13"}},
+                "scenarios": [{}, {}, {}]}}"#,
+            scenario("b", "first"),
+            scenario("a", "other"),
+            scenario("b", "second"),
+        );
+        let results = ServerResults::from_json(&json).unwrap();
+        assert_eq!(results.scenario("b").unwrap().title, "first");
+        assert_eq!(results.scenario("a").unwrap().title, "other");
+        assert_eq!(results.scenario("c"), None);
+    }
+
+    #[test]
+    fn errors_and_debug_output_name_the_server_results() {
+        let error = ServerResults::from_json("1").unwrap_err();
+        assert_eq!(
+            error,
+            "invalid type: integer `1`, expected struct ServerResults at line 1 column 1"
+        );
+        let error = ServerResults::from_json("[]").unwrap_err();
+        assert_eq!(
+            error,
+            "invalid length 0, expected struct ServerResults with 2 elements at line 1 column 2"
+        );
+        let results = ServerResults::from_json(
+            r#"{"server": {"product": "mysql", "version": "8.4.13"}, "scenarios": []}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            format!("{results:?}"),
+            r#"ServerResults { server: Server { product: "mysql", version: "8.4.13" }, scenarios: [] }"#
+        );
     }
 
     #[test]

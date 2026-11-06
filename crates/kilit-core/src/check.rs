@@ -10,11 +10,12 @@
 //! can tell what a `MODIFY` changes, or whether a table has a FULLTEXT
 //! index. Without the tables it still answers what does not depend on them.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use crate::knowledge::ServerResults;
 use crate::modify::{Change, changes};
-use crate::results::{Variant, Verdict};
+use crate::results::{Server, Variant, Verdict};
 use crate::schema::{ConstraintKind, Schema, TableState, has_descending, names_foreign_key_index};
 use crate::statement::{
     Alter, Check, CheckColumns, Column, DataType, Engine, ForeignKey, ForeignKeyAction, Index,
@@ -836,6 +837,7 @@ const MODIFY_CASES: [&Case; 12] = [
 pub fn check(statements: &[Statement], schema: &Schema, results: &ServerResults) -> Vec<Finding> {
     let mut schema = schema.clone();
     let mut session = Session::default();
+    let mut agreements = Agreements::default();
     let mut findings = Vec::with_capacity(statements.len());
     for statement in statements {
         if matches!(
@@ -857,9 +859,14 @@ pub fn check(statements: &[Statement], schema: &Schema, results: &ServerResults)
             }
         }
         let prediction = match &statement.kind {
-            StatementKind::Alter(alter) => {
-                predict(alter, &statement.sql, &session, &schema, results)
-            }
+            StatementKind::Alter(alter) => predict(
+                alter,
+                &statement.sql,
+                &session,
+                &schema,
+                results,
+                &mut agreements,
+            ),
             StatementKind::Set { variables } => {
                 session.apply(variables);
                 not_checked(format!(
@@ -1004,12 +1011,13 @@ const ASSUMES_FOREIGN_KEY_CHECKS: &str =
 
 const ASSUMES_BINARY_LOG: &str = "assumes the binary log is on, the MySQL default";
 
-fn predict(
+fn predict<'r>(
     alter: &Alter,
     sql: &str,
     session: &Session,
     schema: &Schema,
-    results: &ServerResults,
+    results: &'r ServerResults,
+    agreements: &mut Agreements<'r>,
 ) -> Prediction {
     let operation = match alter.operations.as_slice() {
         [operation] => operation,
@@ -1072,24 +1080,25 @@ fn predict(
         schema,
     };
     match myisam {
-        None => answer(case, &situation, variant, results, notes),
+        None => answer(case, &situation, variant, results, agreements, notes),
         Some(table) => on_myisam(
-            operation, sql, case, table, &situation, variant, results, notes,
+            operation, sql, case, table, &situation, variant, results, agreements, notes,
         ),
     }
 }
 
 /// The answer from `case`'s measurements on this server, with what the
 /// situation shows.
-fn answer(
+fn answer<'r>(
     case: &'static Case,
     situation: &Situation<'_>,
     variant: Variant,
-    results: &ServerResults,
+    results: &'r ServerResults,
+    agreements: &mut Agreements<'r>,
     mut notes: Vec<String>,
 ) -> Prediction {
     // All of the case's scenarios must agree on this server.
-    let verdict = match agreed(case.scenarios, case.id, variant, results) {
+    let verdict = match agreements.agreed(case, Group::Case, variant, results) {
         Ok(verdict) => verdict,
         Err(reason) => return unknown(reason),
     };
@@ -1099,20 +1108,20 @@ fn answer(
     // with all of their conditions decides, never the order of the list.
     let mut holding = Vec::new();
     let mut unseen = Vec::new();
-    for exception in case.exceptions {
+    for (at, exception) in case.exceptions.iter().enumerate() {
         match holds(exception, situation) {
-            Applies::Yes(why) => holding.push((exception, why)),
+            Applies::Yes(why) => holding.push((at, exception, why)),
             Applies::Unmeasured(reason) => return unknown(reason),
             Applies::No => {}
-            Applies::Maybe => unseen.push(exception),
+            Applies::Maybe => unseen.push((at, exception)),
         }
     }
     if !holding.is_empty() {
-        let (exception, why) = match deciding(holding) {
+        let (at, exception, why) = match deciding(holding) {
             Ok(decides) => decides,
             Err(reason) => return unknown(reason),
         };
-        let other = match agreed(exception.scenarios, case.id, variant, results) {
+        let other = match agreements.agreed(case, Group::Exception(at), variant, results) {
             Ok(other) => other,
             Err(reason) => return unknown(format!("{}, and {reason}", why.join(", and "))),
         };
@@ -1124,8 +1133,8 @@ fn answer(
             notes,
         };
     }
-    for exception in unseen {
-        let Ok(other) = agreed(exception.scenarios, case.id, variant, results) else {
+    for (at, exception) in unseen {
+        let Ok(other) = agreements.agreed(case, Group::Exception(at), variant, results) else {
             continue;
         };
         let scenarios = scenario_list(exception.scenarios);
@@ -1212,14 +1221,15 @@ fn parent_engine(key: &ForeignKey, schema: &Schema) -> Result<(), String> {
 /// The answer for a MyISAM table: the MyISAM case of the change, if the lab
 /// measured it in this shape and situation, never an InnoDB one.
 #[allow(clippy::too_many_arguments)]
-fn on_myisam(
+fn on_myisam<'r>(
     operation: &Operation,
     sql: &str,
     innodb: &'static Case,
     table: &Table,
     situation: &Situation<'_>,
     variant: Variant,
-    results: &ServerResults,
+    results: &'r ServerResults,
+    agreements: &mut Agreements<'r>,
     mut notes: Vec<String>,
 ) -> Prediction {
     let Some((_, _, measured)) = ON_MYISAM.iter().find(|(id, ..)| *id == innodb.id) else {
@@ -1264,7 +1274,7 @@ fn on_myisam(
             }
         }
     }
-    answer(case, situation, variant, results, notes)
+    answer(case, situation, variant, results, agreements, notes)
 }
 
 /// The MyISAM case of a change in the InnoDB case `innodb`, if the lab
@@ -1521,6 +1531,61 @@ fn agreed(
     verdict.ok_or_else(|| format!("{case} has no lab scenarios"))
 }
 
+/// Which scenarios of a case [`agreed`] judges: the case's own, or those
+/// of the exception at this position in the case's list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Group {
+    Case,
+    Exception(usize),
+}
+
+/// What [`agreed`] said during one [`check`], so that each group of
+/// scenarios is judged once per server and variant, not once per
+/// statement. Found by the case id, then by the server, the group and the
+/// variant. These name the scenarios: case ids are unique (a test checks),
+/// and the group picks the case's own or one exception's.
+#[derive(Default)]
+struct Agreements<'r> {
+    by_case: HashMap<&'static str, Vec<Agreement<'r>>>,
+}
+
+struct Agreement<'r> {
+    server: &'r Server,
+    group: Group,
+    variant: Variant,
+    said: Result<Verdict, String>,
+}
+
+impl<'r> Agreements<'r> {
+    fn agreed(
+        &mut self,
+        case: &'static Case,
+        group: Group,
+        variant: Variant,
+        results: &'r ServerResults,
+    ) -> Result<Verdict, String> {
+        let server = &results.server;
+        let seen = self.by_case.entry(case.id).or_default();
+        if let Some(agreement) = seen.iter().find(|agreement| {
+            agreement.group == group && agreement.variant == variant && agreement.server == server
+        }) {
+            return agreement.said.clone();
+        }
+        let scenarios = match group {
+            Group::Case => case.scenarios,
+            Group::Exception(at) => case.exceptions[at].scenarios,
+        };
+        let said = agreed(scenarios, case.id, variant, results);
+        seen.push(Agreement {
+            server,
+            group,
+            variant,
+            said: said.clone(),
+        });
+        said
+    }
+}
+
 /// The scenarios behind a note: `drop-column-with-fulltext`, or
 /// `drop-column-indexed and 5 more lab scenarios`.
 fn scenario_list(scenarios: &[&str]) -> String {
@@ -1540,20 +1605,24 @@ fn scenario_list(scenarios: &[&str]) -> String {
 /// conditions, and decides. No two exceptions of a case have the same
 /// conditions (a test checks), so at most one includes all the others,
 /// and the order of the list never picks. Without one, kilit does not
-/// pick: the answer is unknown.
+/// pick: the answer is unknown. Each exception comes with its position in
+/// the case's list, which goes back with the one that decides.
 fn deciding(
-    mut holding: Vec<(&'static Exception, Vec<String>)>,
-) -> Result<(&'static Exception, Vec<String>), String> {
-    let includes_every_other =
-        |exception: &Exception| holding.iter().all(|(other, _)| includes(exception, other));
-    if let Some(at) = holding
+    mut holding: Vec<(usize, &'static Exception, Vec<String>)>,
+) -> Result<(usize, &'static Exception, Vec<String>), String> {
+    let includes_every_other = |exception: &Exception| {
+        holding
+            .iter()
+            .all(|(_, other, _)| includes(exception, other))
+    };
+    if let Some(found) = holding
         .iter()
-        .position(|(exception, _)| includes_every_other(exception))
+        .position(|(_, exception, _)| includes_every_other(exception))
     {
-        return Ok(holding.swap_remove(at));
+        return Ok(holding.swap_remove(found));
     }
     let mut reasons: Vec<&str> = Vec::new();
-    for (_, why) in &holding {
+    for (_, _, why) in &holding {
         for reason in why {
             if !reasons.contains(&reason.as_str()) {
                 reasons.push(reason);
@@ -4562,7 +4631,8 @@ mod tests {
         let holding = |exceptions: &[&'static Exception]| {
             exceptions
                 .iter()
-                .map(|exception| (*exception, vec![format!("{} holds", exception.when)]))
+                .enumerate()
+                .map(|(at, exception)| (at, *exception, vec![format!("{} holds", exception.when)]))
                 .collect::<Vec<_>>()
         };
         for exceptions in [[&FULLTEXT, &INDEXED], [&INDEXED, &FULLTEXT]] {
@@ -4575,7 +4645,7 @@ mod tests {
             );
         }
         for exceptions in [[&FULLTEXT, &INDEXED, &BOTH], [&BOTH, &INDEXED, &FULLTEXT]] {
-            let (decides, why) = deciding(holding(&exceptions)).unwrap();
+            let (_, decides, why) = deciding(holding(&exceptions)).unwrap();
             assert_eq!(decides.scenarios, ["c"]);
             assert_eq!(why, ["c holds"]);
         }
@@ -5713,15 +5783,16 @@ mod tests {
         assert!(includes(foreign_key, indexed) && !includes(indexed, foreign_key));
         for holding in [
             vec![
-                (indexed, vec!["i".to_owned()]),
-                (foreign_key, vec!["f".to_owned()]),
+                (1, indexed, vec!["i".to_owned()]),
+                (3, foreign_key, vec!["f".to_owned()]),
             ],
             vec![
-                (foreign_key, vec!["f".to_owned()]),
-                (indexed, vec!["i".to_owned()]),
+                (3, foreign_key, vec!["f".to_owned()]),
+                (1, indexed, vec!["i".to_owned()]),
             ],
         ] {
-            let (decides, why) = deciding(holding).unwrap();
+            let (at, decides, why) = deciding(holding).unwrap();
+            assert_eq!(at, 3);
             assert_eq!(decides.scenarios, ["drop-column-in-foreign-key"]);
             assert_eq!(why, ["f"]);
         }
@@ -7573,6 +7644,47 @@ mod tests {
             ),
         ] {
             assert_eq!(said(&on_shop(check_note, sql)), answer, "{sql}");
+        }
+    }
+
+    #[test]
+    fn case_ids_are_unique() {
+        // A remembered agreement is found by the case id.
+        let mut ids: Vec<&str> = CASES.iter().chain(&MYISAM_CASES).map(|c| c.id).collect();
+        ids.sort_unstable();
+        for pair in ids.windows(2) {
+            assert_ne!(pair[0], pair[1]);
+        }
+    }
+
+    #[test]
+    fn a_remembered_agreement_is_the_one_judged_again() {
+        let knowledge = Knowledge::built_in();
+        let mut agreements = Agreements::default();
+        // Twice over, so the second round reads what the first remembered,
+        // with both servers in the same memory.
+        for _ in 0..2 {
+            for results in knowledge.servers() {
+                for case in CASES.iter().chain(&MYISAM_CASES) {
+                    let groups = std::iter::once((Group::Case, case.scenarios)).chain(
+                        case.exceptions
+                            .iter()
+                            .enumerate()
+                            .map(|(at, exception)| (Group::Exception(at), exception.scenarios)),
+                    );
+                    for (group, scenarios) in groups {
+                        for variant in Variant::ALL {
+                            assert_eq!(
+                                agreements.agreed(case, group, variant, results),
+                                agreed(scenarios, case.id, variant, results),
+                                "{} {group:?} {variant} on {}",
+                                case.id,
+                                results.server.name()
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
