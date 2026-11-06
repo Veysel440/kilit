@@ -248,13 +248,13 @@ fn expression_defaults_and_a_functional_index_get_their_measured_answers() {
             "  line 1: alter table `orders` add `token` char(36) not null default (UUID())\n\
              \x20   fails with error 1674\n\
              \x20   measured as add-column-binlog-unsafe-default (8 lab scenarios)\n\
-             \x20   - assumes the binary log is on, the MySQL default\n",
+             \x20   - assumes the binary log is on with binlog_format = ROW, the MySQL default\n",
             "    INPLACE, no rebuild, writes wait\n\
              \x20   measured as add-functional-index (1 lab scenario)\n\
              \x20 line 3:",
             "    COPY, copies every row, writes wait\n\
              \x20   measured as add-column-expression-default (5 lab scenarios)\n\
-             \x20   - assumes the binary log is on, the MySQL default\n",
+             \x20   - assumes the binary log is on with binlog_format = ROW, the MySQL default\n",
         ] {
             assert!(text.contains(answer), "{text}");
         }
@@ -289,7 +289,7 @@ fn expression_defaults_and_a_functional_index_get_their_measured_answers() {
         assert_eq!(statements[0]["error"], 1674);
         assert_eq!(
             statements[2]["notes"][0],
-            "assumes the binary log is on, the MySQL default"
+            "assumes the binary log is on with binlog_format = ROW, the MySQL default"
         );
         assert_eq!(output.status.code(), Some(1));
     }
@@ -1066,7 +1066,7 @@ fn uuid_short_sysdate_and_user_defaults_fail_with_1674_and_the_exit_code_says_so
                 );
             }
             assert!(
-                text.contains("    - assumes the binary log is on, the MySQL default\n"),
+                text.contains("    - assumes the binary log is on with binlog_format = ROW, the MySQL default\n"),
                 "{text}"
             );
             assert!(text.ends_with("\n3 statements: 3 fail\n"), "{text}");
@@ -1084,7 +1084,7 @@ fn uuid_short_sysdate_and_user_defaults_fail_with_1674_and_the_exit_code_says_so
                 assert_eq!(statement["error"], 1674);
                 assert_eq!(
                     statement["notes"][0],
-                    "assumes the binary log is on, the MySQL default"
+                    "assumes the binary log is on with binlog_format = ROW, the MySQL default"
                 );
             }
             assert_eq!(output.status.code(), Some(1));
@@ -1954,5 +1954,1257 @@ fn sql_with_lines_that_look_like_an_error_screen_is_checked_as_sql() {
         assert_eq!(output.status.code(), plain.status.code(), "{comment}");
         let text = stdout(&kilit(&["check"], &input));
         assert!(!text.contains("Laravel stopped"), "{comment}: {text}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Step 11a: what kilit prints. Rows that a new table cannot have, one line for
+// a later read, and the wording of the foreign_key_checks and binary log notes.
+
+const ASSUMES_CHECKS_ON: &str =
+    "assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it";
+const ASSUMES_CHECKS_ON_IN_SESSION: &str = "assumes foreign_key_checks is ON in this session, the \
+     MySQL default: a statement before this one changes its global value, which does not change \
+     this session";
+const ASSUMES_BINARY_LOG: &str = "assumes the binary log is on with binlog_format = ROW, the \
+     MySQL default";
+const ASSUMES_BINARY_LOG_BEFORE_11A: &str = "assumes the binary log is on, the MySQL default";
+const CREATED_EARLIER: &str =
+    "is created earlier in these migrations: nothing else uses it yet, so nothing waits for it";
+
+/// Runs `args` with `input` as text and as JSON. Returns the text, the JSON
+/// document and the exit status of the text run.
+fn text_and_json(args: &[&str], input: &str) -> (String, serde_json::Value, Option<i32>) {
+    let mut all = vec!["check"];
+    all.extend(args);
+    let output = kilit(&all, input);
+    let text = stdout(&output);
+    let code = output.status.code();
+    all.extend(["--format", "json"]);
+    let json = json_of(&kilit(&all, input));
+    (text, json, code)
+}
+
+fn notes_of(statement: &serde_json::Value) -> Vec<String> {
+    statement["notes"]
+        .as_array()
+        .map(|notes| {
+            notes
+                .iter()
+                .map(|note| note.as_str().unwrap().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The notes of the last statement of the first source.
+fn last_notes(json: &serde_json::Value) -> Vec<String> {
+    notes_of(
+        json["sources"][0]["statements"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap(),
+    )
+}
+
+/// Three tables created by the input. `children` is InnoDB, `legacy` MyISAM.
+const NEW_TABLES: &str = "create table `parents` (`id` bigint unsigned not null auto_increment primary key);\n\
+create table `children` (`id` bigint unsigned not null auto_increment primary key, `parent_id` bigint unsigned not null, `code` varchar(20) null, `qty` int not null, `maybe` int null) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;\n\
+create table `legacy` (`id` bigint unsigned not null auto_increment primary key, `code` varchar(20) null) engine=MyISAM default charset=utf8mb4;\n";
+
+/// An ALTER whose answer carries a note about rows already in the table.
+struct RowNote {
+    label: &'static str,
+    table: &'static str,
+    alter: &'static str,
+    prefix: &'static str,
+}
+
+const ROW_NOTES: [RowNote; 8] = [
+    RowNote {
+        label: "1264",
+        table: "children",
+        alter: "alter table `children` modify `qty` smallint not null;",
+        prefix: "if a value does not fit the new type (in strict SQL mode, the default): ",
+    },
+    RowNote {
+        label: "longer than the new length",
+        table: "children",
+        alter: "alter table `children` modify `code` varchar(10) null;",
+        prefix: "if a value is longer than the new length (in strict SQL mode, the default): ",
+    },
+    RowNote {
+        label: "NULL",
+        table: "children",
+        alter: "alter table `children` modify `maybe` int not null;",
+        prefix: "if a row holds NULL: ",
+    },
+    RowNote {
+        label: "duplicates, InnoDB",
+        table: "children",
+        alter: "alter table `children` add unique `children_code_unique`(`code`);",
+        prefix: "if the columns hold duplicate values: ",
+    },
+    RowNote {
+        label: "duplicates, MyISAM",
+        table: "legacy",
+        alter: "alter table `legacy` add unique `legacy_code_unique`(`code`);",
+        prefix: "if the columns hold duplicate values: ",
+    },
+    RowNote {
+        label: "1452",
+        table: "children",
+        alter: "alter table `children` add constraint `children_parent_id_foreign` foreign key \
+                (`parent_id`) references `parents` (`id`);",
+        prefix: "if a row points to a parent row that does not exist: ",
+    },
+    RowNote {
+        label: "foreign key with the checks off",
+        table: "children",
+        alter: "set foreign_key_checks = 0;\n\
+                alter table `children` add constraint `children_parent_id_foreign` foreign key \
+                (`parent_id`) references `parents` (`id`);",
+        prefix: "if a row points to a parent row that does not exist (the row is kept unchecked): ",
+    },
+    RowNote {
+        label: "check constraint",
+        table: "children",
+        alter: "alter table `children` add constraint `children_qty_check` check (qty > 0);",
+        prefix: "if a row breaks the constraint: ",
+    },
+];
+
+#[test]
+fn row_notes_are_left_out_of_the_text_for_a_table_the_input_created_but_stay_in_the_json() {
+    for case in &ROW_NOTES {
+        let input = format!("{NEW_TABLES}{}\n", case.alter);
+        let (text, json, code) = text_and_json(&[], &input);
+        assert!(!text.contains(case.prefix), "{}: {text}", case.label);
+        assert!(
+            text.contains(&format!("    - {} {CREATED_EARLIER}\n", case.table)),
+            "{}: {text}",
+            case.label
+        );
+        let notes = last_notes(&json);
+        assert!(
+            notes.iter().any(|note| note.starts_with(case.prefix)),
+            "{}: {notes:?}",
+            case.label
+        );
+        // Neither the answer nor the exit code moves.
+        assert_eq!(
+            json["sources"][0]["statements"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["impact"],
+            "new_table",
+            "{}",
+            case.label
+        );
+        assert_eq!(code, Some(0), "{}: {text}", case.label);
+        assert_eq!(json["exit_code"], 0, "{}", case.label);
+    }
+}
+
+#[test]
+fn only_the_row_line_goes_from_a_new_tables_text_and_the_json_notes_are_what_they_were() {
+    // $table->smallInteger('qty')->change() on a table created in the same
+    // input: the text loses the 1264 line and nothing else.
+    let input = format!("{NEW_TABLES}alter table `children` modify `qty` smallint not null;\n");
+    let (text, json, _) = text_and_json(&[], &input);
+    assert!(
+        text.contains(
+            "  line 4: alter table `children` modify `qty` smallint not null\n\
+             \x20   COPY, copies every row, writes wait\n\
+             \x20   measured as change-integer-type (3 lab scenarios)\n\
+             \x20   - changes the type from INT to SMALLINT\n\
+             \x20   - children is created earlier in these migrations: nothing else uses it yet, \
+             so nothing waits for it\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("\n4 statements: 1 changes a table created here, 3 not checked\n"),
+        "{text}"
+    );
+    assert_eq!(
+        last_notes(&json),
+        [
+            "changes the type from INT to SMALLINT",
+            "if a value does not fit the new type (in strict SQL mode, the default): fails with \
+             error 1264 (int-to-tinyint-out-of-range)",
+        ]
+    );
+    let sql = "alter table `children` add constraint `children_parent_id_foreign` foreign key \
+               (`parent_id`) references `parents` (`id`);";
+    let (_, json, _) = text_and_json(&[], &format!("{NEW_TABLES}{sql}\n"));
+    assert_eq!(
+        last_notes(&json),
+        [
+            ASSUMES_CHECKS_ON,
+            "if a row points to a parent row that does not exist: fails with error 1452 \
+             (add-foreign-key-orphans)",
+        ]
+    );
+    assert_eq!(json["summary"]["new_table"], 1);
+}
+
+/// Statements that may put rows into table `t` (or that kilit cannot rule
+/// out), all after the CREATE and before the ALTER.
+fn statements_that_may_put_rows_into(t: &str) -> Vec<String> {
+    vec![
+        format!("insert into `{t}` (`id`) values (1)"),
+        format!("INSERT INTO {} (id) VALUES (1)", t.to_uppercase()),
+        format!("insert into {t} set id = 1"),
+        format!("replace into `{t}` (`id`) values (1)"),
+        format!("update `{t}` set `id` = `id` + 1"),
+        format!("insert into `shop`.`{t}` (`id`) values (1)"),
+        format!("load data infile '/tmp/{t}.csv' into table `{t}`"),
+        // Not a statement kilit reads.
+        format!("alter table `staging` exchange partition p0 with table `{t}`"),
+        format!("select * from `{t}`"),
+        format!("delete from {t}"),
+        // A name that contains the table's name counts: the scan is a text
+        // scan, on the safe side.
+        format!("insert into `{t}_archive` (`id`) values (1)"),
+    ]
+}
+
+#[test]
+fn a_statement_that_may_have_put_rows_into_the_table_keeps_its_row_notes() {
+    for case in &ROW_NOTES {
+        for between in statements_that_may_put_rows_into(case.table) {
+            let input = format!("{NEW_TABLES}{between};\n{}\n", case.alter);
+            let (text, json, _) = text_and_json(&[], &input);
+            // A statement kilit cannot read makes it lose the table, and a
+            // MODIFY (or a MyISAM change) on a lost table has no answer, so no row note.
+            if text.contains("kilit lost track of") {
+                continue;
+            }
+            assert!(
+                text.contains(&format!("    - {}", case.prefix)),
+                "{} after `{between}`: {text}",
+                case.label
+            );
+            assert!(
+                last_notes(&json)
+                    .iter()
+                    .any(|note| note.starts_with(case.prefix)),
+                "{} after `{between}`",
+                case.label
+            );
+        }
+    }
+}
+
+#[test]
+fn a_call_or_an_execute_keeps_the_row_notes_of_every_new_table() {
+    // A stored procedure or a prepared statement can fill any table, and
+    // its text does not name the table.
+    for between in [
+        "call fill_all_tables()",
+        "CALL fill_all_tables()",
+        "execute stmt1",
+        "EXECUTE stmt1 USING @a",
+    ] {
+        for case in &ROW_NOTES {
+            let input = format!("{NEW_TABLES}{between};\n{}\n", case.alter);
+            let (text, _, _) = text_and_json(&[], &input);
+            assert!(
+                text.contains(&format!("    - {}", case.prefix)),
+                "{} after `{between}`: {text}",
+                case.label
+            );
+        }
+    }
+}
+
+#[test]
+fn statements_that_cannot_have_put_rows_into_the_table_leave_the_row_notes_out() {
+    for case in &ROW_NOTES {
+        let t = case.table;
+        for between in [
+            "insert into `elsewhere` (`id`) values (1)".to_owned(),
+            "select 1".to_owned(),
+            "set @x = 1".to_owned(),
+            "create table `elsewhere` (`id` int not null)".to_owned(),
+            "alter table `parents` add `extra` int null".to_owned(),
+            // An ALTER that kilit reads fully puts no rows in the table.
+            format!("alter table `{t}` add `extra_col` int null"),
+        ] {
+            let input = format!("{NEW_TABLES}{between};\n{}\n", case.alter);
+            let (text, json, _) = text_and_json(&[], &input);
+            assert!(
+                !text.contains(case.prefix),
+                "{} after `{between}`: {text}",
+                case.label
+            );
+            assert!(
+                last_notes(&json)
+                    .iter()
+                    .any(|note| note.starts_with(case.prefix)),
+                "{} after `{between}`",
+                case.label
+            );
+        }
+        // A statement after the ALTER cannot have put rows in before it.
+        let input = format!(
+            "{NEW_TABLES}{}\ninsert into `{t}` (`id`) values (1);\n",
+            case.alter
+        );
+        let (text, _, _) = text_and_json(&[], &input);
+        assert!(
+            !text.contains(case.prefix),
+            "{} before an insert: {text}",
+            case.label
+        );
+    }
+}
+
+#[test]
+fn a_table_created_again_after_its_rows_were_dropped_has_no_row_notes() {
+    let input = "create table `children` (`id` int not null, `qty` int not null);
+                 insert into children (id) values (1);
+                 drop table `children`;
+                 create table `children` (`id` int not null, `qty` int not null);
+                 alter table `children` modify `qty` smallint not null;";
+    let (text, json, _) = text_and_json(&[], input);
+    assert!(
+        !text.contains("if a value does not fit the new type"),
+        "{text}"
+    );
+    assert!(
+        last_notes(&json)
+            .iter()
+            .any(|note| note.starts_with("if a value does not fit the new type"))
+    );
+}
+
+#[test]
+fn tables_from_the_schema_file_keep_every_row_note() {
+    // One table the input creates, two the schema file has: the row notes of
+    // the schema's tables stay, the new table's goes.
+    let schema = example("mysql-schema.sql");
+    let input = format!(
+        "{NEW_TABLES}alter table `children` modify `qty` smallint not null;\n\
+         alter table `orders` modify `amount` smallint not null;\n\
+         alter table `orders` add unique `orders_note_unique`(`note`);\n"
+    );
+    let (text, json, _) = text_and_json(&["--schema", schema.to_str().unwrap()], &input);
+    assert_eq!(
+        text.matches("if a value does not fit the new type (in strict SQL mode, the default): ")
+            .count(),
+        1,
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("    - if the columns hold duplicate values: ")
+            .count(),
+        1,
+        "{text}"
+    );
+    let statements = json["sources"][0]["statements"].as_array().unwrap();
+    for (index, prefix) in [
+        (3, "if a value does not fit the new type"),
+        (4, "if a value does not fit the new type"),
+        (5, "if the columns hold duplicate values: "),
+    ] {
+        assert!(
+            notes_of(&statements[index])
+                .iter()
+                .any(|note| note.starts_with(prefix)),
+            "statement {index}"
+        );
+    }
+}
+
+#[test]
+fn create_table_if_not_exists_keeps_the_row_notes() {
+    // The table may have been there before: it is not "created here".
+    let input = "create table if not exists `children` (`id` int not null, `qty` int not null);
+                 alter table `children` modify `qty` smallint not null;";
+    let (text, json, _) = text_and_json(&[], input);
+    assert!(
+        text.contains(
+            "    - if a value does not fit the new type (in strict SQL mode, the default): "
+        ),
+        "{text}"
+    );
+    assert!(!text.contains(CREATED_EARLIER), "{text}");
+    assert!(
+        last_notes(&json)
+            .iter()
+            .any(|note| note.starts_with("if a value does not fit the new type"))
+    );
+}
+
+#[test]
+fn a_created_and_dropped_name_taken_by_an_old_table_keeps_the_row_notes() {
+    // `shops` is in the schema file: it is renamed to a name that was created
+    // and dropped before, and still holds its rows.
+    let schema = example("mysql-schema.sql");
+    let input = "create table `shops_tmp` (`id` int not null);
+                 drop table `shops_tmp`;
+                 rename table `shops` to `shops_tmp`;
+                 alter table `shops_tmp` add unique `shops_tmp_name_unique`(`name`);";
+    let (text, json, _) = text_and_json(&["--schema", schema.to_str().unwrap()], input);
+    assert!(
+        text.contains("    - if the columns hold duplicate values: "),
+        "{text}"
+    );
+    assert!(
+        last_notes(&json)
+            .iter()
+            .any(|note| note.starts_with("if the columns hold duplicate values: "))
+    );
+}
+
+#[test]
+fn notes_that_do_not_depend_on_rows_stay_for_a_new_table() {
+    let input = format!(
+        "{NEW_TABLES}alter table `children` add `extra` int null;\n\
+         alter table `children` add constraint `children_parent_id_foreign` foreign key \
+         (`parent_id`) references `parents` (`id`);\n"
+    );
+    let (text, json, _) = text_and_json(&[], &input);
+    // The history of the table is not about rows.
+    assert!(
+        text.contains(
+            "    - if the table has had 64 instant column changes since it was last rebuilt: \
+             INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("    - {ASSUMES_CHECKS_ON}\n")),
+        "{text}"
+    );
+    assert_eq!(text.matches(CREATED_EARLIER).count(), 2, "{text}");
+    assert!(!text.contains("if a row points to a parent row"), "{text}");
+    let statements = json["sources"][0]["statements"].as_array().unwrap();
+    assert!(
+        notes_of(&statements[3])
+            .iter()
+            .any(|note| note.starts_with("if the table has had 64 instant column changes"))
+    );
+}
+
+// Laravel's shapes. $table->foreignId('parent_id') in a create, then an
+// ALTER that adds the key; with and without an insert between them.
+
+const L12_CREATE_FK: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_03_02_000002_create_parents_children_fk ...............................  \n",
+    "  \u{21c2} create table `parents` (`id` bigint unsigned not null auto_increment primary key, `name` varchar(255) not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'  \n",
+    "  \u{21c2} create table `children` (`id` bigint unsigned not null auto_increment primary key, `parent_id` bigint unsigned not null, `name` varchar(255) not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'  \n",
+    "  \u{21c2} alter table `children` add constraint `children_parent_id_foreign` foreign key (`parent_id`) references `parents` (`id`)  \n",
+    "\n",
+);
+
+const L13_SHORT_CREATE_FK: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_03_02_000002_create_parents_children_fk .. \n",
+    " \u{21c2} create table `parents` (`id` bigint unsigned not null auto_increment primary key, `name` varchar(255) not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' \n",
+    " \u{21c2} create table `children` (`id` bigint unsigned not null auto_increment primary key, `parent_id` bigint unsigned not null, `name` varchar(255) not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' \n",
+    " \u{21c2} alter table `children` add constraint `children_parent_id_foreign` foreign key (`parent_id`) references `parents` (`id`) \n",
+    "\n",
+);
+
+const L12_CREATE_INSERT_FK: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_03_02_000001_create_parents_children_insert_fk ........................  \n",
+    "  \u{21c2} create table `parents` (`id` bigint unsigned not null auto_increment primary key, `name` varchar(255) not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'  \n",
+    "  \u{21c2} create table `children` (`id` bigint unsigned not null auto_increment primary key, `parent_id` bigint unsigned not null, `name` varchar(255) not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'  \n",
+    "  \u{21c2} insert into `children` (`name`, `parent_id`) values ('a', 1)  \n",
+    "  \u{21c2} alter table `children` add constraint `children_parent_id_foreign` foreign key (`parent_id`) references `parents` (`id`)  \n",
+    "\n",
+);
+
+const L13_SHORT_CREATE_INSERT_FK: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_03_02_000001_create_parents_children_insert_fk .. \n",
+    " \u{21c2} create table `parents` (`id` bigint unsigned not null auto_increment primary key, `name` varchar(255) not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' \n",
+    " \u{21c2} create table `children` (`id` bigint unsigned not null auto_increment primary key, `parent_id` bigint unsigned not null, `name` varchar(255) not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' \n",
+    " \u{21c2} insert into `children` (`name`, `parent_id`) values ('a', 1) \n",
+    " \u{21c2} alter table `children` add constraint `children_parent_id_foreign` foreign key (`parent_id`) references `parents` (`id`) \n",
+    "\n",
+);
+
+const EXPECTED_CREATE_FK: &str = r#"checked against mysql-8.4.13, as measured by kilit-lab
+no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE
+
+2026_03_02_000002_create_parents_children_fk
+  create table `parents` (`id` bigint unsigned not null auto_increment primary key, `name` varchar(...
+    not checked: creates a new table; no existing rows are touched
+  create table `children` (`id` bigint unsigned not null auto_increment primary key, `parent_id` bi...
+    not checked: creates a new table; no existing rows are touched
+  alter table `children` add constraint `children_parent_id_foreign` foreign key (`parent_id`) references `parents` (`id`)
+    COPY, copies every row, writes wait
+    measured as add-foreign-key (16 lab scenarios)
+    - assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it
+    - children is created earlier in these migrations: nothing else uses it yet, so nothing waits for it
+
+3 statements: 1 changes a table created here, 2 not checked
+"#;
+const EXPECTED_CREATE_INSERT_FK: &str = r#"checked against mysql-8.4.13, as measured by kilit-lab
+no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE
+
+2026_03_02_000001_create_parents_children_insert_fk
+  create table `parents` (`id` bigint unsigned not null auto_increment primary key, `name` varchar(...
+    not checked: creates a new table; no existing rows are touched
+  create table `children` (`id` bigint unsigned not null auto_increment primary key, `parent_id` bi...
+    not checked: creates a new table; no existing rows are touched
+  insert into `children` (`name`, `parent_id`) values ('a', 1)
+    not checked: not a schema change
+  alter table `children` add constraint `children_parent_id_foreign` foreign key (`parent_id`) references `parents` (`id`)
+    COPY, copies every row, writes wait
+    measured as add-foreign-key (16 lab scenarios)
+    - assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it
+    - if a row points to a parent row that does not exist: fails with error 1452 (add-foreign-key-orphans)
+    - children is created earlier in these migrations: nothing else uses it yet, so nothing waits for it
+
+4 statements: 1 changes a table created here, 3 not checked
+"#;
+
+#[test]
+fn a_laravel_migration_that_creates_a_table_and_adds_a_key_loses_the_row_line_only() {
+    // Schema::create('parents'), Schema::create('children') with
+    // foreignId('parent_id'), then $table->foreign('parent_id')->references('id')
+    // ->on('parents') in Schema::table. Laravel 12 and 13 in a terminal print
+    // the long form, and Laravel 13 prints a shorter form in some environments.
+    for (form, input) in [("long", L12_CREATE_FK), ("short", L13_SHORT_CREATE_FK)] {
+        let output = kilit(&["check"], input);
+        assert_eq!(stdout(&output), EXPECTED_CREATE_FK, "{form}");
+        assert_eq!(output.status.code(), Some(0), "{form}");
+        let json = json_of(&kilit(&["check", "--format", "json"], input));
+        let statements = json["sources"][0]["statements"].as_array().unwrap();
+        assert_eq!(
+            notes_of(&statements[2]),
+            [
+                ASSUMES_CHECKS_ON,
+                "if a row points to a parent row that does not exist: fails with error 1452 \
+                 (add-foreign-key-orphans)"
+            ],
+            "{form}"
+        );
+        assert_eq!(json["exit_code"], 0, "{form}");
+    }
+}
+
+#[test]
+fn an_insert_between_the_create_and_the_key_keeps_the_row_line_in_laravel_s_output() {
+    for (form, input) in [
+        ("long", L12_CREATE_INSERT_FK),
+        ("short", L13_SHORT_CREATE_INSERT_FK),
+    ] {
+        let output = kilit(&["check"], input);
+        assert_eq!(stdout(&output), EXPECTED_CREATE_INSERT_FK, "{form}");
+        assert_eq!(output.status.code(), Some(0), "{form}");
+    }
+}
+
+// Reads. Schema::hasTable('users'), Schema::getColumnListing('users') twice,
+// DB::table('users')->exists(), Schema::table(... add nickname), then
+// Schema::getColumnListing('users') again; a second migration reads twice
+// and adds a column.
+
+const SELECT_HAS_TABLE: &str = "select exists (select 1 from information_schema.tables where table_schema = schema() and table_name = 'users' and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')) as `exists`";
+const SELECT_COLUMNS: &str = "select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as `collation`, is_nullable as `nullable`, column_default as `default`, column_comment as `comment`, generation_expression as `expression`, extra as `extra` from information_schema.columns where table_schema = schema() and table_name = 'users' order by ordinal_position asc";
+const SELECT_EXISTS_USERS: &str = "select exists(select * from `users`) as `exists`";
+const ADD_NICKNAME: &str = "alter table `users` add `nickname` varchar(255) null";
+const ADD_PHONE: &str = "alter table `users` add `phone` varchar(255) null";
+
+/// Laravel's long form (Laravel 12, and 13 in a terminal).
+fn pretend_long(migrations: &[(&str, &[&str])]) -> String {
+    let mut out = String::from("\n   INFO  Running migrations.  \n\n");
+    for (name, statements) in migrations {
+        out.push_str(&format!("  {name} ....  \n"));
+        for sql in *statements {
+            out.push_str(&format!("  \u{21c2} {sql}  \n"));
+        }
+    }
+    out.push('\n');
+    out
+}
+
+/// The shorter form Laravel 13 prints in some environments.
+fn pretend_short(migrations: &[(&str, &[&str])]) -> String {
+    let mut out = String::from("\n INFO Running migrations. \n\n");
+    for (name, statements) in migrations {
+        out.push_str(&format!(" {name} .. \n"));
+        for sql in *statements {
+            out.push_str(&format!(" \u{21c2} {sql} \n"));
+        }
+    }
+    out.push('\n');
+    out
+}
+
+fn reads_migrations() -> [(&'static str, &'static [&'static str]); 2] {
+    [
+        (
+            "2026_03_01_000001_reads_one_users_table",
+            &[
+                SELECT_HAS_TABLE,
+                SELECT_COLUMNS,
+                SELECT_COLUMNS,
+                SELECT_EXISTS_USERS,
+                ADD_NICKNAME,
+                SELECT_COLUMNS,
+            ],
+        ),
+        (
+            "2026_03_01_000002_reads_two_users_table",
+            &[SELECT_HAS_TABLE, SELECT_COLUMNS, ADD_PHONE],
+        ),
+    ]
+}
+
+const EXPECTED_READS: &str = r#"checked against mysql-8.4.13, as measured by kilit-lab
+no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE
+
+2026_03_01_000001_reads_one_users_table
+  select exists (select 1 from information_schema.tables where table_schema = schema() and table_na...
+    not checked: not a schema change
+    - this migration reads the database: under --pretend every read returns nothing, so statements that depend on what it reads may be missing here, or may appear although they would not run
+  read (not checked): select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as ...
+  read (not checked): select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as ...
+  read (not checked): select exists(select * from `users`) as `exists`
+  alter table `users` add `nickname` varchar(255) null
+    INSTANT, no rebuild, writes continue
+    measured as add-column (7 lab scenarios)
+    - if the table has a FULLTEXT index: COPY, copies every row, writes wait (add-column-with-fulltext)
+    - if the table has had 64 instant column changes since it was last rebuilt: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)
+  read (not checked): select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as ...
+
+2026_03_01_000002_reads_two_users_table
+  select exists (select 1 from information_schema.tables where table_schema = schema() and table_na...
+    not checked: not a schema change
+    - this migration reads the database: under --pretend every read returns nothing, so statements that depend on what it reads may be missing here, or may appear although they would not run
+  read (not checked): select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as ...
+  alter table `users` add `phone` varchar(255) null
+    INSTANT, no rebuild, writes continue
+    measured as add-column (7 lab scenarios)
+    - if the table has a FULLTEXT index: COPY, copies every row, writes wait (add-column-with-fulltext)
+    - if the table has had 64 instant column changes since it was last rebuilt: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)
+
+metadata lock on users:
+  Every ALTER TABLE first waits for the open transactions that have used its
+  table to end. While it waits, new queries on that table queue behind it,
+  reads too, even for an INSTANT change, and by default MySQL lets it wait a
+  year (lock_wait_timeout = 31536000). Run SET SESSION lock_wait_timeout = 5
+  before the migration to cap the wait: the ALTER then fails with error 1205
+  after 5 seconds, the queries behind it go on, and you can run the migration
+  again later.
+  measured by kilit-lab on mysql-8.4.13
+
+9 statements: 2 run while writes continue, 7 not checked
+"#;
+
+#[test]
+fn every_read_after_the_first_in_a_migration_is_one_line_without_an_explanation() {
+    for (form, input) in [
+        ("long", pretend_long(&reads_migrations())),
+        ("short", pretend_short(&reads_migrations())),
+    ] {
+        let output = kilit(&["check"], &input);
+        assert_eq!(stdout(&output), EXPECTED_READS, "{form}");
+        // Reads change no exit code.
+        assert_eq!(output.status.code(), Some(0), "{form}");
+        assert_eq!(kilit(&["check", "--strict"], &input).status.code(), Some(0));
+    }
+}
+
+#[test]
+fn the_json_keeps_every_read_and_the_read_note_as_before() {
+    for (form, input) in [
+        ("long", pretend_long(&reads_migrations())),
+        ("short", pretend_short(&reads_migrations())),
+    ] {
+        let json = json_of(&kilit(&["check", "--format", "json"], &input));
+        let sources = json["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 2, "{form}");
+        let counts: Vec<usize> = sources
+            .iter()
+            .map(|source| source["statements"].as_array().unwrap().len())
+            .collect();
+        assert_eq!(counts, [6, 3], "{form}");
+        // The whole SQL of every statement, uncut.
+        let sql: Vec<&str> = sources[0]["statements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|statement| statement["sql"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            sql,
+            [
+                SELECT_HAS_TABLE,
+                SELECT_COLUMNS,
+                SELECT_COLUMNS,
+                SELECT_EXISTS_USERS,
+                ADD_NICKNAME,
+                SELECT_COLUMNS
+            ],
+            "{form}"
+        );
+        for (source, reads) in [(0, [0, 1, 2, 3, 5].as_slice()), (1, [0, 1].as_slice())] {
+            let statements = sources[source]["statements"].as_array().unwrap();
+            for &read in reads {
+                assert_eq!(statements[read]["impact"], "not_checked", "{form}");
+                assert_eq!(
+                    statements[read]["reason"], "not a schema change",
+                    "{form}: source {source} statement {read}"
+                );
+                // Only the first read of a migration has the note.
+                let noted = statements[read]["notes"] == serde_json::json!([READ_NOTE]);
+                assert_eq!(noted, read == 0, "{form}: source {source} statement {read}");
+            }
+        }
+        assert_eq!(sources[0]["statements"][4]["impact"], "writes_continue");
+        assert_eq!(sources[1]["statements"][2]["impact"], "writes_continue");
+        assert_eq!(json["summary"]["statements"], 9, "{form}");
+        assert_eq!(json["summary"]["not_checked"], 7, "{form}");
+        assert_eq!(json["summary"]["writes_continue"], 2, "{form}");
+        assert_eq!(json["exit_code"], 0, "{form}");
+    }
+}
+
+fn one_migration(statements: &[&str]) -> String {
+    pretend_long(&[("2026_03_03_000001_reads_orders_table", statements)])
+}
+
+#[test]
+fn a_later_read_that_may_write_or_is_not_plainly_a_read_prints_in_full() {
+    // with ... is not in the list of read words. The others hold a word that
+    // writes: into, update, insert, delete, replace.
+    for not_a_short_line in [
+        "with x as (select 1) select * from x",
+        "select id into @x from `orders` limit 1",
+        "SELECT id INTO @x FROM `orders` LIMIT 1",
+        "select * from `orders` into outfile '/tmp/orders.csv'",
+        "select * from `orders` where id = 1 for update",
+        "insert into `orders` (`id`) values (1)",
+        "update `orders` set `qty` = 1",
+        "delete from `orders`",
+        "replace into `orders` (`id`) values (1)",
+    ] {
+        let input = one_migration(&["select 1", not_a_short_line, "select 2"]);
+        let text = stdout(&kilit(&["check"], &input));
+        // kilit cannot read INTO OUTFILE: its full form is the SQL line and
+        // an UNKNOWN line, not "not checked".
+        let full = if not_a_short_line.contains("outfile") {
+            format!("\n  {not_a_short_line}\n    UNKNOWN: kilit could not read this statement")
+        } else {
+            format!("\n  {not_a_short_line}\n    not checked: not a schema change\n")
+        };
+        assert!(text.contains(&full), "{not_a_short_line}: {text}");
+        assert!(
+            !text.contains(&format!("read (not checked): {not_a_short_line}")),
+            "{not_a_short_line}: {text}"
+        );
+        // The statement around it that is a plain read is a short line.
+        assert!(
+            text.contains("\n  read (not checked): select 2\n"),
+            "{text}"
+        );
+        // The first read keeps its note, once.
+        assert_eq!(
+            text.matches(READ_NOTE).count(),
+            1,
+            "{not_a_short_line}: {text}"
+        );
+    }
+}
+
+#[test]
+fn every_plain_read_word_gives_a_short_line_for_a_later_read_in_any_letter_case() {
+    for read in [
+        "select 1",
+        "SELECT 1",
+        "Select id from `orders`",
+        "show tables",
+        "SHOW INDEX FROM `orders`",
+        "describe `orders`",
+        "desc `orders`",
+        "explain select * from `orders`",
+        "values row(1, 2)",
+        // A column that only starts with a write word is no write word.
+        "select `updated_at` from `orders`",
+    ] {
+        let input = one_migration(&["select 0", read]);
+        let text = stdout(&kilit(&["check"], &input));
+        assert!(
+            text.contains(&format!("\n  read (not checked): {read}\n")),
+            "{read}: {text}"
+        );
+        assert!(!text.contains(&format!("\n  {read}\n")), "{read}: {text}");
+        assert_eq!(text.matches(READ_NOTE).count(), 1, "{read}: {text}");
+    }
+}
+
+#[test]
+fn the_first_read_is_not_a_short_line_even_after_other_statements() {
+    let input = one_migration(&[
+        "alter table `orders` add `qty` int null",
+        "select 1",
+        "select 2",
+    ]);
+    let text = stdout(&kilit(&["check"], &input));
+    assert!(
+        text.contains(&format!(
+            "  select 1\n    not checked: not a schema change\n    - {READ_NOTE}\n\
+             \x20 read (not checked): select 2\n"
+        )),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_read_over_100_characters_is_cut_to_97_and_three_dots_and_100_is_not_cut() {
+    let exactly_100 = format!("select {} from t", "x".repeat(100 - "select  from t".len()));
+    assert_eq!(exactly_100.len(), 100);
+    let over = format!("{exactly_100} ");
+    let over = format!("{over}x");
+    assert_eq!(over.len(), 102);
+    let input = one_migration(&["select 1", &exactly_100, &over]);
+    let text = stdout(&kilit(&["check"], &input));
+    assert!(
+        text.contains(&format!("\n  read (not checked): {exactly_100}\n")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("\n  read (not checked): {}...\n", &over[..97])),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_plain_sql_file_keeps_every_select_with_its_line_and_reason() {
+    let sql = "select 1;\nselect 2;\nshow tables;\nselect 3;";
+    let (text, json, code) = text_and_json(&[], sql);
+    for (line, statement) in [
+        (1, "select 1"),
+        (2, "select 2"),
+        (3, "show tables"),
+        (4, "select 3"),
+    ] {
+        assert!(
+            text.contains(&format!(
+                "  line {line}: {statement}\n    not checked: not a schema change\n"
+            )),
+            "{text}"
+        );
+    }
+    assert!(!text.contains("read (not checked)"), "{text}");
+    assert!(!text.contains("reads the database"), "{text}");
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        json["sources"][0]["statements"].as_array().unwrap().len(),
+        4
+    );
+}
+
+#[test]
+fn a_global_foreign_key_checks_set_before_a_key_changes_the_assumption_note() {
+    // SET GLOBAL ... changes the value of the next connection: this session
+    // keeps the MySQL default, which is ON.
+    let add_key = "alter table `children` add constraint `children_parent_id_foreign` foreign key \
+                   (`parent_id`) references `parents` (`id`);";
+    for set in [
+        "SET GLOBAL foreign_key_checks = 0",
+        "set global foreign_key_checks = off",
+        "SET @@global.foreign_key_checks = 0",
+        "SET PERSIST foreign_key_checks = 0",
+        "SET @@persist.foreign_key_checks = 0",
+    ] {
+        let input = format!("{set};\n{NEW_TABLES}{add_key}\n");
+        let (text, json, code) = text_and_json(&[], &input);
+        assert!(
+            text.contains(&format!("    - {ASSUMES_CHECKS_ON_IN_SESSION}\n")),
+            "{set}: {text}"
+        );
+        assert!(!text.contains(ASSUMES_CHECKS_ON), "{set}: {text}");
+        let statement = json["sources"][0]["statements"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            notes_of(&statement)[0],
+            ASSUMES_CHECKS_ON_IN_SESSION,
+            "{set}"
+        );
+        // The answer and the exit code are those of a key with the checks on.
+        assert_eq!(statement["impact"], "new_table", "{set}");
+        assert_eq!(statement["case"], "add-foreign-key", "{set}");
+        assert_eq!(statement["algorithm"], "COPY", "{set}");
+        assert_eq!(code, Some(0), "{set}");
+    }
+}
+
+#[test]
+fn the_assumption_note_keeps_its_text_when_nothing_before_the_statement_sets_the_checks() {
+    let input = format!(
+        "{NEW_TABLES}alter table `children` add constraint `children_parent_id_foreign` foreign \
+         key (`parent_id`) references `parents` (`id`);\n"
+    );
+    let (text, json, _) = text_and_json(&[], &input);
+    assert!(
+        text.contains(&format!("    - {ASSUMES_CHECKS_ON}\n")),
+        "{text}"
+    );
+    assert!(!text.contains("in this session"), "{text}");
+    assert_eq!(last_notes(&json)[0], ASSUMES_CHECKS_ON);
+}
+
+#[test]
+fn a_session_set_after_a_global_one_means_no_assumption_note_at_all() {
+    let input = format!(
+        "SET GLOBAL foreign_key_checks = 0;\nSET SESSION foreign_key_checks = 1;\n{NEW_TABLES}\
+         alter table `children` add constraint `children_parent_id_foreign` foreign key \
+         (`parent_id`) references `parents` (`id`);\n"
+    );
+    let (text, json, _) = text_and_json(&[], &input);
+    assert!(!text.contains("assumes foreign_key_checks"), "{text}");
+    assert!(
+        !last_notes(&json)
+            .iter()
+            .any(|note| note.contains("assumes foreign_key_checks"))
+    );
+}
+
+#[test]
+fn dropping_a_foreign_key_column_or_its_only_index_says_the_session_assumption_in_the_new_words() {
+    let schema = example("mysql-schema.sql");
+    let schema = schema.to_str().unwrap();
+    let sql = "alter table orders drop index orders_user_id_foreign;
+               alter table orders drop column user_id;";
+    // Nothing sets the checks: the words stay.
+    let (text, json, code) = text_and_json(&["--schema", schema], sql);
+    for note in [
+        format!(
+            "orders_user_id_foreign is the only index that serves the foreign key \
+             orders_user_id_foreign; {ASSUMES_CHECKS_ON}"
+        ),
+        format!("user_id is in the foreign key orders_user_id_foreign; {ASSUMES_CHECKS_ON}"),
+    ] {
+        assert!(text.contains(&format!("    - {note}\n")), "{text}");
+    }
+    let before = json["sources"][0]["statements"].clone();
+    assert_eq!(before[0]["error"], 1553);
+    assert_eq!(before[1]["error"], 1828);
+    assert_eq!(code, Some(1));
+
+    // A global set before them: the new words, in the same two places, and
+    // the same answers.
+    for set in [
+        "SET GLOBAL foreign_key_checks = 0",
+        "SET @@global.foreign_key_checks = 0",
+        "SET PERSIST foreign_key_checks = 0",
+        "SET @@persist.foreign_key_checks = 0",
+    ] {
+        let input = format!("{set};\n{sql}");
+        let (text, json, code) = text_and_json(&["--schema", schema], &input);
+        for note in [
+            format!(
+                "orders_user_id_foreign is the only index that serves the foreign key \
+                 orders_user_id_foreign; {ASSUMES_CHECKS_ON_IN_SESSION}"
+            ),
+            format!(
+                "user_id is in the foreign key orders_user_id_foreign; \
+                 {ASSUMES_CHECKS_ON_IN_SESSION}"
+            ),
+        ] {
+            assert!(text.contains(&format!("    - {note}\n")), "{set}: {text}");
+            assert!(
+                json["sources"][0]["statements"].to_string().contains(&note),
+                "{set}"
+            );
+        }
+        assert!(!text.contains(ASSUMES_CHECKS_ON), "{set}: {text}");
+        let after = &json["sources"][0]["statements"];
+        assert_eq!(after[1]["error"], 1553, "{set}");
+        assert_eq!(after[2]["error"], 1828, "{set}");
+        assert_eq!(code, Some(1), "{set}");
+    }
+}
+
+#[test]
+fn the_binary_log_note_names_binlog_format_row_in_text_and_json() {
+    // $table->uuid('token')->default(new Expression('(UUID())'))
+    let schema = example("mysql-schema.sql");
+    let sql = "alter table `orders` add `token` char(36) not null default (UUID());\n\
+               alter table `orders` add `due_on` date not null default (CURDATE());";
+    let (text, json, _) = text_and_json(&["--schema", schema.to_str().unwrap()], sql);
+    assert_eq!(
+        text.matches(&format!("    - {ASSUMES_BINARY_LOG}\n"))
+            .count(),
+        2,
+        "{text}"
+    );
+    assert!(!text.contains(ASSUMES_BINARY_LOG_BEFORE_11A), "{text}");
+    for statement in json["sources"][0]["statements"].as_array().unwrap() {
+        assert_eq!(notes_of(statement)[0], ASSUMES_BINARY_LOG);
+    }
+}
+
+#[test]
+fn rows_put_in_a_table_before_it_is_renamed_keep_the_row_notes_of_the_new_name() {
+    // The INSERT names `c`, and the rename carries the rows to `d`.
+    let input = "create table `c` (`id` int not null, `code` varchar(20) null);
+                 insert into `c` (`id`) values (1);
+                 rename table `c` to `d`;
+                 alter table `d` add unique `d_code_unique`(`code`);";
+    let (text, json, _) = text_and_json(&[], input);
+    assert!(
+        text.contains("    - if the columns hold duplicate values: "),
+        "{text}"
+    );
+    assert!(
+        last_notes(&json)
+            .iter()
+            .any(|note| note.starts_with("if the columns hold duplicate values: "))
+    );
+}
+
+#[test]
+fn a_table_statement_kilit_cannot_read_is_unknown_and_prints_in_full_not_as_a_read_line() {
+    let input = one_migration(&["select 0", "table `orders`"]);
+    let text = stdout(&kilit(&["check"], &input));
+    assert!(
+        text.contains("\n  table `orders`\n    UNKNOWN: kilit could not read this statement"),
+        "{text}"
+    );
+    assert!(!text.contains("read (not checked)"), "{text}");
+}
+
+// Regression tests for the review of step 11a.
+
+const ADD_CHILDREN_KEY: &str = "alter table `children` add constraint \
+     `children_parent_id_foreign` foreign key (`parent_id`) references `parents` (`id`);";
+
+#[test]
+fn set_persist_only_and_a_read_of_the_global_value_keep_the_old_assumption_note() {
+    // PERSIST_ONLY changes neither the global nor the session value (measured
+    // on 8.0.46 and 8.4.13), and a SET @saved = @@GLOBAL.x only reads it.
+    for set in [
+        "SET PERSIST_ONLY foreign_key_checks = 0",
+        "set persist_only foreign_key_checks = 0",
+        "SET @@persist_only.foreign_key_checks = 0",
+        "SET @saved = @@GLOBAL.foreign_key_checks",
+        "SET @saved = @@global.foreign_key_checks",
+    ] {
+        let input = format!("{set};\n{NEW_TABLES}{ADD_CHILDREN_KEY}\n");
+        let (text, json, code) = text_and_json(&[], &input);
+        assert!(
+            text.contains(&format!("    - {ASSUMES_CHECKS_ON}\n")),
+            "{set}: {text}"
+        );
+        assert!(!text.contains("in this session"), "{set}: {text}");
+        assert_eq!(last_notes(&json)[0], ASSUMES_CHECKS_ON, "{set}");
+        assert_eq!(code, Some(0), "{set}");
+    }
+}
+
+#[test]
+fn set_persist_only_before_dropping_a_foreign_key_column_keeps_the_old_words() {
+    let schema = example("mysql-schema.sql");
+    let schema = schema.to_str().unwrap();
+    let input = "SET PERSIST_ONLY foreign_key_checks = 0;
+                 alter table orders drop index orders_user_id_foreign;
+                 alter table orders drop column user_id;";
+    let (text, _, code) = text_and_json(&["--schema", schema], input);
+    for note in [
+        format!(
+            "orders_user_id_foreign is the only index that serves the foreign key \
+             orders_user_id_foreign; {ASSUMES_CHECKS_ON}"
+        ),
+        format!("user_id is in the foreign key orders_user_id_foreign; {ASSUMES_CHECKS_ON}"),
+    ] {
+        assert!(text.contains(&format!("    - {note}\n")), "{text}");
+    }
+    assert!(!text.contains("in this session"), "{text}");
+    assert_eq!(code, Some(1));
+}
+
+#[test]
+fn a_session_default_after_a_global_set_does_not_claim_the_global_value_changed_this_session() {
+    // SET foreign_key_checks = DEFAULT is an open question: only the claim
+    // that the global value does not reach this session is ruled out.
+    let input = format!(
+        "SET GLOBAL foreign_key_checks = 0;\nSET foreign_key_checks = DEFAULT;\n\
+         {NEW_TABLES}{ADD_CHILDREN_KEY}\n"
+    );
+    let (text, json, _) = text_and_json(&[], &input);
+    assert!(!text.contains("changes its global value"), "{text}");
+    assert!(
+        !last_notes(&json)
+            .iter()
+            .any(|note| note.contains("changes its global value"))
+    );
+}
+
+const ROWS_IN_EV: &str = "create table `ev` (`id` int not null, `n` int null);\n";
+const ADD_EV_UNIQUE: &str = "alter table `ev` add unique index `ev_n` (`n`);\n";
+const DUPLICATES: &str = "if the columns hold duplicate values: ";
+
+#[test]
+fn a_comment_statement_that_the_splitter_drops_keeps_the_row_notes_of_every_new_table() {
+    // mysqldump writes its inserts as /*!40000 ... */ statements. Both servers
+    // run them: the unique index then fails with 1062.
+    let input =
+        format!("{ROWS_IN_EV}/*!40000 INSERT INTO ev VALUES (1,1),(2,1) */;\n{ADD_EV_UNIQUE}");
+    let (text, json, _) = text_and_json(&[], &input);
+    assert!(text.contains(&format!("    - {DUPLICATES}")), "{text}");
+    assert!(
+        last_notes(&json)
+            .iter()
+            .any(|note| note.starts_with(DUPLICATES))
+    );
+}
+
+#[test]
+fn a_comment_statement_in_any_input_file_keeps_the_row_notes() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("comment_statement_files");
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |name: &str, content: String| {
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        path
+    };
+    let comment = "/*!40000 INSERT INTO ev VALUES (1,1),(2,1) */;\n";
+    // The comment in the second file, before the ALTER.
+    let first = write("1_create.sql", ROWS_IN_EV.to_owned());
+    let second = write("2_fill_alter.sql", format!("{comment}{ADD_EV_UNIQUE}"));
+    // The comment in a file after the ALTER's file.
+    let alter_file = write("3_create_alter.sql", format!("{ROWS_IN_EV}{ADD_EV_UNIQUE}"));
+    let last = write("4_comment.sql", comment.to_owned());
+    for files in [[first, second], [alter_file, last]] {
+        let mut args = vec!["check"];
+        args.extend(files.iter().map(|path| path.to_str().unwrap()));
+        let output = kilit(&args, "");
+        let text = stdout(&output);
+        assert!(
+            text.contains(&format!("    - {DUPLICATES}")),
+            "{files:?}: {text}"
+        );
+    }
+}
+
+#[test]
+fn a_trigger_or_a_function_before_a_statement_keeps_the_row_notes_of_every_new_table() {
+    // The trigger copies rows into ev when orders is updated; the function is
+    // called by a SET. Both servers: two rows in ev, then 1062.
+    for input in [
+        format!(
+            "CREATE TRIGGER orders_audit AFTER UPDATE ON orders FOR EACH ROW \
+             INSERT INTO ev VALUES (OLD.id, 1);\n{ROWS_IN_EV}\
+             UPDATE orders SET note = 'x';\n{ADD_EV_UNIQUE}"
+        ),
+        format!(
+            "CREATE FUNCTION fill() RETURNS INT DETERMINISTIC RETURN 1;\n{ROWS_IN_EV}\
+             SET @x = fill();\n{ADD_EV_UNIQUE}"
+        ),
+    ] {
+        let (text, json, _) = text_and_json(&[], &input);
+        assert!(
+            text.contains(&format!("    - {DUPLICATES}")),
+            "{input}: {text}"
+        );
+        assert!(
+            last_notes(&json)
+                .iter()
+                .any(|note| note.starts_with(DUPLICATES)),
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn a_procedure_or_an_event_before_a_statement_keeps_the_row_notes_too() {
+    for create in [
+        "CREATE PROCEDURE fill_ev() INSERT INTO ev VALUES (1, 1)",
+        "CREATE EVENT fill_ev_daily ON SCHEDULE EVERY 1 DAY DO INSERT INTO ev VALUES (1, 1)",
+    ] {
+        let input = format!("{create};\n{ROWS_IN_EV}SET @x = 1;\n{ADD_EV_UNIQUE}");
+        let (text, _, _) = text_and_json(&[], &input);
+        assert!(
+            text.contains(&format!("    - {DUPLICATES}")),
+            "{create}: {text}"
+        );
+    }
+}
+
+#[test]
+fn a_laravel_output_with_an_unreadable_line_keeps_every_row_note_and_exits_with_2() {
+    // An insert line whose mark is mangled is unreadable: it may have filled
+    // `children`.
+    let input = concat!(
+        "\n",
+        "   INFO  Running migrations.  \n",
+        "\n",
+        "  2026_03_02_000002_create_parents_children_fk ...............................  \n",
+        "  \u{21c2} create table `parents` (`id` bigint unsigned not null auto_increment primary key)  \n",
+        "  \u{21c2} create table `children` (`id` bigint unsigned not null auto_increment primary key, `parent_id` bigint unsigned not null)  \n",
+        "  X insert into `children` (`parent_id`) values (1)  \n",
+        "  \u{21c2} alter table `children` add constraint `children_parent_id_foreign` foreign key (`parent_id`) references `parents` (`id`)  \n",
+        "\n",
+    );
+    let output = kilit(&["check"], input);
+    let text = stdout(&output);
+    assert!(
+        text.contains("    - if a row points to a parent row that does not exist: "),
+        "{text}"
+    );
+    assert!(text.contains("kilit could not read these lines"), "{text}");
+    assert_eq!(output.status.code(), Some(2), "{text}");
+}
+
+#[test]
+fn a_schema_qualified_table_with_an_insert_by_its_short_name_keeps_the_row_notes() {
+    let input = "create table shop.events (`id` int not null, `n` int null);
+                 insert into events values (1, 1), (2, 1);
+                 alter table shop.events add unique index events_n (`n`);";
+    let (text, json, _) = text_and_json(&[], input);
+    assert!(text.contains(&format!("    - {DUPLICATES}")), "{text}");
+    assert!(
+        last_notes(&json)
+            .iter()
+            .any(|note| note.starts_with(DUPLICATES))
+    );
+}
+
+#[test]
+fn an_alter_kilit_reads_but_does_not_model_keeps_the_row_notes_of_the_next_alter() {
+    // AUTO_INCREMENT = 5 and ALTER COLUMN ... DROP DEFAULT parse as ALTERs
+    // with a change kilit does not model, and kilit answers UNKNOWN for them.
+    // They are no statement kilit fully reads: the row note of the next ALTER
+    // stays.
+    for alter in [
+        "alter table `ev` auto_increment = 5",
+        "alter table `ev` alter column `n` drop default",
+    ] {
+        let input = format!("{ROWS_IN_EV}{alter};\n{ADD_EV_UNIQUE}");
+        let (text, _, _) = text_and_json(&[], &input);
+        assert!(
+            text.contains("kilit does not understand this change"),
+            "{alter}: {text}"
+        );
+        assert!(
+            text.contains(&format!("    - {DUPLICATES}")),
+            "{alter}: {text}"
+        );
     }
 }

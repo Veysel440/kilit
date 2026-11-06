@@ -137,6 +137,39 @@ pub enum KeyProblem {
     NonUniqueIndex,
 }
 
+const VALUE_OUT_OF_RANGE: &str =
+    "if a value does not fit the new type (in strict SQL mode, the default)";
+const VALUE_TOO_LONG: &str =
+    "if a value is longer than the new length (in strict SQL mode, the default)";
+const NULL_IN_A_ROW: &str = "if a row holds NULL";
+const DUPLICATE_VALUES: &str = "if the columns hold duplicate values";
+const ORPHAN_ROW: &str = "if a row points to a parent row that does not exist";
+const ORPHAN_ROW_KEPT: &str =
+    "if a row points to a parent row that does not exist (the row is kept unchecked)";
+const ROW_BREAKS_CHECK: &str = "if a row breaks the constraint";
+
+/// The measured situations that depend on the rows a table holds. A table
+/// with no rows is in none of them.
+const ROW_SITUATIONS: [&str; 7] = [
+    VALUE_OUT_OF_RANGE,
+    VALUE_TOO_LONG,
+    NULL_IN_A_ROW,
+    DUPLICATE_VALUES,
+    ORPHAN_ROW,
+    ORPHAN_ROW_KEPT,
+    ROW_BREAKS_CHECK,
+];
+
+/// Whether `note`, one of the notes of a [`Prediction::Measured`], tells
+/// what happens if the table holds certain rows. Such a note says nothing
+/// about a table that has no rows.
+pub fn depends_on_rows(note: &str) -> bool {
+    ROW_SITUATIONS.iter().any(|situation| {
+        note.strip_prefix(situation)
+            .is_some_and(|rest| rest.starts_with(": "))
+    })
+}
+
 const ADD_COLUMN: Case = Case {
     id: "add-column",
     scenarios: &[
@@ -347,7 +380,7 @@ const CHANGE_INTEGER_TYPE: Case = Case {
         },
         Exception {
             scenarios: &["int-to-tinyint-out-of-range"],
-            when: "if a value does not fit the new type (in strict SQL mode, the default)",
+            when: VALUE_OUT_OF_RANGE,
             conditions: &[Condition::Hidden],
         },
     ],
@@ -380,7 +413,7 @@ const SHORTEN_VARCHAR: Case = Case {
     scenarios: &["varchar-50-to-40"],
     exceptions: &[Exception {
         scenarios: &["varchar-50-to-5-too-long"],
-        when: "if a value is longer than the new length (in strict SQL mode, the default)",
+        when: VALUE_TOO_LONG,
         conditions: &[Condition::Hidden],
     }],
 };
@@ -406,7 +439,7 @@ const MAKE_COLUMN_NOT_NULL: Case = Case {
     scenarios: &["not-null-no-nulls"],
     exceptions: &[Exception {
         scenarios: &["not-null-with-nulls"],
-        when: "if a row holds NULL",
+        when: NULL_IN_A_ROW,
         conditions: &[Condition::Hidden],
     }],
 };
@@ -470,7 +503,7 @@ const ADD_UNIQUE_INDEX: Case = Case {
     exceptions: &[
         Exception {
             scenarios: &["add-unique-index-duplicates"],
-            when: "if the columns hold duplicate values",
+            when: DUPLICATE_VALUES,
             conditions: &[Condition::Hidden],
         },
         Exception {
@@ -546,7 +579,7 @@ const ADD_FOREIGN_KEY: Case = Case {
     exceptions: &[
         Exception {
             scenarios: &["add-foreign-key-orphans"],
-            when: "if a row points to a parent row that does not exist",
+            when: ORPHAN_ROW,
             conditions: &[Condition::Hidden],
         },
         Exception {
@@ -605,7 +638,7 @@ const ADD_FOREIGN_KEY_CHECKS_OFF: Case = Case {
     scenarios: &["add-foreign-key-checks-off"],
     exceptions: &[Exception {
         scenarios: &["add-foreign-key-checks-off-orphans"],
-        when: "if a row points to a parent row that does not exist (the row is kept unchecked)",
+        when: ORPHAN_ROW_KEPT,
         conditions: &[Condition::Hidden],
     }],
 };
@@ -628,7 +661,7 @@ const ADD_CHECK_CONSTRAINT: Case = Case {
     ],
     exceptions: &[Exception {
         scenarios: &["add-check-constraint-rows-break-it"],
-        when: "if a row breaks the constraint",
+        when: ROW_BREAKS_CHECK,
         conditions: &[Condition::Hidden],
     }],
 };
@@ -732,7 +765,7 @@ const MYISAM_ADD_UNIQUE_INDEX: Case = Case {
     ],
     exceptions: &[Exception {
         scenarios: &["myisam-add-unique-index-duplicates"],
-        when: "if the columns hold duplicate values",
+        when: DUPLICATE_VALUES,
         conditions: &[Condition::Hidden],
     }],
 };
@@ -1255,6 +1288,12 @@ pub fn check(statements: &[Statement], schema: &Schema, results: &ServerResults)
             if sql.contains("binlog_format") {
                 session.binlog_format_set = true;
             }
+            // `SET GLOBAL` and `SET PERSIST` leave this session's value as
+            // it was. A session value set in the same statement is read
+            // below.
+            if sql.trim_start().starts_with("set") && sets_foreign_key_checks_globally(&sql) {
+                session.foreign_key_checks_global = true;
+            }
             // Any scope, any value: a table without `ROW_FORMAT` may get
             // another row format, and its keys another limit.
             if sql.contains("innodb_default_row_format") {
@@ -1360,6 +1399,10 @@ fn unknown(reason: impl Into<String>) -> Prediction {
 #[derive(Default)]
 struct Session {
     foreign_key_checks: Setting,
+    /// A statement sets the global value of `foreign_key_checks`, and none
+    /// sets this session's after it. The global value does not change the
+    /// session's.
+    foreign_key_checks_global: bool,
     /// `sql_log_bin`, which decides whether MySQL refuses some expression
     /// defaults.
     binary_log: BinaryLog,
@@ -1431,6 +1474,7 @@ impl Session {
                 // A global value does not change this session's.
                 "foreign_key_checks" if !variable.global => {
                     self.foreign_key_checks = Setting::parse(&variable.value);
+                    self.foreign_key_checks_global = false;
                 }
                 "sql_log_bin" => {
                     let on = !variable.global && Setting::parse(&variable.value) == Setting::On;
@@ -1475,7 +1519,57 @@ impl Setting {
 const ASSUMES_FOREIGN_KEY_CHECKS: &str =
     "assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it";
 
-const ASSUMES_BINARY_LOG: &str = "assumes the binary log is on, the MySQL default";
+const ASSUMES_FOREIGN_KEY_CHECKS_AFTER_GLOBAL: &str = "assumes foreign_key_checks is ON in this \
+     session, the MySQL default: a statement before this one changes its global value, which \
+     does not change this session";
+
+const ASSUMES_BINARY_LOG: &str =
+    "assumes the binary log is on with binlog_format = ROW, the MySQL default";
+
+impl Session {
+    /// What kilit assumes when no statement before sets this session's
+    /// `foreign_key_checks`.
+    fn assumes_foreign_key_checks(&self) -> &'static str {
+        if self.foreign_key_checks_global {
+            ASSUMES_FOREIGN_KEY_CHECKS_AFTER_GLOBAL
+        } else {
+            ASSUMES_FOREIGN_KEY_CHECKS
+        }
+    }
+}
+
+/// Whether every `foreign_key_checks` in `sql`, a SET in lowercase, is the
+/// global or persisted value that the SET assigns: `SET GLOBAL
+/// foreign_key_checks = 0`, or `SET PERSIST foreign_key_checks = 0`, which
+/// kilit cannot read. `PERSIST_ONLY` changes neither the global value nor
+/// the session's, and reading `@@global.foreign_key_checks` changes nothing.
+fn sets_foreign_key_checks_globally(sql: &str) -> bool {
+    const NAME: &str = "foreign_key_checks";
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '@' || c == '$';
+    // `rest` ends where an assignment starts: after SET or a comma.
+    let starts_assignment = |rest: &str| {
+        let rest = rest.trim_end();
+        rest.ends_with(',')
+            || rest
+                .strip_suffix("set")
+                .is_some_and(|before| !before.ends_with(is_word))
+    };
+    let mut named = sql.match_indices(NAME).peekable();
+    named.peek().is_some()
+        && named.all(|(at, _)| {
+            let before = sql[..at].trim_end();
+            let after = sql[at + NAME.len()..].trim_start();
+            let scoped = ["@@global.", "@@persist."]
+                .iter()
+                .any(|scope| before.strip_suffix(scope).is_some_and(starts_assignment))
+                || ["global", "persist"].iter().any(|scope| {
+                    before.strip_suffix(scope).is_some_and(|rest| {
+                        rest.ends_with(char::is_whitespace) && starts_assignment(rest)
+                    })
+                });
+            scoped && (after.starts_with('=') || after.starts_with(":="))
+        })
+}
 
 fn predict<'r>(
     alter: &Alter,
@@ -2568,7 +2662,8 @@ fn applies(condition: Condition, situation: &Situation<'_>) -> Applies {
                         Applies::Yes(vec![format!("{column} is in the foreign key {key}")])
                     }
                     Setting::ServerDefault => Applies::Yes(vec![format!(
-                        "{column} is in the foreign key {key}; {ASSUMES_FOREIGN_KEY_CHECKS}"
+                        "{column} is in the foreign key {key}; {}",
+                        situation.session.assumes_foreign_key_checks()
                     )]),
                     Setting::Off | Setting::Unclear => Applies::Unmeasured(format!(
                         "{column} is in the foreign key {key}, and the lab has not measured \
@@ -3350,7 +3445,7 @@ fn only_index_of_foreign_key(table: &Table, name: &str, situation: &Situation<'_
             ));
         }
         let assumes = if situation.session.foreign_key_checks == Setting::ServerDefault {
-            format!("; {ASSUMES_FOREIGN_KEY_CHECKS}")
+            format!("; {}", situation.session.assumes_foreign_key_checks())
         } else {
             String::new()
         };
@@ -4040,7 +4135,7 @@ fn classify(
                 &ADD_FOREIGN_KEY_CHECKS_OFF
             }
             Setting::ServerDefault => {
-                notes.push(ASSUMES_FOREIGN_KEY_CHECKS.to_owned());
+                notes.push(session.assumes_foreign_key_checks().to_owned());
                 &ADD_FOREIGN_KEY
             }
             Setting::Unclear => {
@@ -4652,6 +4747,74 @@ mod tests {
                 ..
             } => (case, verdict.to_string(), notes),
             other => panic!("expected a measured prediction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_situation_hidden_in_the_rows_is_a_row_situation() {
+        let history = "if the table has had 64 instant column changes since it was last rebuilt";
+        let cases = CASES
+            .iter()
+            .chain(&MYISAM_CASES)
+            .chain(&ROW_FORMAT_CASES)
+            .chain(&OLD_ALTER_TABLE_CASES);
+        for exception in cases.flat_map(|case| case.exceptions) {
+            let row = ROW_SITUATIONS.contains(&exception.when);
+            if exception.conditions == [Condition::Hidden] {
+                assert!(row || exception.when == history, "{}", exception.when);
+            } else {
+                assert!(!row, "{}", exception.when);
+            }
+        }
+    }
+
+    #[test]
+    fn a_note_depends_on_rows_when_it_starts_with_a_row_situation() {
+        assert!(depends_on_rows(
+            "if a row points to a parent row that does not exist: fails with error 1452 \
+             (add-foreign-key-orphans)"
+        ));
+        assert!(depends_on_rows(
+            "if the columns hold duplicate values: not measured on a COMPACT table; DYNAMIC \
+             gives fails with error 1062 (add-unique-index-duplicates)"
+        ));
+        for note in [
+            "if the table has had 64 instant column changes since it was last rebuilt: INPLACE, \
+             rebuilds the table, writes continue (add-column-after-64-changes)",
+            ASSUMES_FOREIGN_KEY_CHECKS,
+            "if a row holds NULL",
+            "user_id is in the foreign key orders_user; if a row holds NULL: x",
+        ] {
+            assert!(!depends_on_rows(note), "{note}");
+        }
+    }
+
+    #[test]
+    fn a_global_foreign_key_checks_is_told_from_a_session_one() {
+        for sql in [
+            "set global foreign_key_checks = 0",
+            "set @@global.foreign_key_checks = 0",
+            "set persist foreign_key_checks = 0",
+            "set @@persist.foreign_key_checks = 0",
+            "set session sql_mode = '', global foreign_key_checks := 0",
+        ] {
+            assert!(sets_foreign_key_checks_globally(sql), "{sql}");
+        }
+        for sql in [
+            "set foreign_key_checks = 0",
+            "set session foreign_key_checks = 0",
+            "set @@foreign_key_checks = 0",
+            "set persist foreign_key_checks = 0, foreign_key_checks = 1",
+            "set my_global foreign_key_checks = 0",
+            "set global sql_log_bin = 1",
+            // PERSIST_ONLY changes the value the server starts with next time.
+            "set persist_only foreign_key_checks = 0",
+            "set @@persist_only.foreign_key_checks = 0",
+            // Reading the global value changes nothing.
+            "set @saved = @@global.foreign_key_checks",
+            "set @a = 1, @saved = @@global.foreign_key_checks",
+        ] {
+            assert!(!sets_foreign_key_checks_globally(sql), "{sql}");
         }
     }
 

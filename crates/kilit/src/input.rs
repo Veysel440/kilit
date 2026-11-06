@@ -16,6 +16,9 @@ pub struct Input {
     pub from_laravel: bool,
     /// Each time Laravel stopped with an error.
     pub laravel_errors: Vec<LaravelError>,
+    /// Some input holds a `/*! ... */` comment, which MySQL runs. kilit does
+    /// not see a statement made of one alone.
+    pub runs_comments: bool,
 }
 
 /// Statements that belong together: one Laravel migration, or one SQL file.
@@ -54,6 +57,7 @@ impl Input {
             unreadable: Vec::new(),
             from_laravel: false,
             laravel_errors: Vec::new(),
+            runs_comments: false,
         };
         let mut stdin_read = false;
         for file in files {
@@ -75,6 +79,7 @@ impl Input {
     }
 
     fn add(&mut self, name: String, text: &str) {
+        self.runs_comments |= text.contains("/*!");
         match read_pretend(text) {
             Some(pretend) => {
                 self.from_laravel = true;

@@ -91,6 +91,70 @@ pub fn on_new_tables(statements: &[Statement]) -> Vec<bool> {
         .collect()
 }
 
+/// For each statement, whether it is an ALTER TABLE of a table that the
+/// input created earlier and that no statement since may have put rows in.
+/// A statement may have, unless kilit follows it as a change of tables
+/// only, if its text names the table, as INSERT, UPDATE and LOAD DATA do.
+/// CALL and EXECUTE run statements kilit does not see, which may put rows
+/// in any table; so may any such statement after one that names a trigger,
+/// a function, a procedure or an event, which may have created one.
+pub fn on_empty_tables(statements: &[Statement]) -> Vec<bool> {
+    let mut empty_tables: Vec<String> = Vec::new();
+    let mut runs_hidden_code = false;
+    statements
+        .iter()
+        .map(|statement| {
+            let on_empty_table = match &statement.kind {
+                StatementKind::Alter(alter) => empty_tables.contains(&key(&alter.table)),
+                _ => false,
+            };
+            if may_add_rows(statement) {
+                let sql = statement.sql.to_lowercase();
+                if runs_hidden_code || runs_unseen_statements(&sql) {
+                    empty_tables.clear();
+                }
+                // A trigger or a function created before a table may put
+                // rows in it later, without naming it again.
+                runs_hidden_code |= words(&sql)
+                    .any(|word| matches!(word, "trigger" | "function" | "procedure" | "event"));
+                // `shop.orders` and `orders` both name orders.
+                empty_tables.retain(|table| {
+                    let name = table.rsplit('.').next().unwrap_or(table);
+                    !sql.contains(name)
+                });
+            }
+            follow(statement, &mut empty_tables);
+            on_empty_table
+        })
+        .collect()
+}
+
+/// Whether kilit cannot rule out that `statement` puts rows in a table:
+/// every statement but CREATE TABLE, DROP TABLE, RENAME TABLE and an ALTER
+/// TABLE that kilit reads in full.
+fn may_add_rows(statement: &Statement) -> bool {
+    match &statement.kind {
+        StatementKind::CreateTable { .. }
+        | StatementKind::DropTable { .. }
+        | StatementKind::RenameTable { .. } => false,
+        StatementKind::Alter(alter) => alter
+            .operations
+            .iter()
+            .any(|operation| matches!(operation, Operation::Other { .. })),
+        _ => true,
+    }
+}
+
+/// `CALL`, `EXECUTE` or `DO` anywhere in `sql`, in lowercase, as a word.
+fn runs_unseen_statements(sql: &str) -> bool {
+    words(sql).any(|word| matches!(word, "call" | "execute" | "do"))
+}
+
+/// The words of `sql`, split at every character that cannot be in a name.
+fn words(sql: &str) -> impl Iterator<Item = &str> {
+    sql.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+}
+
 /// The tables a statement changes, as they are named before it runs.
 fn changed_tables(statement: &Statement) -> Vec<&str> {
     match &statement.kind {
@@ -368,6 +432,86 @@ mod tests {
                  alter table `order_events` modify `order_id` int unsigned not null;"
             ),
             [Impact::NotChecked, Impact::Fails]
+        );
+    }
+
+    fn on_empty_tables_of(sql: &str) -> Vec<bool> {
+        on_empty_tables(&parse(sql))
+    }
+
+    #[test]
+    fn a_table_created_earlier_is_empty_until_a_statement_may_fill_it() {
+        let create = "CREATE TABLE events (id INT PRIMARY KEY, n INT);";
+        let alter = "ALTER TABLE events ADD UNIQUE INDEX events_n (n);";
+        assert_eq!(
+            on_empty_tables_of(&format!("{create} {alter} {alter}")),
+            [false, true, true]
+        );
+        for filler in [
+            "INSERT INTO events VALUES (1, 1);",
+            "INSERT INTO `shop`.`Events` VALUES (1, 1);",
+            "REPLACE INTO events VALUES (1, 1);",
+            "UPDATE events SET n = 1;",
+            "LOAD DATA INFILE '/tmp/e.csv' INTO TABLE events;",
+            "ALTER TABLE orders EXCHANGE PARTITION p0 WITH TABLE events;",
+            "SELECT * FROM events;",
+            "CALL fill_tables();",
+            "EXECUTE fill;",
+        ] {
+            assert_eq!(
+                on_empty_tables_of(&format!("{create} {filler} {alter}")),
+                [false, false, false],
+                "{filler}"
+            );
+        }
+        // A trigger or a function made before the table may fill it later.
+        for routine in [
+            "CREATE TRIGGER orders_audit AFTER UPDATE ON orders FOR EACH ROW \
+             INSERT INTO events VALUES (OLD.id, 1);",
+            "CREATE FUNCTION fill() RETURNS INT DETERMINISTIC RETURN 1;",
+        ] {
+            assert_eq!(
+                on_empty_tables_of(&format!(
+                    "{routine} {create} UPDATE orders SET note = 'x'; {alter}"
+                )),
+                [false, false, false, false],
+                "{routine}"
+            );
+        }
+        // A statement that names another table leaves it empty.
+        assert_eq!(
+            on_empty_tables_of(&format!("{create} INSERT INTO orders VALUES (1); {alter}")),
+            [false, false, true]
+        );
+    }
+
+    #[test]
+    fn a_table_that_was_not_created_by_the_input_may_have_rows() {
+        assert_eq!(
+            on_empty_tables_of(
+                "ALTER TABLE orders ADD UNIQUE INDEX orders_note (note);
+                 CREATE TABLE IF NOT EXISTS events (id INT PRIMARY KEY, n INT);
+                 ALTER TABLE events ADD UNIQUE INDEX events_n (n);
+                 CREATE TABLE fresh (id INT PRIMARY KEY);
+                 DROP TABLE fresh;
+                 RENAME TABLE orders TO fresh;
+                 ALTER TABLE fresh ADD UNIQUE INDEX fresh_note (note);"
+            ),
+            [false, false, false, false, false, false, false]
+        );
+    }
+
+    #[test]
+    fn an_empty_table_stays_empty_under_its_new_name() {
+        assert_eq!(
+            on_empty_tables_of(
+                "CREATE TABLE events_new (id INT PRIMARY KEY, n INT);
+                 RENAME TABLE events_new TO events;
+                 ALTER TABLE events ADD UNIQUE INDEX events_n (n);
+                 ALTER TABLE events RENAME TO events_old;
+                 ALTER TABLE events_old ADD INDEX events_old_n (n);"
+            ),
+            [false, false, true, true, true]
         );
     }
 }

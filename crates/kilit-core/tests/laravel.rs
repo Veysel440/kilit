@@ -2815,3 +2815,230 @@ fn sql_with_lines_that_look_like_an_error_screen_is_not_laravel_output() {
         assert!(read_pretend(sql).is_none(), "{sql}");
     }
 }
+
+// Step 11a: what Laravel 12 and 13 print for reads and for a create followed
+// by a key, and what kilit-core still says about them. Leaving notes out of
+// the text is the command's job; the findings keep every note.
+
+fn long_form(migrations: &[(&str, &[&str])]) -> String {
+    let mut out = String::from("\n   INFO  Running migrations.  \n\n");
+    for (name, statements) in migrations {
+        out.push_str(&format!("  {name} ....  \n"));
+        for sql in *statements {
+            out.push_str(&format!("  \u{21c2} {sql}  \n"));
+        }
+    }
+    out.push('\n');
+    out
+}
+
+fn short_form(migrations: &[(&str, &[&str])]) -> String {
+    let mut out = String::from("\n INFO Running migrations. \n\n");
+    for (name, statements) in migrations {
+        out.push_str(&format!(" {name} .. \n"));
+        for sql in *statements {
+            out.push_str(&format!(" \u{21c2} {sql} \n"));
+        }
+    }
+    out.push('\n');
+    out
+}
+
+const SELECT_HAS_TABLE: &str = "select exists (select 1 from information_schema.tables where table_schema = schema() and table_name = 'users' and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')) as `exists`";
+const SELECT_COLUMNS: &str = "select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as `collation`, is_nullable as `nullable`, column_default as `default`, column_comment as `comment`, generation_expression as `expression`, extra as `extra` from information_schema.columns where table_schema = schema() and table_name = 'users' order by ordinal_position asc";
+const SELECT_EXISTS_USERS: &str = "select exists(select * from `users`) as `exists`";
+const ADD_NICKNAME: &str = "alter table `users` add `nickname` varchar(255) null";
+const ADD_PHONE: &str = "alter table `users` add `phone` varchar(255) null";
+
+const READS_ONE: &str = "2026_03_01_000001_reads_one_users_table";
+const READS_TWO: &str = "2026_03_01_000002_reads_two_users_table";
+
+// Schema::hasTable('users'), Schema::getColumnListing('users') twice,
+// DB::table('users')->exists(), Schema::table('users', add nickname),
+// Schema::getColumnListing('users'); then a second migration with
+// Schema::hasTable, Schema::getColumnListing and Schema::table(add phone).
+fn reads_in_both_forms() -> [(&'static str, String); 2] {
+    let ones: &[&str] = &[
+        SELECT_HAS_TABLE,
+        SELECT_COLUMNS,
+        SELECT_COLUMNS,
+        SELECT_EXISTS_USERS,
+        ADD_NICKNAME,
+        SELECT_COLUMNS,
+    ];
+    let twos: &[&str] = &[SELECT_HAS_TABLE, SELECT_COLUMNS, ADD_PHONE];
+    [
+        ("long", long_form(&[(READS_ONE, ones), (READS_TWO, twos)])),
+        ("short", short_form(&[(READS_ONE, ones), (READS_TWO, twos)])),
+    ]
+}
+
+/// The findings for all statements of the output, with their notes.
+fn notes_by_statement(server: &str, schema: &str, output: &str) -> Vec<Vec<String>> {
+    let pretend = read_pretend(output).expect("the output of migrate --pretend");
+    assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
+    let statements: Vec<_> = pretend
+        .migrations
+        .into_iter()
+        .flat_map(|migration| migration.statements)
+        .collect();
+    let results = Knowledge::built_in().server(server).unwrap();
+    check(&statements, &Schema::from_sql(schema), results)
+        .into_iter()
+        .map(|finding| match finding.prediction {
+            Prediction::Measured { notes, .. } => notes,
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+#[test]
+fn the_reads_of_laravel_12_and_13_stay_statements_with_one_first_read_per_migration() {
+    for (form, output) in reads_in_both_forms() {
+        let pretend = pretend_of(&output);
+        assert!(pretend.unreadable.is_empty(), "{form}");
+        assert_eq!(migration_names(&pretend), [READS_ONE, READS_TWO], "{form}");
+        assert_eq!(
+            sql_of(&pretend.migrations[0]),
+            [
+                SELECT_HAS_TABLE,
+                SELECT_COLUMNS,
+                SELECT_COLUMNS,
+                SELECT_EXISTS_USERS,
+                ADD_NICKNAME,
+                SELECT_COLUMNS
+            ],
+            "{form}"
+        );
+        assert_eq!(
+            sql_of(&pretend.migrations[1]),
+            [SELECT_HAS_TABLE, SELECT_COLUMNS, ADD_PHONE],
+            "{form}"
+        );
+        // Each migration's first read is its first statement.
+        assert_eq!(pretend.migrations[0].first_read, Some(0), "{form}");
+        assert_eq!(pretend.migrations[1].first_read, Some(0), "{form}");
+    }
+}
+
+#[test]
+fn the_reads_get_not_checked_and_the_alters_after_them_keep_their_answers() {
+    for (form, output) in reads_in_both_forms() {
+        for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+            assert_eq!(
+                answers(server, USERS, &output),
+                [
+                    NOT_CHECKED,
+                    NOT_CHECKED,
+                    NOT_CHECKED,
+                    NOT_CHECKED,
+                    INSTANT,
+                    NOT_CHECKED,
+                    NOT_CHECKED,
+                    NOT_CHECKED,
+                    INSTANT
+                ],
+                "{form} on {server}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_findings_of_an_alter_after_reads_still_carry_the_64_changes_note() {
+    for (form, output) in reads_in_both_forms() {
+        let notes = notes_by_statement("mysql-8.4.13", USERS, &output);
+        for alter in [4, 8] {
+            assert!(
+                notes[alter].iter().any(|note| {
+                    note.starts_with(
+                        "if the table has had 64 instant column changes since it was last \
+                         rebuilt: ",
+                    )
+                }),
+                "{form}: {:?}",
+                notes[alter]
+            );
+        }
+    }
+}
+
+const CREATE_PARENTS: &str = "create table `parents` (`id` bigint unsigned not null auto_increment primary key, `name` varchar(255) not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'";
+const CREATE_CHILDREN: &str = "create table `children` (`id` bigint unsigned not null auto_increment primary key, `parent_id` bigint unsigned not null, `name` varchar(255) not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'";
+const INSERT_CHILD: &str = "insert into `children` (`name`, `parent_id`) values ('a', 1)";
+const ADD_PARENT_KEY: &str = "alter table `children` add constraint `children_parent_id_foreign` foreign key (`parent_id`) references `parents` (`id`)";
+
+const FIRST_ROW_NOTE: &str = "if a row points to a parent row that does not exist: ";
+const CHECKS_ON: &str =
+    "assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it";
+
+#[test]
+fn a_create_and_a_key_with_or_without_an_insert_give_the_same_answer_and_the_same_findings() {
+    // Schema::create('parents'), Schema::create('children') with
+    // $table->foreignId('parent_id'), [DB::table('children')->insert(...)],
+    // Schema::table('children', ... foreign('parent_id')->references('id')
+    // ->on('parents')).
+    let without: &[&str] = &[CREATE_PARENTS, CREATE_CHILDREN, ADD_PARENT_KEY];
+    let with: &[&str] = &[
+        CREATE_PARENTS,
+        CREATE_CHILDREN,
+        INSERT_CHILD,
+        ADD_PARENT_KEY,
+    ];
+    for (form, without, with) in [
+        (
+            "long",
+            long_form(&[("2026_03_02_000002_create_parents_children_fk", without)]),
+            long_form(&[("2026_03_02_000001_create_parents_children_insert_fk", with)]),
+        ),
+        (
+            "short",
+            short_form(&[("2026_03_02_000002_create_parents_children_fk", without)]),
+            short_form(&[("2026_03_02_000001_create_parents_children_insert_fk", with)]),
+        ),
+    ] {
+        for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+            assert_eq!(
+                answers(server, "", &without),
+                [NOT_CHECKED, NOT_CHECKED, COPY],
+                "{form} on {server}"
+            );
+            assert_eq!(
+                answers(server, "", &with),
+                [NOT_CHECKED, NOT_CHECKED, NOT_CHECKED, COPY],
+                "{form} on {server}"
+            );
+            // The findings keep the row note either way: leaving it out of
+            // the text is the command's decision.
+            for (output, key) in [(&without, 2), (&with, 3)] {
+                let notes = notes_by_statement(server, "", output);
+                assert!(
+                    notes[key]
+                        .iter()
+                        .any(|note| note.starts_with(FIRST_ROW_NOTE)),
+                    "{form} on {server}: {:?}",
+                    notes[key]
+                );
+                assert_eq!(notes[key][0], CHECKS_ON, "{form} on {server}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_insert_between_a_create_and_a_key_is_one_statement_of_the_migration() {
+    let with: &[&str] = &[
+        CREATE_PARENTS,
+        CREATE_CHILDREN,
+        INSERT_CHILD,
+        ADD_PARENT_KEY,
+    ];
+    for output in [
+        long_form(&[("2026_03_02_000001_create_parents_children_insert_fk", with)]),
+        short_form(&[("2026_03_02_000001_create_parents_children_insert_fk", with)]),
+    ] {
+        let pretend = pretend_of(&output);
+        assert_eq!(sql_of(&pretend.migrations[0]), with);
+        assert_eq!(pretend.migrations[0].first_read, None);
+    }
+}

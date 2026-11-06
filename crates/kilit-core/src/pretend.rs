@@ -327,6 +327,25 @@ fn asks_the_database(sql: &str) -> bool {
     .any(|read| word.eq_ignore_ascii_case(read))
 }
 
+/// A statement that only reads the database, as far as its words tell: one
+/// that asks the database something, but does not start with `WITH`, which
+/// may lead to an UPDATE or a DELETE, and has none of the words INSERT,
+/// UPDATE, DELETE, REPLACE and INTO.
+pub fn only_reads(sql: &str) -> bool {
+    let first = sql
+        .trim_start_matches(|c: char| c == '(' || c.is_whitespace())
+        .get(..4);
+    asks_the_database(sql)
+        && !first.is_some_and(|word| word.eq_ignore_ascii_case("with"))
+        && !sql
+            .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+            .any(|word| {
+                ["insert", "update", "delete", "replace", "into"]
+                    .iter()
+                    .any(|write| word.eq_ignore_ascii_case(write))
+            })
+}
+
 /// The name Laravel gives a migration file: `2026_11_01_000001_` and a name,
 /// `YYYY_MM_DD_HHMMSS_`.
 fn is_migration_file_name(name: &str) -> bool {
@@ -965,6 +984,30 @@ In 2026_02_01_000041_first_alter_orders_table.php line 15:
             "set foreign_key_checks = 0",
         ] {
             assert!(!asks_the_database(sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_read_that_may_write_is_not_only_a_read() {
+        for sql in [
+            "select 1",
+            "select exists (select 1 from information_schema.tables where table_name = 'users') as `exists`",
+            "SHOW INDEX FROM orders",
+            "table orders",
+        ] {
+            assert!(only_reads(sql), "{sql}");
+        }
+        for sql in [
+            "with t as (select 1) select * from t",
+            "WITH t AS (SELECT id FROM orders) UPDATE orders SET note = 1",
+            "select * from orders for update",
+            "select 1 into @a",
+            "select * from orders into outfile '/tmp/o'",
+            "explain delete from orders",
+            "insert into orders select * from old_orders",
+            "alter table `orders` add `a` int null",
+        ] {
+            assert!(!only_reads(sql), "{sql}");
         }
     }
 

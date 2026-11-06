@@ -4,7 +4,8 @@ use std::fmt::Write as _;
 
 use kilit_core::{
     Algorithm, Impact, PRETEND_READ_NOTE, Prediction, Schema, ServerResults, Statement,
-    StatementKind, Verdict, Writes, check, impacts, metadata_lock_warning, on_new_tables,
+    StatementKind, Verdict, Writes, check, depends_on_rows, impacts, metadata_lock_warning,
+    on_empty_tables, on_new_tables, only_reads,
 };
 use serde::Serialize;
 
@@ -41,8 +42,14 @@ struct Checked<'a> {
     impact: Impact,
     /// The statement changes only tables that the input created earlier.
     on_new_table: bool,
+    /// The statement changes a table that the input created earlier and
+    /// that no statement since may have put rows in.
+    on_empty_table: bool,
     /// The first statement of a Laravel migration that reads the database.
     first_read: bool,
+    /// A statement that only reads, after the first read of its Laravel
+    /// migration: the text gives it one line.
+    later_read: bool,
 }
 
 impl<'a> Report<'a> {
@@ -63,8 +70,18 @@ impl<'a> Report<'a> {
         let findings = check(&statements, tables, results);
         let impacts = impacts(&statements, &findings);
         let on_new_tables = on_new_tables(&statements);
+        // Rows may come from lines kilit could not read, or from a statement
+        // inside a `/*! */` comment, which kilit does not see.
+        let rows_unseen = !input.unreadable.is_empty() || input.runs_comments;
+        let on_empty_tables = on_empty_tables(&statements)
+            .into_iter()
+            .map(|on_empty_table| on_empty_table && !rows_unseen);
 
-        let mut checked = findings.into_iter().zip(impacts).zip(on_new_tables);
+        let mut checked = findings
+            .into_iter()
+            .zip(impacts)
+            .zip(on_new_tables)
+            .zip(on_empty_tables);
         let sources: Vec<SourceReport> = input
             .sources
             .iter()
@@ -76,7 +93,7 @@ impl<'a> Report<'a> {
                     .iter()
                     .enumerate()
                     .map(|(i, statement)| {
-                        let ((finding, impact), on_new_table) = checked
+                        let (((finding, impact), on_new_table), on_empty_table) = checked
                             .next()
                             .expect("check gives one finding per statement");
                         Checked {
@@ -84,7 +101,12 @@ impl<'a> Report<'a> {
                             prediction: finding.prediction,
                             impact,
                             on_new_table,
+                            on_empty_table,
                             first_read: source.first_read == Some(i),
+                            later_read: source.first_read.is_some_and(|first| first < i)
+                                && impact == Impact::NotChecked
+                                && matches!(statement.kind, StatementKind::Other)
+                                && only_reads(&statement.sql),
                         }
                     })
                     .collect(),
@@ -207,6 +229,12 @@ impl<'a> Report<'a> {
             }
             for checked in &source.statements {
                 let sql = shown_sql(checked);
+                // Step 10's note on the first read says what reads mean
+                // under --pretend; the later ones need no more words.
+                if checked.later_read {
+                    writeln!(out, "  read (not checked): {sql}")?;
+                    continue;
+                }
                 match source.kind {
                     SourceKind::Sql => writeln!(out, "  line {}: {sql}", checked.statement.line)?,
                     SourceKind::LaravelMigration => writeln!(out, "  {sql}")?,
@@ -366,7 +394,11 @@ fn write_prediction(out: &mut String, checked: &Checked) -> std::fmt::Result {
                 "    measured as {case} ({} lab scenario{plural})",
                 evidence.len()
             )?;
-            for note in notes {
+            // A table with no rows is in no situation that depends on rows.
+            for note in notes
+                .iter()
+                .filter(|note| !(checked.on_empty_table && depends_on_rows(note)))
+            {
                 writeln!(out, "    - {note}")?;
             }
         }

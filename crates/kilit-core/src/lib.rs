@@ -37,16 +37,17 @@ mod statement;
 pub use charset::{CHARSETS, Charset};
 pub use check::{
     CASES, Case, Condition, Exception, Finding, KeyProblem, MYISAM_CASES, OLD_ALTER_TABLE_CASES,
-    OLD_ALTER_TABLE_TWINS, Prediction, ROW_FORMAT_CASES, check,
+    OLD_ALTER_TABLE_TWINS, Prediction, ROW_FORMAT_CASES, check, depends_on_rows,
 };
-pub use impact::{Impact, impacts, on_new_tables};
+pub use impact::{Impact, impacts, on_empty_tables, on_new_tables};
 pub use knowledge::{Knowledge, ScenarioResult, ServerResults};
 pub use metadata_lock::{
     ALGORITHMS_THAT_WAIT, DEFAULT_LOCK_WAIT_TIMEOUT, LOCK_WAIT_TIMEOUT_ERROR, metadata_lock_warning,
 };
 pub use parse::parse;
 pub use pretend::{
-    LaravelError, LaravelMigration, PRETEND_READ_NOTE, Pretend, UnreadableLine, read_pretend,
+    LaravelError, LaravelMigration, PRETEND_READ_NOTE, Pretend, UnreadableLine, only_reads,
+    read_pretend,
 };
 pub use results::{Observation, Outcome, Server, Variant, Verdict, Writes};
 pub use schema::{Schema, TableState};

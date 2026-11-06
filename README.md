@@ -80,7 +80,6 @@ tables from database/schema/mysql-schema.sql: 4 (migrations, orders, shops, user
     COPY, copies every row, writes wait
     measured as add-foreign-key (16 lab scenarios)
     - assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it
-    - if a row points to a parent row that does not exist: fails with error 1452 (add-foreign-key-orphans)
     - order_events is created earlier in these migrations: nothing else uses it yet, so nothing waits for it
 
 2026_11_02_090400_lengthen_status_on_orders_table
