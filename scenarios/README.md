@@ -16,6 +16,10 @@ session = ["SET foreign_key_checks = 1"]
 
 # Everything that follows `ALTER TABLE orders`.
 operation = "ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)"
+
+# Optional: "MyISAM" creates `orders` with ENGINE=MyISAM instead of
+# ENGINE=InnoDB. Nothing else about the tables changes.
+engine = "MyISAM"
 ```
 
 Every run starts from fresh `users` and `orders` tables, defined in
@@ -28,7 +32,11 @@ they judge every scenario on the tables it was measured on.
 | `users`  | 100  | `id` 1–100                                                              |
 | `orders` | 1000 | `user_id` repeats (1–100); `amount` is 1–1000; `email` is filled in every row and unique; `note` looks like `note 123` and is NULL in every 10th row |
 
-Both tables are `utf8mb4`, so a character can take up to 4 bytes.
+Both tables are `utf8mb4`, so a character can take up to 4 bytes. Both
+are InnoDB, unless a scenario makes `orders` MyISAM with `engine`. MySQL
+gives a MyISAM table no table id, so the lab tells a copy of it from the
+server's count of its `copy to tmp table` stage, and checks that against
+the `Records: N` it reports.
 
 ## Adding a scenario
 

@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::charset::{Charset, canonical};
 use crate::parse::parse;
 use crate::statement::{
-    Alter, Check, CheckColumns, Column, ForeignKey, Index, IndexKind, Operation, Position,
+    Alter, Check, CheckColumns, Column, Engine, ForeignKey, Index, IndexKind, Operation, Position,
     Statement, StatementKind, Table,
 };
 
@@ -24,6 +24,11 @@ pub struct Schema {
     /// hold more than the keys of today, never less: it only saves looking
     /// through every table for a key that points at one.
     pointed_at: BTreeSet<String>,
+    /// A statement before this point names `default_storage_engine`, so a
+    /// table created without `ENGINE` may have any engine. Only
+    /// [`check`](crate::check) sets it: a schema dump writes `ENGINE` on
+    /// every table.
+    default_engine_changed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -32,6 +37,9 @@ enum Entry {
     /// The table exists, but kilit could not follow a change to it.
     Lost {
         reason: String,
+        /// The engine kilit last knew it to have; `None` when no statement
+        /// wrote one.
+        engine: Option<Engine>,
     },
 }
 
@@ -42,6 +50,10 @@ pub enum TableState<'a> {
     /// kilit could not follow a change to the table; the reason says which.
     Lost {
         reason: &'a str,
+        /// The engine kilit last knew it to have: the one its `CREATE TABLE`
+        /// wrote, or the last one a statement kilit could not read wrote.
+        /// `None` when no statement wrote one.
+        engine: Option<&'a Engine>,
     },
     /// Nothing kilit has read defines the table.
     Missing,
@@ -69,9 +81,17 @@ impl Schema {
     pub fn table(&self, name: &str) -> TableState<'_> {
         match self.tables.get(&key(name)) {
             Some(Entry::Known(table)) => TableState::Known(table),
-            Some(Entry::Lost { reason }) => TableState::Lost { reason },
+            Some(Entry::Lost { reason, engine }) => TableState::Lost {
+                reason,
+                engine: engine.as_ref(),
+            },
             None => TableState::Missing,
         }
+    }
+
+    /// From here on, a table created without `ENGINE` has an unknown engine.
+    pub(crate) fn default_engine_changes(&mut self) {
+        self.default_engine_changed = true;
     }
 
     /// Whether a foreign key may point at the table `name`. If not, none does.
@@ -90,7 +110,7 @@ impl Schema {
     /// The tables kilit lost track of, by lowercase name, with the reason.
     pub fn lost(&self) -> impl Iterator<Item = (&str, &str)> {
         self.tables.iter().filter_map(|(name, entry)| match entry {
-            Entry::Lost { reason } => Some((name.as_str(), reason.as_str())),
+            Entry::Lost { reason, .. } => Some((name.as_str(), reason.as_str())),
             Entry::Known(_) => None,
         })
     }
@@ -107,6 +127,24 @@ impl Schema {
                     return;
                 }
                 let mut table = table.clone();
+                if table.engine.is_none() && self.default_engine_changed {
+                    table.engine = Some(Engine::Unknown);
+                }
+                if table.engine == Some(Engine::MyIsam) {
+                    // MySQL keeps no foreign key on a MyISAM table, only its index.
+                    for foreign_key in std::mem::take(&mut table.foreign_keys) {
+                        let indexed = if names_foreign_key_index(&statement.sql) {
+                            Err(MYISAM_INDEX_NAME.to_owned())
+                        } else {
+                            index_ignored_foreign_key(&mut table, &foreign_key)
+                        };
+                        if let Err(reason) = indexed {
+                            let line = statement.line;
+                            self.lose(&table.name, format!("line {line}: {reason}"), table.engine);
+                            return;
+                        }
+                    }
+                }
                 for foreign_key in table.foreign_keys.clone() {
                     index_foreign_key(&mut table, &foreign_key);
                     self.pointed_at.insert(key(&foreign_key.referenced_table));
@@ -124,16 +162,32 @@ impl Schema {
                     self.rename(&rename.from, &rename.to);
                 }
             }
-            StatementKind::Alter(alter) => self.alter(statement.line, alter),
+            StatementKind::Alter(alter) => self.alter(statement, alter),
             StatementKind::Unparsed {
                 table: Some(name), ..
-            } => self.lose(
-                name,
-                format!(
-                    "line {}: kilit could not read a statement on it",
-                    statement.line
-                ),
-            ),
+            } => {
+                let exists = self.tables.contains_key(&key(name));
+                let engine = match written_engine(&statement.sql) {
+                    // A CREATE of a table that exists changes nothing.
+                    _ if exists && creates(&statement.sql) => self.engine_of(name).cloned(),
+                    Some(engine) => Some(engine),
+                    // `CREATE TABLE new LIKE old` copies old's engine.
+                    None if creates(&statement.sql) => match like_source(&statement.sql) {
+                        Some(source) => self.engine_of(source).cloned(),
+                        None if self.default_engine_changed => Some(Engine::Unknown),
+                        None => None,
+                    },
+                    None => self.engine_of(name).cloned(),
+                };
+                self.lose(
+                    name,
+                    format!(
+                        "line {}: kilit could not read a statement on it",
+                        statement.line
+                    ),
+                    engine,
+                );
+            }
             StatementKind::Unparsed { table: None, .. }
             | StatementKind::Set { .. }
             | StatementKind::Other => {}
@@ -150,11 +204,21 @@ impl Schema {
         }
     }
 
-    fn lose(&mut self, name: &str, reason: String) {
-        self.tables.insert(key(name), Entry::Lost { reason });
+    fn lose(&mut self, name: &str, reason: String, engine: Option<Engine>) {
+        self.tables
+            .insert(key(name), Entry::Lost { reason, engine });
     }
 
-    fn alter(&mut self, line: usize, alter: &Alter) {
+    /// The engine kilit last knew the table `name` to have.
+    fn engine_of(&self, name: &str) -> Option<&Engine> {
+        match self.tables.get(&key(name))? {
+            Entry::Known(table) => table.engine.as_ref(),
+            Entry::Lost { engine, .. } => engine.as_ref(),
+        }
+    }
+
+    fn alter(&mut self, statement: &Statement, alter: &Alter) {
+        let line = statement.line;
         // A missing table stays missing, and a lost one stays lost.
         let Some(Entry::Known(table)) = self.tables.get_mut(&key(&alter.table)) else {
             return;
@@ -168,13 +232,24 @@ impl Schema {
                     new_name = Some(name);
                     Ok(())
                 }
+                // MySQL names a MyISAM key's index after `FOREIGN KEY name`
+                // too, which kilit does not keep.
+                Operation::AddForeignKey(_)
+                    if table.engine == Some(Engine::MyIsam)
+                        && names_foreign_key_index(&statement.sql) =>
+                {
+                    Err(MYISAM_INDEX_NAME.to_owned())
+                }
                 other => change(table, other),
             };
             if let Err(reason) = changed {
-                self.lose(&alter.table, format!("line {line}: {reason}"));
+                let engine = table.engine.clone();
+                self.lose(&alter.table, format!("line {line}: {reason}"), engine);
                 return;
             }
-            if let Operation::AddForeignKey(foreign_key) = operation {
+            if let Operation::AddForeignKey(foreign_key) = operation
+                && table.engine != Some(Engine::MyIsam)
+            {
                 self.pointed_at.insert(key(&foreign_key.referenced_table));
             }
         }
@@ -255,6 +330,12 @@ fn change(table: &mut Table, operation: &Operation) -> Result<(), String> {
         }
         Operation::AddPrimaryKey { columns } => columns.clone_into(&mut table.primary_key),
         Operation::DropPrimaryKey => table.primary_key.clear(),
+        // MySQL keeps no foreign key on a MyISAM table, only its index, and
+        // drops one of any name without complaint.
+        Operation::AddForeignKey(foreign_key) if table.engine == Some(Engine::MyIsam) => {
+            index_ignored_foreign_key(table, foreign_key)?;
+        }
+        Operation::DropForeignKey { .. } if table.engine == Some(Engine::MyIsam) => {}
         Operation::AddForeignKey(foreign_key) => {
             table.foreign_keys.push(foreign_key.clone());
             index_foreign_key(table, foreign_key);
@@ -485,6 +566,187 @@ fn index_foreign_key(table: &mut Table, key: &ForeignKey) {
             columns: key.columns.clone(),
         });
     }
+}
+
+/// The index MySQL adds for a foreign key on a MyISAM table, which keeps
+/// the key itself nowhere: named after the constraint, or after the column
+/// when the key has no name, unless a plain index of exactly that column
+/// is there already. The lab saw these shapes only; any other loses the
+/// table.
+fn index_ignored_foreign_key(table: &mut Table, key: &ForeignKey) -> Result<(), String> {
+    let [column] = key.columns.as_slice() else {
+        return Err(
+            "adds a foreign key of several columns to a MyISAM table, and kilit has not \
+             seen which index MySQL adds for it"
+                .into(),
+        );
+    };
+    let exactly = |columns: &[String]| matches!(columns, [only] if same(only, column));
+    if table
+        .indexes
+        .iter()
+        .any(|index| index.kind == IndexKind::Plain && exactly(&index.columns))
+    {
+        return Ok(());
+    }
+    let uses = |columns: &[String]| {
+        columns
+            .iter()
+            .any(|entry| same(indexed_column(entry), column))
+    };
+    if uses(&table.primary_key) || table.indexes.iter().any(|index| uses(&index.columns)) {
+        return Err(format!(
+            "adds a foreign key on {column}, which an index of the MyISAM table has in \
+             another shape, and kilit has not seen which index MySQL adds then"
+        ));
+    }
+    let name = key.name.clone().unwrap_or_else(|| column.clone());
+    if table
+        .indexes
+        .iter()
+        .any(|index| index.name.as_deref().is_some_and(|n| same(n, &name)))
+    {
+        return Err(format!(
+            "adds a foreign key whose index would be named {name}, a name the MyISAM table \
+             already has"
+        ));
+    }
+    table.indexes.push(Index {
+        name: Some(name),
+        kind: IndexKind::Plain,
+        columns: key.columns.clone(),
+    });
+    Ok(())
+}
+
+/// The engine a statement kilit could not read writes: the last `ENGINE`
+/// in its text, with or without `=` and quotes, as MySQL takes it. A word
+/// `ENGINE` outside quotes counts, even a column's name, which can only
+/// make a table's engine unknown. `None` when the text has no such word.
+fn written_engine(sql: &str) -> Option<Engine> {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    let mut engine = None;
+    for start in word_starts(sql, "ENGINE") {
+        let end = start + "ENGINE".len();
+        let rest = sql[end..].trim_start();
+        let rest = rest.strip_prefix('=').unwrap_or(rest).trim_start();
+        let (quote, rest) = match rest.chars().next() {
+            Some(quote @ ('\'' | '"' | '`')) => (Some(quote), &rest[1..]),
+            _ => (None, rest),
+        };
+        let length = rest.find(|c: char| !is_word(c)).unwrap_or(rest.len());
+        let name = &rest[..length];
+        let closed = quote.is_none_or(|quote| rest[length..].starts_with(quote));
+        engine = Some(if name.is_empty() || !closed {
+            Engine::Unknown
+        } else {
+            Engine::named(name)
+        });
+    }
+    engine
+}
+
+/// Where the word `word` (in uppercase) starts in `sql`, in any letter
+/// case, outside quotes, strings and backticks.
+fn word_starts<'a>(sql: &'a str, word: &'a str) -> impl Iterator<Item = usize> + 'a {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    let masked = outside_quotes(sql);
+    let mut from = 0;
+    std::iter::from_fn(move || {
+        while let Some(found) = masked[from..].find(word) {
+            let start = from + found;
+            let end = start + word.len();
+            from = end;
+            let before = masked[..start].chars().next_back();
+            let after = masked[end..].chars().next();
+            if !(before.is_some_and(is_word) || after.is_some_and(is_word)) {
+                return Some(start);
+            }
+        }
+        None
+    })
+}
+
+/// `sql` in uppercase, with what is inside quotes, strings and backticks
+/// blanked out, byte for byte, so that positions stay the same.
+fn outside_quotes(sql: &str) -> String {
+    let mut masked = sql.to_ascii_uppercase().into_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    for byte in &mut masked {
+        match quote {
+            None => {
+                if matches!(*byte, b'\'' | b'"' | b'`') {
+                    quote = Some(*byte);
+                }
+            }
+            Some(open) => {
+                if escaped {
+                    escaped = false;
+                    *byte = b' ';
+                } else if *byte == b'\\' && open != b'`' {
+                    escaped = true;
+                    *byte = b' ';
+                } else if *byte == open {
+                    quote = None;
+                } else {
+                    *byte = b' ';
+                }
+            }
+        }
+    }
+    // Only whole characters inside quotes were blanked.
+    String::from_utf8(masked).unwrap_or_default()
+}
+
+/// Whether a `FOREIGN KEY` in `sql` names its index: `FOREIGN KEY ix (c)`.
+pub(crate) fn names_foreign_key_index(sql: &str) -> bool {
+    let masked = outside_quotes(sql);
+    word_starts(sql, "FOREIGN").any(|start| {
+        let rest = masked[start + "FOREIGN".len()..].trim_start();
+        rest.strip_prefix("KEY")
+            .is_some_and(|rest| !rest.trim_start().starts_with('('))
+    })
+}
+
+/// Whether `sql` orders a column `DESC`, outside quotes.
+pub(crate) fn has_descending(sql: &str) -> bool {
+    word_starts(sql, "DESC").next().is_some()
+}
+
+const MYISAM_INDEX_NAME: &str = "adds a foreign key that names its index to a MyISAM table, and \
+     kilit does not follow which name MySQL gives the index then";
+
+/// The table after the word `LIKE`, without quotes: `old` in `CREATE TABLE
+/// new LIKE old`.
+fn like_source(sql: &str) -> Option<&str> {
+    let upper = sql.to_ascii_uppercase();
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    let mut from = 0;
+    while let Some(found) = upper[from..].find("LIKE") {
+        let start = from + found;
+        let end = start + "LIKE".len();
+        from = end;
+        let before = sql[..start].chars().next_back();
+        let after = sql[end..].chars().next();
+        if before.is_some_and(is_word) || after.is_some_and(is_word) {
+            continue;
+        }
+        let rest = sql[end..].trim_start().trim_start_matches('`');
+        let length = rest
+            .find(|c: char| !(is_word(c) || c == '.' || c == '`'))
+            .unwrap_or(rest.len());
+        let name = rest[..length].trim_end_matches('`');
+        return (!name.is_empty()).then_some(name);
+    }
+    None
+}
+
+/// Whether the statement starts with `CREATE`.
+fn creates(sql: &str) -> bool {
+    sql.trim_start()
+        .get(..6)
+        .is_some_and(|word| word.eq_ignore_ascii_case("CREATE"))
 }
 
 /// The name MySQL gives an index added without one: its first column's,
@@ -1324,5 +1586,143 @@ ALTER TABLE t ADD CONSTRAINT C CHECK (a > 1);",
         let schema = after("ALTER TABLE ORDERS ADD COLUMN coupon INT NULL");
         assert!(known(&schema, "orders").column("coupon").is_some());
         assert!(matches!(schema.table("Orders"), TableState::Known(_)));
+    }
+
+    fn engine_of_lost(schema: &Schema, name: &str) -> Option<Engine> {
+        match schema.table(name) {
+            TableState::Lost { engine, .. } => engine.cloned(),
+            other => panic!("{name}: expected lost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_myisam_table_keeps_the_index_of_a_foreign_key_but_not_the_key() {
+        let schema = from_sql(
+            "CREATE TABLE users (id BIGINT UNSIGNED PRIMARY KEY);
+             CREATE TABLE a (id INT, user_id BIGINT UNSIGNED,
+                 CONSTRAINT fk_a FOREIGN KEY (user_id) REFERENCES users (id)) ENGINE=MyISAM;
+             CREATE TABLE b (id INT, user_id BIGINT UNSIGNED,
+                 FOREIGN KEY (user_id) REFERENCES users (id)) ENGINE=MyISAM;
+             CREATE TABLE c (id INT, user_id BIGINT UNSIGNED REFERENCES users (id)) ENGINE=MyISAM;
+             CREATE TABLE d (id INT, user_id BIGINT UNSIGNED) ENGINE=MyISAM;
+             ALTER TABLE d ADD CONSTRAINT fk_d FOREIGN KEY (user_id) REFERENCES users (id);
+             ALTER TABLE d ADD CONSTRAINT fk_d FOREIGN KEY (user_id) REFERENCES users (id);
+             ALTER TABLE d DROP FOREIGN KEY never_added;",
+        );
+        for (name, index) in [
+            ("a", Some("fk_a")),
+            ("b", Some("user_id")),
+            ("c", None),
+            ("d", Some("fk_d")),
+        ] {
+            let table = known(&schema, name);
+            assert!(table.foreign_keys.is_empty(), "{name}");
+            assert_eq!(
+                index_names(&table),
+                index.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                "{name}"
+            );
+        }
+        assert!(!schema.may_be_pointed_at("users"));
+    }
+
+    #[test]
+    fn a_foreign_key_kilit_has_not_seen_on_myisam_loses_the_table() {
+        for change in [
+            "ADD CONSTRAINT fk FOREIGN KEY (user_id, amount) REFERENCES users (id, n)",
+            "ADD INDEX i (amount, user_id), ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users (id)",
+            "ADD INDEX fk (amount), ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users (id)",
+        ] {
+            let schema = from_sql(&format!(
+                "CREATE TABLE t (user_id BIGINT UNSIGNED, amount INT) ENGINE=MyISAM;
+                 ALTER TABLE t {change};"
+            ));
+            assert_eq!(
+                engine_of_lost(&schema, "t"),
+                Some(Engine::MyIsam),
+                "{change}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lost_table_keeps_the_engine_kilit_last_knew() {
+        let schema = from_sql(
+            "CREATE TABLE m (id INT) ENGINE=MyISAM;
+             ALTER TABLE m ENGINE=InnoDB;
+             CREATE TABLE i (id INT) ENGINE=InnoDB;
+             ALTER TABLE i ENGINE = 'MyISAM';
+             CREATE TABLE q (id INT) ENGINE='MyISAM';
+             CREATE TABLE k (id INT) ENGINE=MyISAM;
+             ALTER TABLE k ADD COLUMN engine INT, ALGORITHM=SOMETHING;
+             CREATE TABLE x (id INT) ENGINE=MyISAM;
+             ALTER TABLE x COMMENT = 'nothing', ALGORITHM=SOMETHING;
+             ALTER TABLE missing ENGINE=MyISAM;",
+        );
+        assert_eq!(engine_of_lost(&schema, "m"), Some(Engine::InnoDb));
+        assert_eq!(engine_of_lost(&schema, "i"), Some(Engine::MyIsam));
+        assert_eq!(engine_of_lost(&schema, "q"), Some(Engine::MyIsam));
+        // A column named engine counts too: the safe side.
+        assert_eq!(
+            engine_of_lost(&schema, "k"),
+            Some(Engine::Other("INT".into()))
+        );
+        assert_eq!(engine_of_lost(&schema, "x"), Some(Engine::MyIsam));
+        assert_eq!(engine_of_lost(&schema, "missing"), Some(Engine::MyIsam));
+    }
+
+    #[test]
+    fn a_table_created_like_another_takes_its_engine() {
+        let schema = from_sql(
+            "CREATE TABLE m (id INT) ENGINE=MyISAM;
+             CREATE TABLE i (id INT);
+             CREATE TABLE a LIKE m;
+             CREATE TABLE b LIKE `m`;
+             CREATE TABLE c LIKE i;",
+        );
+        assert_eq!(engine_of_lost(&schema, "a"), Some(Engine::MyIsam));
+        assert_eq!(engine_of_lost(&schema, "b"), Some(Engine::MyIsam));
+        assert_eq!(engine_of_lost(&schema, "c"), None);
+    }
+
+    #[test]
+    fn written_engines_are_read_like_mysql_reads_them() {
+        for (sql, engine) in [
+            ("ALTER TABLE t ENGINE=MyISAM", Some(Engine::MyIsam)),
+            (
+                "ALTER TABLE t ENGINE = \"MEMORY\"",
+                Some(Engine::Other("MEMORY".into())),
+            ),
+            ("ALTER TABLE t engine `innodb`", Some(Engine::InnoDb)),
+            (
+                "ALTER TABLE t ENGINE=MyISAM, ENGINE=InnoDB",
+                Some(Engine::InnoDb),
+            ),
+            ("ALTER TABLE t ENGINE='MyISAM", Some(Engine::Unknown)),
+            ("ALTER TABLE t ENGINE=", Some(Engine::Unknown)),
+            ("SET default_storage_engine = MyISAM", None),
+            ("ALTER TABLE engines ADD COLUMN my_engine INT", None),
+        ] {
+            assert_eq!(written_engine(sql), engine, "{sql}");
+        }
+    }
+
+    #[test]
+    fn after_default_storage_engine_changes_a_new_table_without_engine_has_an_unknown_one() {
+        let mut schema = Schema::new();
+        schema.default_engine_changes();
+        for statement in parse(
+            "CREATE TABLE a (id INT);
+             CREATE TABLE b (id INT) ENGINE=InnoDB;
+             CREATE TABLE c (id INT) COMMENT 'x', PARTITION;",
+        ) {
+            schema.apply(&statement);
+        }
+        assert_eq!(known(&schema, "a").engine, Some(Engine::Unknown));
+        assert_eq!(known(&schema, "b").engine, Some(Engine::InnoDb));
+        assert_eq!(engine_of_lost(&schema, "c"), Some(Engine::Unknown));
+        // A schema dump is read without it.
+        let dump = Schema::from_sql("CREATE TABLE a (id INT);");
+        assert_eq!(known(&dump, "a").engine, None);
     }
 }

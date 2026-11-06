@@ -1,0 +1,3 @@
+title = "Add a foreign key to a MyISAM table"
+engine = "MyISAM"
+operation = "ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)"

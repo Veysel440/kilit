@@ -35,7 +35,9 @@ mod split;
 mod statement;
 
 pub use charset::{CHARSETS, Charset};
-pub use check::{CASES, Case, Condition, Exception, Finding, KeyProblem, Prediction, check};
+pub use check::{
+    CASES, Case, Condition, Exception, Finding, KeyProblem, MYISAM_CASES, Prediction, check,
+};
 pub use impact::{Impact, impacts, on_new_tables};
 pub use knowledge::{Knowledge, ScenarioResult, ServerResults};
 pub use metadata_lock::{
@@ -46,7 +48,7 @@ pub use pretend::{LaravelMigration, Pretend, UnreadableLine, read_pretend};
 pub use results::{Observation, Outcome, Server, Variant, Verdict, Writes};
 pub use schema::{Schema, TableState};
 pub use statement::{
-    Algorithm, Alter, Check, CheckColumns, Column, DataType, ForeignKey, ForeignKeyAction,
+    Algorithm, Alter, Check, CheckColumns, Column, DataType, Engine, ForeignKey, ForeignKeyAction,
     Generated, Index, IndexKind, IntegerSize, Lock, Operation, Position, Rename, Statement,
     StatementKind, Table, Variable,
 };

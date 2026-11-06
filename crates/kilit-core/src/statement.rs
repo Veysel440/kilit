@@ -73,6 +73,49 @@ pub struct Table {
     pub charset: Option<String>,
     /// `COLLATE=...`
     pub collation: Option<String>,
+    /// `ENGINE=...`, the last one when written twice, as MySQL takes it.
+    /// `None` when the statement writes none: MySQL then uses the server's
+    /// `default_storage_engine`, InnoDB unless something changed it.
+    pub engine: Option<Engine>,
+}
+
+/// A table's storage engine. The lab measured InnoDB tables, and MyISAM
+/// tables for the changes listed in its MyISAM cases.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Engine {
+    InnoDb,
+    MyIsam,
+    /// Any other engine, as written: `MEMORY`, `ARCHIVE`.
+    Other(String),
+    /// An engine kilit cannot tell: the table was created after the input
+    /// changed `default_storage_engine`, or a statement kilit could not
+    /// read wrote one.
+    Unknown,
+}
+
+impl Engine {
+    /// The engine an `ENGINE=...` option names, in any letter case.
+    /// `INNOBASE` is MySQL's other name for InnoDB.
+    pub fn named(name: &str) -> Engine {
+        if name.eq_ignore_ascii_case("InnoDB") || name.eq_ignore_ascii_case("INNOBASE") {
+            Engine::InnoDb
+        } else if name.eq_ignore_ascii_case("MyISAM") {
+            Engine::MyIsam
+        } else {
+            Engine::Other(name.to_owned())
+        }
+    }
+}
+
+impl fmt::Display for Engine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Engine::InnoDb => f.write_str("InnoDB"),
+            Engine::MyIsam => f.write_str("MyISAM"),
+            Engine::Other(name) => f.write_str(name),
+            Engine::Unknown => f.write_str("an unknown engine"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -9,16 +9,33 @@ use std::fs;
 use std::path::Path;
 
 use kilit_core::{
-    CASES, Condition, Knowledge, Prediction, ScenarioResult, Schema, Statement, Variant, Verdict,
-    check, parse, read_pretend,
+    CASES, Condition, Engine, Knowledge, MYISAM_CASES, Prediction, ScenarioResult, Schema,
+    Statement, TableState, Variant, Verdict, check, parse, read_pretend,
 };
 
 /// The tables every lab scenario starts from.
 const LAB_TABLES: &str = include_str!("../../../scenarios/tables.sql");
 
+/// The text of tables.sql as the lab creates the tables for a scenario:
+/// with `orders` as MyISAM when the scenario says so, and only `orders`.
+fn lab_tables(engine: Option<&str>) -> String {
+    match engine {
+        None => LAB_TABLES.to_owned(),
+        Some("MyISAM") => {
+            let at = LAB_TABLES.find("CREATE TABLE orders").unwrap();
+            let (users, orders) = LAB_TABLES.split_at(at);
+            format!(
+                "{users}{}",
+                orders.replacen("ENGINE=InnoDB", "ENGINE=MyISAM", 1)
+            )
+        }
+        Some(other) => panic!("the lab has no engine {other} for orders"),
+    }
+}
+
 /// The lab's tables as a scenario measured them: after its setup.
 fn lab_schema(scenario: &ScenarioResult) -> Schema {
-    let mut sql = LAB_TABLES.to_owned();
+    let mut sql = lab_tables(scenario.engine.as_deref());
     for statement in &scenario.setup {
         sql.push_str(statement);
         sql.push_str(";\n");
@@ -69,7 +86,7 @@ fn every_scenario_is_used() {
     for results in Knowledge::built_in().servers() {
         for scenario in results.scenarios() {
             let id = scenario.id.as_str();
-            let used = CASES.iter().any(|case| {
+            let used = CASES.into_iter().chain(MYISAM_CASES).any(|case| {
                 case.scenarios.contains(&id)
                     || case
                         .exceptions
@@ -88,7 +105,7 @@ fn every_scenario_is_used() {
 #[test]
 fn the_scenarios_of_a_case_agree() {
     for results in Knowledge::built_in().servers() {
-        for case in CASES {
+        for case in CASES.into_iter().chain(MYISAM_CASES) {
             // The case's own scenarios, then each exception's.
             let groups = std::iter::once(case.scenarios)
                 .chain(case.exceptions.iter().map(|exception| exception.scenarios));
@@ -124,7 +141,7 @@ fn the_scenarios_of_a_case_agree() {
 fn kilit_predicts_what_the_lab_measured() {
     for results in Knowledge::built_in().servers() {
         let server = results.server.name();
-        for case in CASES {
+        for case in CASES.into_iter().chain(MYISAM_CASES) {
             for id in case.scenarios {
                 let scenario = results.scenario(id).unwrap();
                 let schema = lab_schema(scenario);
@@ -2468,4 +2485,1214 @@ fn character_is_char() {
     let other = setup("CHARACTER(100) CHARACTER SET latin1");
     let other: Vec<&str> = other.iter().map(String::as_str).collect();
     assert_unknown("CHARACTER(100) latin1", &other, NAME);
+}
+
+// Step 9a: the storage engine. kilit reads ENGINE from the schema and from
+// CREATE TABLE in the input. A MyISAM table gets the answers the lab
+// measured on MyISAM tables (the `myisam-*` scenarios, both servers gave the
+// same result in every variant) and unknown for everything else; any other
+// engine is unknown; InnoDB, and no ENGINE written, keep the InnoDB answers.
+
+const FAILS_1071: &str = "fails with error 1071";
+const FAILS_1845: &str = "fails with error 1845";
+
+/// The lab's tables with `orders` as MyISAM, after `setup`.
+fn myisam_lab_after(setup: &[&str]) -> String {
+    let mut sql = lab_tables(Some("MyISAM"));
+    for statement in setup {
+        sql.push_str(statement);
+        sql.push_str(";\n");
+    }
+    sql
+}
+
+/// What kilit says about `ALTER TABLE orders <operation>` on the lab's
+/// tables with a MyISAM `orders`, after `setup`: on MySQL 8.0.46, then on
+/// 8.4.13.
+fn on_myisam_orders(setup: &[&str], operation: &str) -> [String; 2] {
+    on_both(
+        &myisam_lab_after(setup),
+        &format!("ALTER TABLE orders {operation};"),
+    )
+}
+
+/// The same answer on both servers.
+fn assert_myisam(name: &str, setup: &[&str], operation: &str, answer: &str) {
+    assert_eq!(
+        on_myisam_orders(setup, operation),
+        [answer, answer],
+        "{name}"
+    );
+}
+
+/// What kilit says about every statement of `sql` on both servers.
+fn all_on_both(schema: &str, sql: &str) -> [Vec<String>; 2] {
+    [on_mysql_80(schema, sql), on_mysql_84(schema, sql)]
+}
+
+const MYISAM_ADD_FK: &str =
+    "ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)";
+
+#[test]
+fn the_lab_makes_only_orders_a_myisam_table_for_a_myisam_scenario() {
+    let myisam_text = lab_tables(Some("MyISAM"));
+    assert_eq!(myisam_text.matches("ENGINE=MyISAM").count(), 1);
+    assert_eq!(myisam_text.matches("ENGINE=InnoDB").count(), 1);
+
+    let innodb = Schema::from_sql(&lab_tables(None));
+    let myisam = Schema::from_sql(&myisam_text);
+    let (TableState::Known(innodb_orders), TableState::Known(myisam_orders)) =
+        (innodb.table("orders"), myisam.table("orders"))
+    else {
+        panic!("orders is not known");
+    };
+    assert_eq!(innodb_orders.engine, Some(Engine::InnoDb));
+    assert_eq!(myisam_orders.engine, Some(Engine::MyIsam));
+    assert_eq!(myisam_orders.columns, innodb_orders.columns);
+    assert_eq!(myisam_orders.primary_key, innodb_orders.primary_key);
+    assert_eq!(myisam_orders.charset, innodb_orders.charset);
+    let (TableState::Known(innodb_users), TableState::Known(myisam_users)) =
+        (innodb.table("users"), myisam.table("users"))
+    else {
+        panic!("users is not known");
+    };
+    assert_eq!(innodb_users, myisam_users);
+    assert_eq!(myisam_users.engine, Some(Engine::InnoDb));
+}
+
+#[test]
+fn a_myisam_scenario_of_the_lab_starts_from_a_myisam_orders() {
+    for results in Knowledge::built_in().servers() {
+        for scenario in results.scenarios() {
+            let schema = lab_schema(scenario);
+            let TableState::Known(orders) = schema.table("orders") else {
+                panic!("{}: orders is not known", scenario.id);
+            };
+            let expected = match scenario.engine.as_deref() {
+                Some("MyISAM") => Engine::MyIsam,
+                None => Engine::InnoDb,
+                Some(other) => panic!("{}: engine {other}", scenario.id),
+            };
+            assert_eq!(orders.engine, Some(expected), "{}", scenario.id);
+            // The scenarios that are about MyISAM say so in their id.
+            assert_eq!(
+                scenario.engine.is_some(),
+                scenario.id.starts_with("myisam-"),
+                "{}",
+                scenario.id
+            );
+            let TableState::Known(users) = schema.table("users") else {
+                panic!("{}: users is not known", scenario.id);
+            };
+            assert_eq!(users.engine, Some(Engine::InnoDb), "{}", scenario.id);
+        }
+    }
+}
+
+#[test]
+fn a_myisam_exception_that_kilit_cannot_see_shows_up_as_a_note() {
+    for results in Knowledge::built_in().servers() {
+        let server = results.server.name();
+        for case in MYISAM_CASES {
+            for exception in case.exceptions {
+                if !exception.conditions.contains(&Condition::Hidden) {
+                    continue;
+                }
+                let first = exception.scenarios[0];
+                for id in exception.scenarios {
+                    let scenario = results.scenario(id).unwrap();
+                    let schema = lab_schema(scenario);
+                    match predict(scenario, Variant::SERVER_DEFAULT, &server, &schema) {
+                        Prediction::Measured {
+                            case: found, notes, ..
+                        } => {
+                            assert_eq!(found, case.id, "{id}");
+                            assert!(
+                                notes.iter().any(|note| note.contains(first)),
+                                "{first} is missing from the notes of {id}: {notes:?}"
+                            );
+                        }
+                        other => panic!("{id} on {server}: {other:?}"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_known_myisam_table_copies_for_the_changes_the_lab_measured() {
+    // The myisam-* scenarios: COPY, writes wait.
+    assert_myisam("add column", &[], "ADD COLUMN c INT NULL", COPY);
+    assert_myisam(
+        "add column not null default",
+        &[],
+        "ADD COLUMN c INT NOT NULL DEFAULT 0",
+        COPY,
+    );
+    assert_myisam("drop column", &[], "DROP COLUMN note", COPY);
+    assert_myisam("int to bigint", &[], "MODIFY amount BIGINT NOT NULL", COPY);
+    assert_myisam("add index", &[], "ADD INDEX idx_amount (amount)", COPY);
+    assert_myisam(
+        "add unique index",
+        &[],
+        "ADD UNIQUE INDEX uq_amount (amount)",
+        COPY,
+    );
+    assert_myisam(
+        "add fulltext index",
+        &[],
+        "ADD FULLTEXT INDEX ft_note (note)",
+        COPY,
+    );
+    assert_myisam(
+        "drop index",
+        &["ALTER TABLE orders ADD INDEX idx_amount (amount)"],
+        "DROP INDEX idx_amount",
+        COPY,
+    );
+}
+
+#[test]
+fn renaming_a_column_or_setting_a_default_on_a_known_myisam_table_is_instant() {
+    assert_myisam("rename column", &[], "RENAME COLUMN note TO memo", INSTANT);
+    assert_myisam(
+        "set default",
+        &[],
+        "ALTER COLUMN note SET DEFAULT 'x'",
+        INSTANT,
+    );
+}
+
+#[test]
+fn forcing_a_variant_the_myisam_table_cannot_do_fails_with_1845() {
+    // ALGORITHM=INSTANT, ALGORITHM=INPLACE, ALGORITHM=INPLACE with LOCK=NONE
+    // and LOCK=NONE all gave 1845 on both servers for these changes.
+    let indexed = ["ALTER TABLE orders ADD INDEX idx_amount (amount)"];
+    for (name, setup, operation) in [
+        ("add column", &[][..], "ADD COLUMN c INT NULL"),
+        ("drop column", &[][..], "DROP COLUMN note"),
+        ("int to bigint", &[][..], "MODIFY amount BIGINT NOT NULL"),
+        ("add index", &[][..], "ADD INDEX idx_amount (amount)"),
+        ("add fulltext", &[][..], "ADD FULLTEXT INDEX ft_note (note)"),
+        ("drop index", &indexed[..], "DROP INDEX idx_amount"),
+        ("add foreign key", &[][..], MYISAM_ADD_FK),
+    ] {
+        for forced in [
+            "ALGORITHM=INSTANT",
+            "ALGORITHM=INPLACE",
+            "ALGORITHM=INPLACE, LOCK=NONE",
+            "LOCK=NONE",
+        ] {
+            assert_myisam(
+                &format!("{name}, {forced}"),
+                setup,
+                &format!("{operation}, {forced}"),
+                FAILS_1845,
+            );
+        }
+    }
+}
+
+#[test]
+fn an_index_on_a_myisam_table_is_checked_against_the_1000_byte_limit_in_utf8mb4() {
+    let varchar =
+        |length: u32| format!("ALTER TABLE orders ADD COLUMN code VARCHAR({length}) NULL");
+    // 250 characters of utf8mb4 are 1000 bytes: accepted.
+    let at_limit = varchar(250);
+    assert_myisam(
+        "index at the limit",
+        &[at_limit.as_str()],
+        "ADD INDEX idx_code (code)",
+        COPY,
+    );
+    assert_myisam(
+        "unique index at the limit",
+        &[at_limit.as_str()],
+        "ADD UNIQUE INDEX uq_code (code)",
+        COPY,
+    );
+    // 251 characters are 1004 bytes: 1071.
+    let over = varchar(251);
+    assert_myisam(
+        "index over the limit",
+        &[over.as_str()],
+        "ADD INDEX idx_code (code)",
+        FAILS_1071,
+    );
+    assert_myisam(
+        "unique index over the limit",
+        &[over.as_str()],
+        "ADD UNIQUE INDEX uq_code (code)",
+        FAILS_1071,
+    );
+    // The lab's own email, VARCHAR(255): 1020 bytes.
+    assert_myisam(
+        "unique index on email",
+        &[],
+        "ADD UNIQUE INDEX uq_email (email)",
+        FAILS_1071,
+    );
+    assert_myisam(
+        "index on email",
+        &[],
+        "ADD INDEX idx_email (email)",
+        FAILS_1071,
+    );
+}
+
+#[test]
+fn a_myisam_index_that_fails_with_1071_leaves_the_table_as_it_was() {
+    // If the unique index stayed, dropping its column would be an
+    // unmeasured shape: unknown. The table stays as it was: COPY.
+    let sql = "ALTER TABLE orders ADD COLUMN code VARCHAR(251) NULL;
+               ALTER TABLE orders ADD UNIQUE INDEX uq_code (code);
+               ALTER TABLE orders DROP COLUMN code;";
+    for answers in all_on_both(&myisam_lab_after(&[]), sql) {
+        assert_eq!(answers, [COPY, FAILS_1071, COPY]);
+    }
+}
+
+#[test]
+fn a_myisam_key_in_another_character_set_or_of_another_kind_is_unknown() {
+    let latin1 = "ALTER TABLE orders ADD COLUMN code VARCHAR(100) CHARACTER SET latin1 NULL";
+    assert_myisam(
+        "latin1 VARCHAR index",
+        &[latin1],
+        "ADD INDEX idx_code (code)",
+        "unknown",
+    );
+    assert_myisam(
+        "latin1 VARCHAR unique index",
+        &[latin1],
+        "ADD UNIQUE INDEX uq_code (code)",
+        "unknown",
+    );
+    assert_myisam(
+        "CHAR index",
+        &["ALTER TABLE orders ADD COLUMN code CHAR(10) NULL"],
+        "ADD INDEX idx_code (code)",
+        "unknown",
+    );
+    assert_myisam(
+        "prefix index",
+        &[],
+        "ADD INDEX idx_email (email(100))",
+        "unknown",
+    );
+    assert_myisam(
+        "two-column index",
+        &[],
+        "ADD INDEX idx_two (user_id, amount)",
+        "unknown",
+    );
+    // A table that is not utf8mb4: the byte rule is measured for utf8mb4
+    // only, whatever the column's own length.
+    let schema = "CREATE TABLE t (id INT PRIMARY KEY, code VARCHAR(100) NULL) \
+                  ENGINE=MyISAM DEFAULT CHARSET=latin1;";
+    assert_answer(
+        "latin1 table",
+        schema,
+        "ALTER TABLE t ADD INDEX idx_code (code);",
+        "unknown",
+    );
+    // The column names its own character set: utf8mb4.
+    let schema = "CREATE TABLE t (id INT PRIMARY KEY, \
+                  code VARCHAR(250) CHARACTER SET utf8mb4 NULL) \
+                  ENGINE=MyISAM DEFAULT CHARSET=latin1;";
+    assert_answer(
+        "utf8mb4 column in a latin1 table",
+        schema,
+        "ALTER TABLE t ADD INDEX idx_code (code);",
+        COPY,
+    );
+}
+
+#[test]
+fn a_change_the_lab_did_not_measure_on_myisam_is_unknown() {
+    assert_myisam(
+        "lengthen a VARCHAR",
+        &[],
+        "MODIFY note VARCHAR(100) NULL",
+        "unknown",
+    );
+    assert_myisam(
+        "INT to SMALLINT",
+        &[],
+        "MODIFY amount SMALLINT NOT NULL",
+        "unknown",
+    );
+    assert_myisam(
+        "INT to BIGINT UNSIGNED",
+        &[],
+        "MODIFY amount BIGINT UNSIGNED NOT NULL",
+        "unknown",
+    );
+    assert_myisam("drop primary key", &[], "DROP PRIMARY KEY", "unknown");
+    assert_myisam(
+        "add check",
+        &[],
+        "ADD CONSTRAINT chk_amount CHECK (amount > 0)",
+        "unknown",
+    );
+    assert_myisam(
+        "expression default",
+        &[],
+        "ADD COLUMN token CHAR(36) NOT NULL DEFAULT (UUID())",
+        "unknown",
+    );
+    assert_myisam(
+        "two-column foreign key",
+        &[],
+        "ADD CONSTRAINT fk_two FOREIGN KEY (user_id, amount) REFERENCES users (id, name)",
+        "unknown",
+    );
+    assert_answer(
+        "add primary key",
+        "CREATE TABLE t (a INT NOT NULL, b INT) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4;",
+        "ALTER TABLE t ADD PRIMARY KEY (a);",
+        "unknown",
+    );
+}
+
+#[test]
+fn a_myisam_table_with_a_fulltext_index_or_an_indexed_column_is_unknown_where_innodb_would_know() {
+    // InnoDB: a FULLTEXT index turns a later ADD COLUMN into a COPY. The lab
+    // measured nothing like it on MyISAM.
+    assert_myisam(
+        "ADD COLUMN after a FULLTEXT index",
+        &["ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note)"],
+        "ADD COLUMN c INT NULL",
+        "unknown",
+    );
+    // A column in a two-column index, or in a unique one.
+    assert_myisam(
+        "drop a column of a two-column index",
+        &["ALTER TABLE orders ADD INDEX idx_two (user_id, amount)"],
+        "DROP COLUMN amount",
+        "unknown",
+    );
+    assert_myisam(
+        "drop a column of a unique index",
+        &["ALTER TABLE orders ADD UNIQUE INDEX uq_amount (amount)"],
+        "DROP COLUMN amount",
+        "unknown",
+    );
+    // A plain index on that column alone is the measured shape.
+    assert_myisam(
+        "drop a column of a plain index",
+        &["ALTER TABLE orders ADD INDEX idx_amount (amount)"],
+        "DROP COLUMN amount",
+        COPY,
+    );
+}
+
+#[test]
+fn a_foreign_key_on_a_myisam_table_copies_and_never_fails_with_3780_or_a_missing_index() {
+    // The MySQL servers accept it and keep no key: INT against BIGINT
+    // UNSIGNED (3780 on InnoDB), a parent column without an index (1822 on
+    // 8.0.46, 6125 on 8.4.13 on InnoDB).
+    assert_myisam("matching types", &[], MYISAM_ADD_FK, COPY);
+    assert_myisam(
+        "INT against BIGINT UNSIGNED",
+        &["ALTER TABLE orders ADD COLUMN ref INT NULL"],
+        "ADD CONSTRAINT fk_orders_ref FOREIGN KEY (ref) REFERENCES users (id)",
+        COPY,
+    );
+    assert_myisam(
+        "parent column without an index",
+        &["ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"],
+        "ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+        COPY,
+    );
+    assert_myisam(
+        "column that has an index already",
+        &["ALTER TABLE orders ADD INDEX idx_user (user_id)"],
+        MYISAM_ADD_FK,
+        COPY,
+    );
+    // The same shapes on InnoDB, as the control.
+    assert_foreign_key(
+        "InnoDB, INT against BIGINT UNSIGNED",
+        &["ALTER TABLE orders ADD COLUMN ref INT NULL"],
+        "ADD CONSTRAINT fk_orders_ref FOREIGN KEY (ref) REFERENCES users (id)",
+        FAILS_3780,
+    );
+}
+
+#[test]
+fn the_key_a_myisam_foreign_key_adds_over_1000_bytes_is_unknown() {
+    // Measured by hand (1071); not a lab scenario, so kilit does not
+    // answer it.
+    assert_myisam(
+        "foreign key on email",
+        &[],
+        "ADD CONSTRAINT fk_orders_email FOREIGN KEY (email) REFERENCES users (name)",
+        "unknown",
+    );
+}
+
+#[test]
+fn after_a_foreign_key_on_a_myisam_table_dropping_its_column_copies_and_does_not_fail_with_1828() {
+    let sql = format!(
+        "ALTER TABLE orders {MYISAM_ADD_FK};
+         ALTER TABLE orders DROP COLUMN user_id;"
+    );
+    for answers in all_on_both(&myisam_lab_after(&[]), &sql) {
+        assert_eq!(answers, [COPY, COPY]);
+    }
+    // On InnoDB the same two statements fail with 1828.
+    assert_eq!(
+        on_both(
+            &lab_after(&[]),
+            &format!(
+                "ALTER TABLE orders {MYISAM_ADD_FK};
+                 ALTER TABLE orders DROP COLUMN user_id;"
+            )
+        ),
+        ["fails with error 1828", "fails with error 1828"]
+    );
+}
+
+#[test]
+fn dropping_the_index_mysql_added_for_a_myisam_foreign_key_gets_the_drop_index_answer() {
+    // A named constraint: the index has the constraint's name.
+    let named = format!(
+        "ALTER TABLE orders {MYISAM_ADD_FK};
+         ALTER TABLE orders DROP INDEX fk_orders_user;"
+    );
+    // No name: the index has the column's name.
+    let unnamed = "ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users (id);
+                   ALTER TABLE orders DROP INDEX user_id;";
+    for sql in [named.as_str(), unnamed] {
+        for answers in all_on_both(&myisam_lab_after(&[]), sql) {
+            assert_eq!(answers, [COPY, COPY], "{sql}");
+        }
+    }
+}
+
+#[test]
+fn dropping_a_foreign_key_of_a_myisam_table_copies_whatever_its_name() {
+    // The lab measured DROP FOREIGN KEY with any name.
+    assert_myisam("a name that was added", &[], "DROP FOREIGN KEY fk_x", COPY);
+    let sql = format!(
+        "ALTER TABLE orders {MYISAM_ADD_FK};
+         ALTER TABLE orders DROP FOREIGN KEY fk_orders_user;"
+    );
+    for answers in all_on_both(&myisam_lab_after(&[]), &sql) {
+        assert_eq!(answers, [COPY, COPY]);
+    }
+}
+
+#[test]
+fn a_foreign_key_clause_in_create_table_on_myisam_adds_an_index_and_no_key() {
+    let tables = lab_after(&[]);
+    // Named: the index has the constraint's name. Unnamed: the column's.
+    let named = "CREATE TABLE child (id INT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, \
+                 CONSTRAINT fk_child_user FOREIGN KEY (user_id) REFERENCES users (id)) \
+                 ENGINE=MyISAM DEFAULT CHARSET=utf8mb4;";
+    let unnamed = "CREATE TABLE child (id INT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, \
+                   FOREIGN KEY (user_id) REFERENCES users (id)) \
+                   ENGINE=MyISAM DEFAULT CHARSET=utf8mb4;";
+    for (create, index) in [(named, "fk_child_user"), (unnamed, "user_id")] {
+        let drop_index = format!("{create}\nALTER TABLE child DROP INDEX {index};");
+        let drop_column = format!("{create}\nALTER TABLE child DROP COLUMN user_id;");
+        for answers in all_on_both(&tables, &drop_index) {
+            assert_eq!(answers, ["not checked", COPY], "{create}");
+        }
+        // The key is not kept: no 1828.
+        for answers in all_on_both(&tables, &drop_column) {
+            assert_eq!(answers, ["not checked", COPY], "{create}");
+        }
+    }
+    // The control: the same table on InnoDB keeps the key.
+    let innodb = named.replace("ENGINE=MyISAM", "ENGINE=InnoDB");
+    for answers in all_on_both(
+        &tables,
+        &format!("{innodb}\nALTER TABLE child DROP COLUMN user_id;"),
+    ) {
+        assert_eq!(answers, ["not checked", "fails with error 1828"]);
+    }
+}
+
+#[test]
+fn a_column_level_references_on_myisam_is_ignored_and_adds_no_key() {
+    let sql = "CREATE TABLE child (id INT PRIMARY KEY, \
+               user_id BIGINT UNSIGNED NOT NULL REFERENCES users (id)) \
+               ENGINE=MyISAM DEFAULT CHARSET=utf8mb4;
+               ALTER TABLE child DROP COLUMN user_id;";
+    for answers in all_on_both(&lab_after(&[]), sql) {
+        assert_eq!(answers, ["not checked", COPY]);
+    }
+}
+
+#[test]
+fn a_myisam_foreign_key_that_kilit_cannot_place_loses_the_table() {
+    // The name of the constraint is the name of an index already: kilit does
+    // not know which index MySQL keeps, so the foreign key and what follows
+    // are unknown.
+    let sql = format!(
+        "ALTER TABLE orders ADD INDEX fk_orders_user (amount);
+         ALTER TABLE orders {MYISAM_ADD_FK};
+         ALTER TABLE orders ADD COLUMN c INT NULL;"
+    );
+    for server in [MYSQL_80, MYSQL_84] {
+        let predictions = predictions_on(server, &myisam_lab_after(&[]), &sql);
+        assert_eq!(predictions.len(), 3, "{server}");
+        for prediction in &predictions[1..] {
+            match prediction {
+                Prediction::Unknown { reason } => {
+                    assert!(reason.contains("MyISAM"), "{server}: {reason}")
+                }
+                other => panic!("{server}: {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn an_innodb_child_of_a_myisam_or_unknown_parent_is_unknown() {
+    // MySQL refuses it with 1824 while foreign_key_checks is on.
+    let myisam_parent = LAB_TABLES.replacen("ENGINE=InnoDB", "ENGINE=MyISAM", 1);
+    let memory_parent = LAB_TABLES.replacen("ENGINE=InnoDB", "ENGINE=MEMORY", 1);
+    for (name, schema) in [("MyISAM", &myisam_parent), ("MEMORY", &memory_parent)] {
+        let matching = format!("ALTER TABLE orders {MYISAM_ADD_FK};");
+        assert_answer(name, schema, &matching, "unknown");
+        let mismatch = "ALTER TABLE orders ADD COLUMN ref INT NULL;
+             ALTER TABLE orders ADD CONSTRAINT fk_orders_ref FOREIGN KEY (ref) REFERENCES users (id);";
+        assert_answer(name, schema, mismatch, "unknown");
+    }
+    // An InnoDB parent keeps its answer.
+    assert_answer(
+        "InnoDB",
+        LAB_TABLES,
+        &format!("ALTER TABLE orders {MYISAM_ADD_FK};"),
+        COPY,
+    );
+}
+
+/// `orders` of the lab's tables with the engine `engine`.
+fn lab_with_engine(engine: &str) -> String {
+    let at = LAB_TABLES.find("CREATE TABLE orders").unwrap();
+    let (users, orders) = LAB_TABLES.split_at(at);
+    format!(
+        "{users}{}",
+        orders.replacen("ENGINE=InnoDB", &format!("ENGINE={engine}"), 1)
+    )
+}
+
+#[test]
+fn every_change_to_a_memory_archive_or_unknown_engine_table_is_unknown() {
+    let operations = [
+        "ADD COLUMN c INT NULL",
+        "DROP COLUMN note",
+        "RENAME COLUMN note TO memo",
+        "ALTER COLUMN note SET DEFAULT 'x'",
+        "MODIFY amount BIGINT NOT NULL",
+        "ADD INDEX idx_amount (amount)",
+        "ADD UNIQUE INDEX uq_amount (amount)",
+        "ADD FULLTEXT INDEX ft_note (note)",
+        "DROP INDEX idx_amount",
+        MYISAM_ADD_FK,
+        "DROP FOREIGN KEY fk_orders_user",
+        "ADD COLUMN c INT NULL, ALGORITHM=INPLACE",
+        "ADD COLUMN c INT NULL, ALGORITHM=INSTANT, LOCK=NONE",
+    ];
+    for engine in ["MEMORY", "ARCHIVE", "NoSuchEngine"] {
+        let schema = lab_with_engine(engine);
+        for operation in operations {
+            let sql = format!("ALTER TABLE orders {operation};");
+            for server in [MYSQL_80, MYSQL_84] {
+                let predictions = predictions_on(server, &schema, &sql);
+                match &predictions[..] {
+                    [Prediction::Unknown { reason }] => assert!(
+                        reason.contains(engine),
+                        "{operation} on {engine}: the reason does not name the engine: {reason}"
+                    ),
+                    other => panic!("{operation} on {engine} on {server}: {other:?}"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_engine_of_a_table_created_in_the_input_decides_its_answers() {
+    let create = |options: &str| {
+        format!(
+            "CREATE TABLE t (id INT PRIMARY KEY, a INT) {options};
+             ALTER TABLE t ADD COLUMN c INT NULL;"
+        )
+    };
+    // ENGINE in the spellings mysqldump, Laravel and a hand-written
+    // migration use. A repeated ENGINE: the last one counts.
+    for options in [
+        "ENGINE=MyISAM",
+        "engine = MyISAM",
+        "engine=myisam",
+        "ENGINE=MYISAM",
+        "ENGINE MyISAM",
+        "ENGINE=`MyISAM`",
+        "ENGINE=MyISAM, DEFAULT CHARSET=utf8mb4",
+        "DEFAULT CHARSET=utf8mb4 ENGINE=MyISAM",
+        "ENGINE=MyISAM AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+        "default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = MyISAM",
+        "ENGINE=InnoDB ENGINE=MyISAM",
+    ] {
+        assert_answer(options, "", &create(options), COPY);
+    }
+    for options in [
+        "",
+        "ENGINE=InnoDB",
+        "engine = InnoDB",
+        "engine=innodb",
+        "ENGINE `InnoDB`",
+        "ENGINE=MyISAM ENGINE=InnoDB",
+        "default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = InnoDB",
+    ] {
+        assert_answer(options, "", &create(options), INSTANT);
+    }
+    assert_answer(
+        "the last ENGINE is MEMORY",
+        "",
+        &create("ENGINE=MyISAM ENGINE=MEMORY"),
+        "unknown",
+    );
+    for options in ["ENGINE=MEMORY", "ENGINE=ARCHIVE", "engine = csv"] {
+        assert_answer(options, "", &create(options), "unknown");
+    }
+}
+
+#[test]
+fn a_quoted_engine_name_that_the_parser_cannot_read_makes_the_table_unknown() {
+    // MySQL accepts ENGINE='MyISAM'; kilit cannot read the CREATE TABLE and
+    // must not give the InnoDB answer afterwards.
+    let sql = |options: &str| {
+        format!(
+            "CREATE TABLE t (id INT PRIMARY KEY, a INT) {options};
+             ALTER TABLE t ADD COLUMN c INT NULL;"
+        )
+    };
+    assert_answer("single quotes", "", &sql("ENGINE='MyISAM'"), "unknown");
+    assert_answer("lowercase", "", &sql("ENGINE = 'myisam'"), "unknown");
+    assert_answer("double quotes", "", &sql("ENGINE=\"MyISAM\""), "unknown");
+    // The reason names the engine the scan found.
+    for server in [MYSQL_80, MYSQL_84] {
+        for options in ["ENGINE='MyISAM'", "ENGINE=\"MyISAM\""] {
+            match predictions_on(server, "", &sql(options)).last().unwrap() {
+                Prediction::Unknown { reason } => {
+                    assert!(reason.contains("MyISAM"), "{options}: {reason}")
+                }
+                other => panic!("{options} on {server}: {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn a_table_copied_with_like_from_a_myisam_table_is_lost_and_unknown() {
+    // The copy has the engine of the table after LIKE.
+    let sql = "CREATE TABLE orders_copy LIKE orders;
+               ALTER TABLE orders_copy ADD COLUMN c INT NULL;";
+    for server in [MYSQL_80, MYSQL_84] {
+        let predictions = predictions_on(server, &myisam_lab_after(&[]), sql);
+        match predictions.last().unwrap() {
+            Prediction::Unknown { reason } => {
+                assert!(reason.contains("MyISAM"), "{server}: {reason}")
+            }
+            other => panic!("{server}: {other:?}"),
+        }
+    }
+    // The control: a copy of an InnoDB table keeps today's answer.
+    assert_answer("InnoDB copy", LAB_TABLES, sql, INSTANT);
+}
+
+#[test]
+fn a_table_created_after_default_storage_engine_was_set_has_no_known_engine() {
+    let create = "CREATE TABLE t (id INT PRIMARY KEY, a INT) DEFAULT CHARSET=utf8mb4;
+                  ALTER TABLE t ADD COLUMN c INT NULL;";
+    for set in [
+        "SET default_storage_engine = MyISAM",
+        "SET SESSION default_storage_engine = MyISAM",
+        "SET GLOBAL default_storage_engine = MyISAM",
+        "SET PERSIST default_storage_engine = MyISAM",
+        "SET @@default_storage_engine = MyISAM",
+        "SET @@global.default_storage_engine = MyISAM",
+        "SET default_storage_engine := 'MyISAM'",
+        "set DEFAULT_STORAGE_ENGINE = myisam",
+    ] {
+        assert_answer(set, "", &format!("{set};\n{create}"), "unknown");
+    }
+    // The engine the CREATE TABLE writes decides.
+    let with = |engine: &str| {
+        format!(
+            "SET default_storage_engine = MyISAM;
+             CREATE TABLE t (id INT PRIMARY KEY, a INT) ENGINE={engine};
+             ALTER TABLE t ADD COLUMN c INT NULL;"
+        )
+    };
+    assert_answer("ENGINE=InnoDB", "", &with("InnoDB"), INSTANT);
+    assert_answer("ENGINE=MyISAM", "", &with("MyISAM"), COPY);
+    // A table created before the setting is not affected by it.
+    assert_answer(
+        "created before",
+        "",
+        "CREATE TABLE t (id INT PRIMARY KEY, a INT);
+         SET default_storage_engine = MyISAM;
+         ALTER TABLE t ADD COLUMN c INT NULL;",
+        INSTANT,
+    );
+}
+
+#[test]
+fn a_myisam_table_from_a_mysqldump_schema_is_known() {
+    let schema = "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  `email` varchar(255) DEFAULT NULL,
+  `note` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_amount` (`amount`)
+) ENGINE=MyISAM AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+    assert_eq!(
+        Schema::from_sql(schema).tables().next().unwrap().engine,
+        Some(Engine::MyIsam)
+    );
+    for (sql, answer) in [
+        ("alter table `orders` add `coupon` varchar(255) null", COPY),
+        ("alter table `orders` drop `note`", COPY),
+        (
+            "alter table `orders` rename column `note` to `memo`",
+            INSTANT,
+        ),
+        ("alter table `orders` drop index `idx_amount`", COPY),
+        (
+            "alter table `orders` add index `orders_user_id_index`(`user_id`)",
+            COPY,
+        ),
+        (
+            "alter table `orders` add unique `orders_email_unique`(`email`)",
+            FAILS_1071,
+        ),
+        (
+            "alter table `orders` modify `amount` smallint not null",
+            "unknown",
+        ),
+    ] {
+        assert_answer(sql, schema, sql, answer);
+    }
+}
+
+#[test]
+fn a_new_myisam_table_follows_the_measurements_for_myisam() {
+    let create = "CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, code VARCHAR(250) NOT NULL, \
+                  big VARCHAR(255) NULL, amount INT NOT NULL) \
+                  ENGINE=MyISAM DEFAULT CHARSET=utf8mb4;";
+    for (operation, answer) in [
+        // A measured success.
+        ("ADD COLUMN c INT NULL", COPY),
+        ("ADD INDEX idx_code (code)", COPY),
+        ("RENAME COLUMN amount TO total", INSTANT),
+        // A measured failure.
+        ("ADD INDEX idx_big (big)", FAILS_1071),
+        ("ADD UNIQUE INDEX uq_big (big)", FAILS_1071),
+        // Not measured on MyISAM.
+        ("MODIFY amount SMALLINT NOT NULL", "unknown"),
+        ("ADD INDEX idx_two (code, amount)", "unknown"),
+    ] {
+        assert_answer(
+            operation,
+            "",
+            &format!("{create}\nALTER TABLE t {operation};"),
+            answer,
+        );
+    }
+}
+
+#[test]
+fn a_lost_myisam_table_is_unknown_and_a_lost_innodb_table_keeps_its_answer() {
+    // A change kilit cannot follow loses the table: a column that is not
+    // there.
+    let lose = "ALTER TABLE orders DROP COLUMN no_such_column;";
+    let then = "ALTER TABLE orders ADD COLUMN c INT NULL;";
+    let myisam = all_on_both(&myisam_lab_after(&[]), &format!("{lose}\n{then}"));
+    for answers in myisam {
+        assert_eq!(answers.last().unwrap(), "unknown", "{answers:?}");
+    }
+    let innodb = all_on_both(&lab_after(&[]), &format!("{lose}\n{then}"));
+    for answers in innodb {
+        assert_eq!(answers.last().unwrap(), INSTANT, "{answers:?}");
+    }
+}
+
+#[test]
+fn changing_the_engine_with_alter_table_decides_what_follows() {
+    let then = "ALTER TABLE orders ADD COLUMN c INT NULL;";
+    for (engine, schema, answer) in [
+        // To InnoDB: today's answer.
+        ("ENGINE=InnoDB", lab_after(&[]), INSTANT),
+        ("ENGINE InnoDB", lab_after(&[]), INSTANT),
+        ("ENGINE=InnoDB", myisam_lab_after(&[]), INSTANT),
+        ("ENGINE=MyISAM, ENGINE=InnoDB", lab_after(&[]), INSTANT),
+        // To MyISAM, or somewhere else: unknown.
+        ("ENGINE=MyISAM", lab_after(&[]), "unknown"),
+        ("ENGINE MyISAM", lab_after(&[]), "unknown"),
+        ("engine = myisam", lab_after(&[]), "unknown"),
+        ("ENGINE='MyISAM'", lab_after(&[]), "unknown"),
+        ("ENGINE=InnoDB, ENGINE=MyISAM", lab_after(&[]), "unknown"),
+        ("ENGINE=MEMORY", lab_after(&[]), "unknown"),
+    ] {
+        let sql = format!("ALTER TABLE orders {engine};\n{then}");
+        let answers = all_on_both(&schema, &sql);
+        for answers in answers {
+            assert_eq!(answers.len(), 2);
+            // The statement itself is not something kilit can answer.
+            assert_eq!(answers[0], "unknown", "{engine}");
+            assert_eq!(answers[1], answer, "{engine}");
+        }
+    }
+}
+
+#[test]
+fn a_table_lost_by_a_change_of_engine_remembers_the_engine_that_statement_writes() {
+    let innodb = "CREATE TABLE orders (id INT PRIMARY KEY) ENGINE=InnoDB;
+                  ALTER TABLE orders ENGINE=MyISAM;";
+    assert!(matches!(
+        Schema::from_sql(innodb).table("orders"),
+        TableState::Lost {
+            engine: Some(Engine::MyIsam),
+            ..
+        }
+    ));
+    let myisam = "CREATE TABLE orders (id INT PRIMARY KEY) ENGINE=MyISAM;
+                  ALTER TABLE orders ENGINE=InnoDB;";
+    assert!(matches!(
+        Schema::from_sql(myisam).table("orders"),
+        TableState::Lost {
+            engine: Some(Engine::InnoDb),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_missing_table_gets_the_innodb_answer_whatever_its_engine_was() {
+    let sql = "ALTER TABLE orders ADD COLUMN c INT NULL;";
+    assert_answer("nothing known", "", sql, INSTANT);
+    // A MyISAM table that was dropped is missing again.
+    assert_answer(
+        "dropped",
+        "",
+        "CREATE TABLE orders (id INT PRIMARY KEY) ENGINE=MyISAM;
+         DROP TABLE orders;
+         ALTER TABLE orders ADD COLUMN c INT NULL;",
+        INSTANT,
+    );
+}
+
+#[test]
+fn innodb_tables_keep_their_answers_when_the_engine_is_read() {
+    assert_foreign_key("add column", &[], "ADD COLUMN c INT NULL", INSTANT);
+    assert_foreign_key("int to bigint", &[], "MODIFY amount BIGINT NOT NULL", COPY);
+    assert_foreign_key(
+        "INT against BIGINT UNSIGNED",
+        &["ALTER TABLE orders ADD COLUMN ref INT NULL"],
+        "ADD CONSTRAINT fk_orders_ref FOREIGN KEY (ref) REFERENCES users (id)",
+        FAILS_3780,
+    );
+    assert_foreign_key("matching foreign key", &[], MYISAM_ADD_FK, COPY);
+}
+
+#[test]
+fn setting_default_storage_engine_to_innodb_still_leaves_a_new_table_without_a_known_engine() {
+    // Decision 1: any form of the setting, before a CREATE TABLE without ENGINE.
+    assert_answer(
+        "SET to InnoDB",
+        "",
+        "SET default_storage_engine = InnoDB;
+         CREATE TABLE t (id INT PRIMARY KEY, a INT) DEFAULT CHARSET=utf8mb4;
+         ALTER TABLE t ADD COLUMN c INT NULL;",
+        "unknown",
+    );
+}
+
+#[test]
+fn a_schema_file_is_not_scanned_for_default_storage_engine_so_its_tables_get_the_innodb_answer() {
+    // The limitation, as decided: mysqldump writes ENGINE on every table, so
+    // no reader looks for the setting in the --schema text. Only the input
+    // is scanned.
+    let schema = "SET default_storage_engine = MyISAM;
+                  CREATE TABLE t (id INT PRIMARY KEY, a INT) DEFAULT CHARSET=utf8mb4;";
+    assert_answer(
+        "schema file",
+        schema,
+        "ALTER TABLE t ADD COLUMN c INT NULL;",
+        INSTANT,
+    );
+    // The same statements in the input are scanned.
+    assert_answer(
+        "input",
+        "",
+        &format!("{schema}\nALTER TABLE t ADD COLUMN c INT NULL;"),
+        "unknown",
+    );
+}
+
+// Regression tests for what the step 9a review found. The inputs and the
+// server results are the review's proofs (p1 to p15).
+
+/// What kilit says about every statement of `sql`, on both servers.
+fn assert_every_answer(name: &str, schema: &str, sql: &str, expected: &[&str]) {
+    for answers in all_on_both(schema, sql) {
+        assert_eq!(answers, expected, "{name}");
+    }
+}
+
+const REVIEW_USERS_AND_MYISAM_T: &str =
+    "CREATE TABLE users (id BIGINT UNSIGNED NOT NULL PRIMARY KEY) ENGINE=InnoDB;
+     CREATE TABLE t (id INT NOT NULL PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, \
+     amount INT NOT NULL) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4;\n";
+
+#[test]
+fn a_myisam_foreign_key_that_names_its_own_index_is_unknown_and_loses_the_table() {
+    // p2: the index MySQL adds takes the name after FOREIGN KEY, not the
+    // column's, so DROP INDEX user_id must not get the measured answer.
+    assert_every_answer(
+        "ALTER TABLE, index name ix_u",
+        "",
+        &format!(
+            "{REVIEW_USERS_AND_MYISAM_T}\
+             ALTER TABLE t ADD FOREIGN KEY ix_u (user_id) REFERENCES users (id);
+             ALTER TABLE t DROP INDEX user_id;"
+        ),
+        &["not checked", "not checked", "unknown", "unknown"],
+    );
+    // p3: the index name is taken already.
+    assert_every_answer(
+        "ALTER TABLE, index name taken",
+        "",
+        &format!(
+            "{REVIEW_USERS_AND_MYISAM_T}\
+             ALTER TABLE t ADD INDEX ix_u (amount);
+             ALTER TABLE t ADD FOREIGN KEY ix_u (user_id) REFERENCES users (id);"
+        ),
+        &["not checked", "not checked", COPY, "unknown"],
+    );
+    // p4: the inline clause in CREATE TABLE.
+    let sql = "CREATE TABLE users (id BIGINT UNSIGNED NOT NULL PRIMARY KEY) ENGINE=InnoDB;
+        CREATE TABLE t (id INT NOT NULL PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, \
+        FOREIGN KEY ix_c (user_id) REFERENCES users (id)) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4;
+        ALTER TABLE t DROP INDEX user_id;";
+    for answers in all_on_both("", sql) {
+        assert_eq!(answers.last().unwrap(), "unknown", "{answers:?}");
+    }
+}
+
+#[test]
+fn a_myisam_foreign_key_with_a_constraint_name_and_no_index_name_keeps_the_copy_answer() {
+    assert_every_answer(
+        "ALTER TABLE, CONSTRAINT name only",
+        "",
+        &format!(
+            "{REVIEW_USERS_AND_MYISAM_T}\
+             ALTER TABLE t ADD CONSTRAINT fk_t_user FOREIGN KEY (user_id) REFERENCES users (id);
+             ALTER TABLE t DROP INDEX fk_t_user;"
+        ),
+        &["not checked", "not checked", COPY, COPY],
+    );
+}
+
+#[test]
+fn a_descending_index_on_a_myisam_table_is_unknown_because_mysql_gives_1178() {
+    // p1: a new table. p12: a table from the schema.
+    let new_table = "CREATE TABLE t (id INT NOT NULL PRIMARY KEY, amount INT NOT NULL) \
+                     ENGINE=MyISAM DEFAULT CHARSET=utf8mb4;\n";
+    for operation in [
+        "ADD INDEX i (amount DESC)",
+        "ADD UNIQUE INDEX u (amount DESC)",
+    ] {
+        for answers in all_on_both("", &format!("{new_table}ALTER TABLE t {operation};")) {
+            assert_eq!(answers.last().unwrap(), "unknown", "{operation}");
+        }
+        assert_myisam(operation, &[], operation, "unknown");
+    }
+    // The word DESC in a string is not a sort order.
+    assert_myisam(
+        "DESC in a COMMENT",
+        &[],
+        "ADD INDEX i (amount) COMMENT 'newest first, DESC'",
+        COPY,
+    );
+}
+
+#[test]
+fn a_temporary_table_created_after_default_tmp_storage_engine_was_set_has_no_known_engine() {
+    // p7.
+    assert_answer(
+        "default_tmp_storage_engine",
+        "",
+        "SET default_tmp_storage_engine = MyISAM;
+         CREATE TEMPORARY TABLE tt (id INT, email VARCHAR(255)) DEFAULT CHARSET=utf8mb4;
+         ALTER TABLE tt ADD INDEX ie (email);",
+        "unknown",
+    );
+}
+
+#[test]
+fn create_table_if_not_exists_like_over_a_myisam_table_leaves_the_following_alter_unknown() {
+    // p6: MySQL does nothing here, the table stays MyISAM.
+    let schema = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  `note` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+    assert_answer(
+        "IF NOT EXISTS ... LIKE",
+        schema,
+        "CREATE TABLE IF NOT EXISTS orders LIKE users;
+         ALTER TABLE orders ADD COLUMN c INT NULL;",
+        "unknown",
+    );
+}
+
+#[test]
+fn the_word_engine_in_a_quoted_string_of_an_alter_is_not_read_as_an_engine() {
+    // p8: the table is MyISAM after the first statement, whatever the
+    // comment says.
+    let schema = "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `amount` int NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+    assert_answer(
+        "ENGINE=MyISAM, COMMENT 'was engine InnoDB'",
+        schema,
+        "ALTER TABLE orders ENGINE=MyISAM, COMMENT 'was engine InnoDB';
+         ALTER TABLE orders ADD COLUMN c INT NULL;",
+        "unknown",
+    );
+}
+
+const SQL_MODE_SCHEMA: &str = "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `amount` int NOT NULL,
+  `code` varchar(251) DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+
+#[test]
+fn a_myisam_key_over_1000_bytes_is_unknown_once_the_input_sets_sql_mode() {
+    // p13 and p14: with sql_mode '' the server cuts the key to a 250-character
+    // prefix and accepts it; with a strict mode it gives 1071. kilit does not
+    // follow the mode, so any SET of it makes the answer unknown.
+    for set in [
+        "SET SESSION sql_mode = ''",
+        "SET SESSION sql_mode = 'STRICT_TRANS_TABLES'",
+        "SET sql_mode = ''",
+    ] {
+        for operation in [
+            "ALTER TABLE orders ADD INDEX idx_code (code);",
+            // p15
+            "ALTER TABLE orders ADD UNIQUE INDEX uq_code (code);",
+        ] {
+            assert_answer(
+                &format!("{set}; {operation}"),
+                SQL_MODE_SCHEMA,
+                &format!("{set};\n{operation}"),
+                "unknown",
+            );
+        }
+    }
+}
+
+#[test]
+fn a_myisam_key_over_1000_bytes_without_a_sql_mode_in_the_input_fails_with_1071_and_says_it_assumes_strict_mode()
+ {
+    for operation in [
+        "ALTER TABLE orders ADD INDEX idx_code (code);",
+        "ALTER TABLE orders ADD UNIQUE INDEX uq_code (code);",
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            match predictions_on(server, SQL_MODE_SCHEMA, operation)
+                .pop()
+                .unwrap()
+            {
+                Prediction::Measured {
+                    verdict: Verdict::Fails { code, .. },
+                    notes,
+                    ..
+                } => {
+                    assert_eq!(code, 1071, "{operation} on {server}");
+                    assert!(
+                        notes.iter().any(|note| note.contains("strict SQL mode")),
+                        "{operation} on {server}: {notes:?}"
+                    );
+                }
+                other => panic!("{operation} on {server}: {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn innobase_is_another_name_of_innodb_and_keeps_the_innodb_answer() {
+    // p9: the servers run ADD COLUMN on it as INSTANT.
+    assert_answer(
+        "ENGINE=INNOBASE",
+        "",
+        "CREATE TABLE t (id INT NOT NULL PRIMARY KEY, note VARCHAR(50) NULL) \
+         ENGINE=INNOBASE DEFAULT CHARSET=utf8mb4;
+         ALTER TABLE t ADD COLUMN c INT NULL;",
+        INSTANT,
+    );
+}
+
+#[test]
+fn the_reason_for_a_myisam_foreign_key_with_an_unknown_parent_starts_with_kilit_cannot_tell_if() {
+    // Laravel's c1e and c2c without a schema file: users is not known.
+    let create = "create table `orders` (`id` bigint unsigned not null auto_increment primary key, \
+                  `user_id` bigint unsigned not null, `amount` int not null, \
+                  `email` varchar(255) null, `note` varchar(50) null) \
+                  default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = MyISAM";
+    let foreign_key = "alter table `orders` add constraint `orders_user_id_foreign` \
+                       foreign key (`user_id`) references `users` (`id`)";
+    let output = pretend(
+        "2026_01_01_000001_create_orders_table",
+        &[create, foreign_key],
+    );
+    let statements: Vec<Statement> = read_pretend(&output)
+        .unwrap()
+        .migrations
+        .into_iter()
+        .flat_map(|migration| migration.statements)
+        .collect();
+    for server in [MYSQL_80, MYSQL_84] {
+        let results = Knowledge::built_in().server(server).unwrap();
+        let findings = check(&statements, &Schema::new(), results);
+        match &findings.last().unwrap().prediction {
+            Prediction::Unknown { reason } => {
+                assert!(
+                    reason.starts_with("kilit cannot tell if"),
+                    "{server}: {reason}"
+                );
+                assert!(
+                    !reason.contains("whether the change happens"),
+                    "{server}: {reason}"
+                );
+            }
+            other => panic!("{server}: {other:?}"),
+        }
+    }
 }

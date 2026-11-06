@@ -133,9 +133,11 @@ Every statement gets one of three answers:
 
 ## What MySQL does with common changes
 
-Measured with kilit-lab on MySQL 8.0.46 and 8.4.13, on a table of 1,000 rows.
-The two versions mostly behave the same. Where they differ, the table says
-which one does what.
+Measured with kilit-lab on MySQL 8.0.46 and 8.4.13, on InnoDB tables of 1,000
+rows. A table whose `CREATE TABLE` names no `ENGINE` is taken as InnoDB, the
+server default; [MyISAM tables](#myisam-tables) have their own rows below. The
+two versions mostly behave the same. Where they differ, the table says which
+one does what.
 
 ### Columns, indexes and foreign keys
 
@@ -234,6 +236,61 @@ change: inserts, updates and deletes on the table wait until it finishes.
 Every row comes from a scenario in [`scenarios/`](scenarios/) and its results
 in [`matrix/`](matrix/).
 
+### MyISAM tables
+
+When the schema or the migration says `ENGINE=MyISAM` for a table, kilit
+answers from separate measurements. They ran on MySQL 8.0.46 and 8.4.13, with
+the same result on both. Laravel writes `engine = MyISAM` only in
+`Schema::create`; `mysqldump` writes `ENGINE=MyISAM` for every table.
+
+| Change | MySQL does | Writes |
+| --- | --- | --- |
+| Add a column, nullable or `NOT NULL` with a default<br>`$table->string('coupon')->nullable()` | COPY, copies every row | **wait** |
+| Drop a column<br>`$table->dropColumn('note')` | COPY, copies every row | **wait** |
+| ↳ when a `FOREIGN KEY` clause names it⁶ | COPY, copies every row | **wait** |
+| Rename a column<br>`$table->renameColumn('note', 'memo')` | INSTANT | continue |
+| Set a column default<br>`ALTER COLUMN … SET DEFAULT` (raw SQL) | INSTANT | continue |
+| Change an `INT` to a `BIGINT`<br>`$table->bigInteger('amount')->change()` | COPY, copies every row | **wait** |
+| Add an index<br>`$table->index('amount')` | COPY, copies every row | **wait** |
+| Add a unique index<br>`$table->unique('amount')` | COPY, copies every row | **wait** |
+| ↳ when values repeat | fails, error 1062 | – |
+| Add an index or a unique index on a key longer than 1000 bytes⁷<br>`$table->string('code', 251)->index()` | fails, error 1071 | – |
+| Add a FULLTEXT index<br>`$table->fullText('note')` | COPY, copies every row | **wait** |
+| Drop an index<br>`$table->dropIndex('orders_amount_index')` | COPY, copies every row | **wait** |
+| Add a foreign key⁶<br>`$table->foreign('user_id')->references('id')->on('users')` | COPY, copies every row | **wait** |
+| ↳ when an `INT` column points at a `BIGINT UNSIGNED` one, or the parent column has no index | COPY, copies every row | **wait** |
+| Drop a foreign key<br>`$table->dropForeign(['user_id'])` | COPY, copies every row | **wait** |
+| Anything else, or when kilit cannot tell what holds | not answered yet | – |
+
+⁶ MySQL reads a `FOREIGN KEY` clause on a MyISAM table and ignores it: no key
+is kept, no error comes, so a type mismatch or a missing parent index does not
+fail as it does on InnoDB. MySQL adds a plain index named after the constraint,
+or after the column when the key has no name, unless an index of exactly that
+column exists; a column-level `REFERENCES` adds none.\
+⁷ A MyISAM key may be 1000 bytes long. In `utf8mb4`, `VARCHAR(250)` is exactly
+1000 bytes and is accepted; `VARCHAR(251)` is 1004 and fails. kilit counts
+bytes only for integer columns and `utf8mb4` `VARCHAR` columns, assumes strict
+SQL mode (the MySQL default), and gives no answer once the input sets
+`sql_mode`.
+
+Where MySQL copies the table, `ALGORITHM=INSTANT`, `ALGORITHM=INPLACE` and
+`LOCK=NONE` fail with error 1845; `ALGORITHM=COPY` runs. While the copy runs,
+reads go on and writes wait.
+
+kilit gives no answer, with the reason, for every other change to a MyISAM
+table: a type change other than `INT` to `BIGINT`, an index of several columns,
+with a prefix or `DESC`, a key on other types or character sets, an expression
+default, a generated column, and a foreign key whose index name the statement
+chooses. A foreign key from an InnoDB table to a MyISAM table gets no answer
+either.
+
+Any other engine, such as MEMORY or ARCHIVE, gets no answer for any change to
+its table, and neither does a table whose engine kilit cannot tell, such as one
+created after the input sets `default_storage_engine` or
+`default_tmp_storage_engine`. `ALTER TABLE ... ENGINE=...` is not read yet:
+kilit stops trusting that table, and keeps answering for it only if it was
+InnoDB and the statement names InnoDB.
+
 ## Getting started
 
 You need [Rust](https://rustup.rs) 1.88 or newer. Checking a migration needs no
@@ -324,6 +381,9 @@ flowchart LR
 `ALGORITHM=COPY` and `LOCK=NONE`. For each run it records whether the server
 accepted the statement or which error it returned, how many rows it copied,
 whether InnoDB rebuilt the table, and InnoDB's count of instant column changes.
+A scenario can make `orders` a MyISAM table. MyISAM has no table id and no row
+versions, so the lab reads a copy from the server's count of `copy to tmp table`
+stages.
 From the six runs it derives a verdict: the algorithm the server picks when
 nothing is forced, checked against the run as written, whether the table is
 rebuilt or copied, and whether writes can continue. The results go to
@@ -345,12 +405,13 @@ own types. Nothing is dropped silently: an operation it reads but does not model
 becomes `Other`, and a statement it cannot read becomes `Unparsed` without
 stopping the statements after it.
 
-**The schema** comes from `CREATE TABLE` statements, such as a schema dump.
-kilit follows every statement of the migration through it: columns, indexes and
-foreign keys are added, changed, renamed and dropped, so each statement is
-judged against the tables as they are at that point. When a statement changes a
-table in a way kilit cannot follow, such as one it cannot read, kilit stops
-trusting what it knew about that table instead of guessing.
+**The schema** comes from `CREATE TABLE` statements, such as a schema dump,
+with each table's engine. kilit follows every statement of the migration
+through it: columns, indexes and foreign keys are added, changed, renamed and
+dropped, so each statement is judged against the tables as they are at that
+point. When a statement changes a table in a way kilit cannot follow, such as
+one it cannot read, kilit stops trusting what it knew about that table instead
+of guessing.
 
 **The checker** places each change in a *case*: a kind of change, together with
 the lab scenarios that measured it. For a `MODIFY` or `CHANGE`, kilit compares
@@ -402,7 +463,11 @@ kilit is young, and it says so when it does not know. Today:
 - Type changes other than between integer types, such as `VARCHAR` to `TEXT`,
   are not measured yet.
 - Only MySQL 8.0.46 and 8.4.13 are measured. MariaDB is not supported.
-- sqlparser 0.63 cannot read `CONVERT TO CHARACTER SET`, `ENGINE=...`,
+- kilit has measured InnoDB and, for the changes listed above, MyISAM. A table
+  with no `ENGINE` is taken as InnoDB, the server default, and kilit does not
+  read `default_storage_engine` from a `--schema` file, so a table created
+  under a different default there is still taken as InnoDB.
+- sqlparser 0.63 cannot read `CONVERT TO CHARACTER SET`, `ALTER TABLE ... ENGINE=...`,
   `RENAME INDEX`, `ALGORITHM=NOCOPY` or `OPTIMIZE TABLE` yet, so kilit reports
   them as unreadable.
 - "Writes continue" describes the change itself. Every `ALTER TABLE` also

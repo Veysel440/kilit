@@ -17,10 +17,13 @@ pub struct Measurement<'a> {
     pub verdict: Verdict,
 }
 
-/// The table as InnoDB sees it.
-struct TableState {
-    id: u64,
-    row_versions: u64,
+/// What tells whether a variant rebuilt `orders`.
+enum TableState {
+    /// The table as InnoDB sees it.
+    InnoDb { id: u64, row_versions: u64 },
+    /// Any other engine: how often this session has copied a table so far.
+    /// It has no table id or row versions to read.
+    Copies(u64),
 }
 
 /// Runs every variant of a scenario and decides the verdict.
@@ -44,7 +47,7 @@ async fn run(conn: &mut Conn, scenario: &Scenario, variant: Variant) -> Result<O
     if !conn.reset().await? {
         return Err("the server cannot reset a session (COM_RESET_CONNECTION)".into());
     }
-    fixture::reset(conn).await?;
+    fixture::reset(conn, scenario.engine).await?;
     for statement in &scenario.setup {
         conn.query_drop(statement.as_str())
             .await
@@ -54,16 +57,40 @@ async fn run(conn: &mut Conn, scenario: &Scenario, variant: Variant) -> Result<O
         conn.query_drop(statement.as_str()).await?;
     }
 
-    let before = table_state(conn).await?;
+    let before = table_state(conn, scenario.engine).await?;
     let outcome = match conn.query_drop(scenario.statement(variant)).await {
         Ok(()) => {
             // Read the server's reply first: the next query replaces it.
             let copied_rows = copied_rows(&conn.info());
-            let after = table_state(conn).await?;
+            let after = table_state(conn, scenario.engine).await?;
+            let (rebuilt, row_versions) = match (before, after) {
+                (
+                    TableState::InnoDb { id, row_versions },
+                    TableState::InnoDb {
+                        id: new_id,
+                        row_versions: new_row_versions,
+                    },
+                ) => (new_id != id, (row_versions, new_row_versions)),
+                (TableState::Copies(before), TableState::Copies(after)) => {
+                    let rebuilt = after > before;
+                    // orders always has rows, so a copy reports them.
+                    if rebuilt != copied_rows.is_some_and(|rows| rows > 0) {
+                        return Err(format!(
+                            "{} as {variant}: the server copied the table {} times but \
+                             reported {copied_rows:?} records",
+                            scenario.id,
+                            after - before
+                        )
+                        .into());
+                    }
+                    (rebuilt, (0, 0))
+                }
+                _ => unreachable!("the engine of a scenario does not change"),
+            };
             Outcome::Accepted {
                 copied_rows,
-                rebuilt: after.id != before.id,
-                row_versions: (before.row_versions, after.row_versions),
+                rebuilt,
+                row_versions,
             }
         }
         Err(mysql_async::Error::Server(err)) => Outcome::Rejected {
@@ -75,7 +102,37 @@ async fn run(conn: &mut Conn, scenario: &Scenario, variant: Variant) -> Result<O
     Ok(Observation { variant, outcome })
 }
 
-async fn table_state(conn: &mut Conn) -> Result<TableState> {
+async fn table_state(conn: &mut Conn, engine: Option<&str>) -> Result<TableState> {
+    let Some(engine) = engine else {
+        return innodb_state(conn).await;
+    };
+    let actual: Option<String> = conn
+        .query_first(format!(
+            "SELECT ENGINE FROM information_schema.TABLES
+             WHERE TABLE_SCHEMA = '{DATABASE}' AND TABLE_NAME = 'orders'"
+        ))
+        .await?;
+    if !actual
+        .as_deref()
+        .is_some_and(|actual| actual.eq_ignore_ascii_case(engine))
+    {
+        return Err(format!("orders should be {engine}, but the server says {actual:?}").into());
+    }
+    // Without an InnoDB table id, the copy shows in the server's own count
+    // of the stage that copies a table, for this session.
+    let copies: Option<u64> = conn
+        .query_first(
+            "SELECT COUNT_STAR
+             FROM performance_schema.events_stages_summary_by_thread_by_event_name
+             WHERE THREAD_ID = PS_CURRENT_THREAD_ID()
+               AND EVENT_NAME = 'stage/sql/copy to tmp table'",
+        )
+        .await?;
+    let copies = copies.ok_or("performance_schema does not count the stage `copy to tmp table`")?;
+    Ok(TableState::Copies(copies))
+}
+
+async fn innodb_state(conn: &mut Conn) -> Result<TableState> {
     let row: Option<(u64, u64)> = conn
         .query_first(format!(
             "SELECT TABLE_ID, TOTAL_ROW_VERSIONS
@@ -84,7 +141,7 @@ async fn table_state(conn: &mut Conn) -> Result<TableState> {
         ))
         .await?;
     let (id, row_versions) = row.ok_or("the orders table is missing from INNODB_TABLES")?;
-    Ok(TableState { id, row_versions })
+    Ok(TableState::InnoDb { id, row_versions })
 }
 
 /// Reads N from the server's reply `Records: N  Duplicates: 0  Warnings: 0`.

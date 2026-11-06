@@ -31,6 +31,8 @@ struct ScenarioResult<'a> {
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     setup: &'a [String],
     session: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine: Option<&'a str>,
     statement: String,
     verdict: &'a Verdict,
     observations: &'a [Observation],
@@ -80,6 +82,7 @@ pub fn write(
                 title: &measurement.scenario.title,
                 setup: &measurement.scenario.setup,
                 session: &measurement.scenario.session,
+                engine: measurement.scenario.engine,
                 statement: measurement.scenario.statement(Variant::SERVER_DEFAULT),
                 verdict: &measurement.verdict,
                 observations: &measurement.observations,

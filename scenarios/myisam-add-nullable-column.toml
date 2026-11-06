@@ -1,0 +1,3 @@
+title = "Add a nullable column to a MyISAM table"
+engine = "MyISAM"
+operation = "ADD COLUMN c INT NULL"

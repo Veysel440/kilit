@@ -86,6 +86,10 @@ pub struct ScenarioResult {
     /// Statements run in the same session right before the ALTER.
     #[serde(default)]
     pub session: Vec<String>,
+    /// `MyISAM` when the lab created `orders` with that engine; `None` for
+    /// the InnoDB tables of `scenarios/tables.sql`.
+    #[serde(default)]
+    pub engine: Option<String>,
     /// The ALTER statement, as run without forcing anything.
     pub statement: String,
     /// What the server does with `statement`.

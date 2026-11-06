@@ -1,0 +1,3 @@
+title = "Add a unique index on a column with duplicates to a MyISAM table"
+engine = "MyISAM"
+operation = "ADD UNIQUE INDEX uq_user (user_id)"

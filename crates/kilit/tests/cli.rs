@@ -738,3 +738,290 @@ fn null_on_delete_on_a_not_null_column_is_unknown_and_strict_exits_with_1() {
         assert_eq!(json_check(server, true, sql).1, Some(1));
     }
 }
+
+// Step 9a: the storage engine. A table that mysqldump writes with
+// `ENGINE=MyISAM` gets the answers the lab measured on MyISAM tables.
+
+/// A mysqldump schema where `orders` is MyISAM and `users` is InnoDB.
+fn write_schema_with_engine(name: &str, engine: &str) -> PathBuf {
+    let file = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::write(
+        &file,
+        format!(
+            "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  `email` varchar(255) DEFAULT NULL,
+  `note` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE={engine} AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+"
+        ),
+    )
+    .unwrap();
+    file
+}
+
+/// kilit's JSON for `sql` against `schema`, and the exit status.
+fn json_against(schema: &Path, strict: bool, sql: &str) -> (serde_json::Value, Option<i32>) {
+    let mut args = vec![
+        "check",
+        "--schema",
+        schema.to_str().unwrap(),
+        "--format",
+        "json",
+    ];
+    if strict {
+        args.push("--strict");
+    }
+    let output = kilit(&args, sql);
+    let json = serde_json::from_slice(&output.stdout).unwrap();
+    (json, output.status.code())
+}
+
+const MYISAM_COPY_SQL: &str = "alter table orders add coupon varchar(255) null;";
+const MYISAM_INSTANT_SQL: &str = "alter table orders rename column note to memo;";
+const MYISAM_FAILS_SQL: &str = "alter table orders add unique index uq_email (email);";
+const MYISAM_UNKNOWN_SQL: &str = "alter table orders modify amount smallint not null;";
+
+#[test]
+fn a_myisam_table_in_a_mysqldump_schema_gets_the_myisam_answers_in_json() {
+    let schema = write_schema_with_engine("schema-with-a-myisam-table.sql", "MyISAM");
+    let sql = format!(
+        "{MYISAM_COPY_SQL}
+         {MYISAM_INSTANT_SQL}
+         {MYISAM_FAILS_SQL}
+         alter table orders add constraint fk_orders_amount \
+         foreign key (amount) references users (id);
+         {MYISAM_UNKNOWN_SQL}"
+    );
+    let (json, status) = json_against(&schema, false, &sql);
+    // The table is known, not lost.
+    assert_eq!(
+        json["schema"]["tables"],
+        serde_json::json!(["orders", "users"])
+    );
+    assert_eq!(json["schema"]["lost"], serde_json::json!([]));
+    let statements = json["sources"][0]["statements"].as_array().unwrap();
+    assert_eq!(statements.len(), 5);
+
+    // ADD COLUMN: COPY, writes wait.
+    assert_eq!(statements[0]["impact"], "writes_wait");
+    assert_eq!(statements[0]["case"], "myisam-add-column");
+    assert_eq!(statements[0]["algorithm"], "COPY");
+    assert_eq!(statements[0]["copies_rows"], true);
+    assert_eq!(statements[0]["writes"], "blocked");
+
+    // RENAME COLUMN: metadata only, writes continue.
+    assert_eq!(statements[1]["impact"], "writes_continue");
+    assert_eq!(statements[1]["case"], "myisam-rename-column");
+    assert_eq!(statements[1]["algorithm"], "INSTANT");
+    assert_eq!(statements[1]["copies_rows"], false);
+
+    // A UNIQUE index on email, 1020 bytes in utf8mb4: 1071.
+    assert_eq!(statements[2]["impact"], "fails");
+    assert_eq!(statements[2]["error"], 1071);
+
+    // INT against BIGINT UNSIGNED: MySQL accepts it on a MyISAM table, it is
+    // 3780 on InnoDB.
+    assert_eq!(statements[3]["impact"], "writes_wait");
+    assert_eq!(statements[3]["case"], "myisam-add-foreign-key");
+    assert!(statements[3]["error"].is_null(), "{}", statements[3]);
+
+    // MODIFY INT to SMALLINT: not measured on MyISAM.
+    assert_eq!(statements[4]["impact"], "unknown");
+    assert!(
+        statements[4]["reason"].as_str().unwrap().contains("MyISAM"),
+        "{}",
+        statements[4]
+    );
+
+    assert_eq!(json["summary"]["fails"], 1);
+    assert_eq!(json["summary"]["writes_wait"], 2);
+    assert_eq!(json["summary"]["writes_continue"], 1);
+    assert_eq!(json["summary"]["unknown"], 1);
+    assert_eq!(json["exit_code"], 1);
+    assert_eq!(status, Some(1));
+}
+
+#[test]
+fn a_myisam_table_in_a_mysqldump_schema_gets_the_myisam_answers_in_text() {
+    let schema = write_schema_with_engine("schema-with-a-myisam-table-text.sql", "MyISAM");
+    let sql = format!("{MYISAM_COPY_SQL}\n{MYISAM_INSTANT_SQL}\n{MYISAM_FAILS_SQL}");
+    let output = kilit(&["check", "--schema", schema.to_str().unwrap()], &sql);
+    let text = stdout(&output);
+    assert!(
+        text.contains(
+            "  line 1: alter table orders add coupon varchar(255) null\n\
+             \x20   COPY, copies every row, writes wait\n\
+             \x20   measured as myisam-add-column ("
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "  line 2: alter table orders rename column note to memo\n\
+             \x20   INSTANT, no rebuild, writes continue\n\
+             \x20   measured as myisam-rename-column ("
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "  line 3: alter table orders add unique index uq_email (email)\n\
+             \x20   fails with error 1071\n"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("could not follow"), "{text}");
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+}
+
+#[test]
+fn the_exit_code_for_a_myisam_table_follows_the_impact_with_and_without_strict() {
+    let schema = write_schema_with_engine("schema-with-a-myisam-table-exit.sql", "MyISAM");
+    // (statement, exit status without --strict, with --strict)
+    for (sql, plain, strict) in [
+        // COPY: writes wait.
+        (MYISAM_COPY_SQL, 1, 1),
+        // A measured failure.
+        (MYISAM_FAILS_SQL, 1, 1),
+        // Metadata only: nothing waits.
+        (MYISAM_INSTANT_SQL, 0, 0),
+        // Not measured on MyISAM: only --strict fails the run.
+        (MYISAM_UNKNOWN_SQL, 0, 1),
+    ] {
+        assert_eq!(json_against(&schema, false, sql).1, Some(plain), "{sql}");
+        let (json, status) = json_against(&schema, true, sql);
+        assert_eq!(status, Some(strict), "{sql}");
+        assert_eq!(json["exit_code"], strict, "{sql}");
+    }
+}
+
+#[test]
+fn the_same_schema_with_an_innodb_orders_keeps_the_innodb_answers() {
+    let schema = write_schema_with_engine("schema-with-an-innodb-table.sql", "InnoDB");
+    let sql = format!(
+        "{MYISAM_COPY_SQL}
+         alter table orders add constraint fk_orders_amount \
+         foreign key (amount) references users (id);"
+    );
+    let (json, status) = json_against(&schema, false, &sql);
+    let statements = json["sources"][0]["statements"].as_array().unwrap();
+    assert_eq!(statements[0]["impact"], "writes_continue");
+    assert_eq!(statements[0]["case"], "add-column");
+    assert_eq!(statements[0]["algorithm"], "INSTANT");
+    assert_eq!(statements[1]["impact"], "fails");
+    assert_eq!(statements[1]["error"], 3780);
+    assert_eq!(status, Some(1));
+}
+
+#[test]
+fn a_table_of_another_engine_is_unknown_and_strict_exits_with_1() {
+    for engine in ["MEMORY", "ARCHIVE"] {
+        let schema = write_schema_with_engine("schema-with-another-engine.sql", engine);
+        let (json, status) = json_against(&schema, false, MYISAM_COPY_SQL);
+        let statement = &json["sources"][0]["statements"][0];
+        assert_eq!(statement["impact"], "unknown", "{engine}");
+        assert!(
+            statement["reason"].as_str().unwrap().contains(engine),
+            "{engine}: {statement}"
+        );
+        assert_eq!(status, Some(0), "{engine}");
+        assert_eq!(
+            json_against(&schema, true, MYISAM_COPY_SQL).1,
+            Some(1),
+            "{engine}"
+        );
+        let output = kilit(
+            &["check", "--schema", schema.to_str().unwrap()],
+            MYISAM_COPY_SQL,
+        );
+        let text = stdout(&output);
+        assert!(text.contains("UNKNOWN: "), "{engine}: {text}");
+        assert!(text.contains(engine), "{engine}: {text}");
+    }
+}
+
+#[test]
+fn a_myisam_table_created_in_the_input_is_never_waited_for_unless_it_fails() {
+    // Nothing uses the new table, so a measured success is new_table. A
+    // measured failure still fails, and what is not measured is unknown.
+    let sql = "create table `order_tags` (`id` bigint unsigned not null primary key, \
+               `tag` varchar(255) not null, `amount` int not null) \
+               engine = MyISAM default character set utf8mb4;
+               alter table `order_tags` add `weight` int null;
+               alter table `order_tags` add index `order_tags_tag_index`(`tag`);
+               alter table `order_tags` modify `amount` smallint not null;";
+    let output = kilit(&["check", "--format", "json"], sql);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let statements = json["sources"][0]["statements"].as_array().unwrap();
+    assert_eq!(statements[0]["impact"], "not_checked");
+    assert_eq!(statements[1]["impact"], "new_table");
+    assert_eq!(statements[2]["impact"], "fails");
+    assert_eq!(statements[2]["error"], 1071);
+    assert_eq!(statements[3]["impact"], "unknown");
+    assert_eq!(json["exit_code"], 1);
+    assert_eq!(output.status.code(), Some(1));
+
+    // Only the measured success and the unknown: exit 0, and 1 with --strict.
+    let sql = "create table `order_tags` (`id` bigint unsigned not null primary key, \
+               `amount` int not null) engine = MyISAM;
+               alter table `order_tags` add `weight` int null;
+               alter table `order_tags` modify `amount` smallint not null;";
+    assert_eq!(kilit(&["check"], sql).status.code(), Some(0));
+    assert_eq!(kilit(&["check", "--strict"], sql).status.code(), Some(1));
+}
+
+// Regression test for what the step 9a review found: a key over 1000 bytes
+// on a MyISAM table is 1071 in a strict SQL mode and accepted, cut to a
+// prefix, with sql_mode = ''. kilit does not follow the mode.
+
+#[test]
+fn a_myisam_key_over_1000_bytes_is_unknown_after_a_sql_mode_and_says_it_assumes_strict_mode_without_one()
+ {
+    let schema = Path::new(env!("CARGO_TARGET_TMPDIR")).join("schema-with-a-long-myisam-key.sql");
+    std::fs::write(
+        &schema,
+        "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `amount` int NOT NULL,
+  `code` varchar(251) DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+",
+    )
+    .unwrap();
+    let index = "ALTER TABLE orders ADD INDEX idx_code (code);";
+
+    // Without a sql_mode in the input: fails with 1071, and says what it
+    // assumes.
+    let (json, status) = json_against(&schema, false, index);
+    let statement = &json["sources"][0]["statements"][0];
+    assert_eq!(statement["impact"], "fails");
+    assert_eq!(statement["error"], 1071);
+    assert!(
+        statement["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|note| note.as_str().unwrap().contains("strict SQL mode")),
+        "{statement}"
+    );
+    assert_eq!(status, Some(1));
+
+    // After a SET of sql_mode: unknown, which fails the run only with
+    // --strict.
+    let sql = format!("SET SESSION sql_mode = '';\n{index}");
+    let (json, status) = json_against(&schema, false, &sql);
+    assert_eq!(json["sources"][0]["statements"][1]["impact"], "unknown");
+    assert_eq!(status, Some(0));
+    assert_eq!(json_against(&schema, true, &sql).1, Some(1));
+}

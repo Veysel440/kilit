@@ -15,10 +15,10 @@ use std::fmt::Write as _;
 use crate::knowledge::ServerResults;
 use crate::modify::{Change, changes};
 use crate::results::{Variant, Verdict};
-use crate::schema::{ConstraintKind, Schema, TableState};
+use crate::schema::{ConstraintKind, Schema, TableState, has_descending, names_foreign_key_index};
 use crate::statement::{
-    Alter, Check, CheckColumns, Column, DataType, ForeignKey, ForeignKeyAction, Index, IndexKind,
-    IntegerSize, Lock, Operation, Position, Statement, StatementKind, Table, Variable,
+    Alter, Check, CheckColumns, Column, DataType, Engine, ForeignKey, ForeignKeyAction, Index,
+    IndexKind, IntegerSize, Lock, Operation, Position, Statement, StatementKind, Table, Variable,
 };
 
 /// What kilit says about one statement of the input.
@@ -661,6 +661,157 @@ pub const CASES: [&Case; 27] = [
     &DROP_CHECK_CONSTRAINT,
 ];
 
+/// MyISAM tables. MySQL can change only a MyISAM table's metadata in place,
+/// so the lab measured each change on its own: no answer for InnoDB tables
+/// is ever given to a MyISAM table, and one change measured on MyISAM says
+/// nothing about another. See [`ON_MYISAM`] and [`myisam_case`].
+const MYISAM_ADD_COLUMN: Case = Case {
+    id: "myisam-add-column",
+    scenarios: &[
+        "myisam-add-nullable-column",
+        "myisam-add-column-not-null-default",
+    ],
+    exceptions: &[],
+};
+
+/// A column in a plain index of its own, such as the one MySQL adds for a
+/// foreign key it ignores, was measured too.
+const MYISAM_DROP_COLUMN: Case = Case {
+    id: "myisam-drop-column",
+    scenarios: &["myisam-drop-column", "myisam-drop-column-in-foreign-key"],
+    exceptions: &[],
+};
+
+const MYISAM_RENAME_COLUMN: Case = Case {
+    id: "myisam-rename-column",
+    scenarios: &["myisam-rename-column"],
+    exceptions: &[],
+};
+
+const MYISAM_SET_COLUMN_DEFAULT: Case = Case {
+    id: "myisam-set-column-default",
+    scenarios: &["myisam-set-default"],
+    exceptions: &[],
+};
+
+/// INT to BIGINT, both signed, the one pair measured.
+const MYISAM_CHANGE_INTEGER_TYPE: Case = Case {
+    id: "myisam-change-integer-type",
+    scenarios: &["myisam-modify-int-to-bigint"],
+    exceptions: &[],
+};
+
+/// A key of one integer column, or of one utf8mb4 VARCHAR column of at most
+/// 1000 bytes: see [`myisam_key`].
+const MYISAM_ADD_INDEX: Case = Case {
+    id: "myisam-add-index",
+    scenarios: &["myisam-add-index", "myisam-add-index-key-at-limit"],
+    exceptions: &[],
+};
+
+const MYISAM_ADD_UNIQUE_INDEX: Case = Case {
+    id: "myisam-add-unique-index",
+    scenarios: &[
+        "myisam-add-unique-index",
+        "myisam-add-unique-index-key-at-limit",
+    ],
+    exceptions: &[Exception {
+        scenarios: &["myisam-add-unique-index-duplicates"],
+        when: "if the columns hold duplicate values",
+        conditions: &[Condition::Hidden],
+    }],
+};
+
+/// A MyISAM key holds at most 1000 bytes: one utf8mb4 VARCHAR column
+/// longer than 250 characters.
+const MYISAM_ADD_KEY_TOO_LONG: Case = Case {
+    id: "myisam-add-key-too-long",
+    scenarios: &[
+        "myisam-add-index-key-over-limit",
+        "myisam-add-unique-index-key-over-limit",
+    ],
+    exceptions: &[],
+};
+
+const MYISAM_ADD_FULLTEXT_INDEX: Case = Case {
+    id: "myisam-add-fulltext-index",
+    scenarios: &["myisam-add-fulltext-index"],
+    exceptions: &[],
+};
+
+const MYISAM_DROP_INDEX: Case = Case {
+    id: "myisam-drop-index",
+    scenarios: &["myisam-drop-index"],
+    exceptions: &[],
+};
+
+/// MySQL keeps no foreign key on a MyISAM table and checks nothing about
+/// it: a type InnoDB refuses and a parent column without an index were
+/// measured too. It adds the key's index: see [`myisam_case`].
+const MYISAM_ADD_FOREIGN_KEY: Case = Case {
+    id: "myisam-add-foreign-key",
+    scenarios: &[
+        "myisam-add-foreign-key",
+        "myisam-add-foreign-key-type-mismatch",
+        "myisam-add-foreign-key-no-parent-index",
+        "myisam-add-foreign-key-indexed-column",
+    ],
+    exceptions: &[],
+};
+
+/// MySQL drops a foreign key of any name from a MyISAM table, as it keeps none.
+const MYISAM_DROP_FOREIGN_KEY: Case = Case {
+    id: "myisam-drop-foreign-key",
+    scenarios: &["myisam-drop-foreign-key"],
+    exceptions: &[],
+};
+
+/// Every case of a MyISAM table.
+pub const MYISAM_CASES: [&Case; 12] = [
+    &MYISAM_ADD_COLUMN,
+    &MYISAM_DROP_COLUMN,
+    &MYISAM_RENAME_COLUMN,
+    &MYISAM_SET_COLUMN_DEFAULT,
+    &MYISAM_CHANGE_INTEGER_TYPE,
+    &MYISAM_ADD_INDEX,
+    &MYISAM_ADD_UNIQUE_INDEX,
+    &MYISAM_ADD_KEY_TOO_LONG,
+    &MYISAM_ADD_FULLTEXT_INDEX,
+    &MYISAM_DROP_INDEX,
+    &MYISAM_ADD_FOREIGN_KEY,
+    &MYISAM_DROP_FOREIGN_KEY,
+];
+
+/// For each InnoDB case measured on a MyISAM table too: its MyISAM case, and
+/// the conditions of the InnoDB case's exceptions that the MyISAM scenarios
+/// measured. Any other condition that holds, or may hold, is a situation
+/// the lab has not measured on MyISAM, except the hidden ones, which are
+/// InnoDB's: the MyISAM case lists its own.
+const ON_MYISAM: [(&str, &Case, &[Condition]); 11] = [
+    ("add-column", &MYISAM_ADD_COLUMN, &[]),
+    (
+        "drop-column",
+        &MYISAM_DROP_COLUMN,
+        &[Condition::IndexedColumn],
+    ),
+    ("rename-column", &MYISAM_RENAME_COLUMN, &[]),
+    ("set-column-default", &MYISAM_SET_COLUMN_DEFAULT, &[]),
+    ("change-integer-type", &MYISAM_CHANGE_INTEGER_TYPE, &[]),
+    ("add-index", &MYISAM_ADD_INDEX, &[]),
+    ("add-unique-index", &MYISAM_ADD_UNIQUE_INDEX, &[]),
+    ("add-fulltext-index", &MYISAM_ADD_FULLTEXT_INDEX, &[]),
+    ("drop-index", &MYISAM_DROP_INDEX, &[]),
+    (
+        "add-foreign-key",
+        &MYISAM_ADD_FOREIGN_KEY,
+        &[
+            Condition::NewForeignKey(KeyProblem::IntegerMismatch),
+            Condition::NewForeignKey(KeyProblem::NoIndex),
+        ],
+    ),
+    ("drop-foreign-key", &MYISAM_DROP_FOREIGN_KEY, &[]),
+];
+
 /// The cases a MODIFY or CHANGE can fall into, listed when kilit does not
 /// know the table.
 const MODIFY_CASES: [&Case; 12] = [
@@ -690,15 +841,25 @@ pub fn check(statements: &[Statement], schema: &Schema, results: &ServerResults)
         if matches!(
             statement.kind,
             StatementKind::Set { .. } | StatementKind::Other | StatementKind::Unparsed { .. }
-        ) && statement
-            .sql
-            .to_ascii_lowercase()
-            .contains("restrict_fk_on_non_standard_key")
-        {
-            session.restrict_fk_set = true;
+        ) {
+            let sql = statement.sql.to_ascii_lowercase();
+            if sql.contains("restrict_fk_on_non_standard_key") {
+                session.restrict_fk_set = true;
+            }
+            // Any scope, any value: the engine of a table created after it
+            // without ENGINE is the server's to pick. `default_tmp_storage_engine`
+            // does the same for temporary tables.
+            if sql.contains("storage_engine") {
+                schema.default_engine_changes();
+            }
+            if sql.contains("sql_mode") {
+                session.sql_mode_set = true;
+            }
         }
         let prediction = match &statement.kind {
-            StatementKind::Alter(alter) => predict(alter, &session, &schema, results),
+            StatementKind::Alter(alter) => {
+                predict(alter, &statement.sql, &session, &schema, results)
+            }
             StatementKind::Set { variables } => {
                 session.apply(variables);
                 not_checked(format!(
@@ -774,6 +935,10 @@ struct Session {
     /// can see, read or not. Its value changes which foreign keys MySQL 8.4
     /// accepts and with which error, and the lab measured the default only.
     restrict_fk_set: bool,
+    /// The input names `sql_mode`, in any form kilit can see. Whether MySQL
+    /// refuses a key too long for a MyISAM index or shortens it depends on
+    /// it, and the lab measured the default, which is strict.
+    sql_mode_set: bool,
 }
 
 /// Whether the session's statements go to the binary log, as far as the
@@ -841,6 +1006,7 @@ const ASSUMES_BINARY_LOG: &str = "assumes the binary log is on, the MySQL defaul
 
 fn predict(
     alter: &Alter,
+    sql: &str,
     session: &Session,
     schema: &Schema,
     results: &ServerResults,
@@ -858,9 +1024,20 @@ fn predict(
         }
     };
     let table = schema.table(&alter.table);
+    // The engine decides which measurements apply, before any case.
+    let myisam = match measured_engine(table, &alter.table) {
+        Ok(myisam) => myisam,
+        Err(reason) => return unknown(reason),
+    };
+    if myisam.is_none()
+        && let Operation::AddForeignKey(key) = operation
+        && let Err(reason) = parent_engine(key, schema)
+    {
+        return unknown(reason);
+    }
     let Classified {
         case,
-        mut notes,
+        notes,
         column,
     } = match classify(operation, session, table, schema, results) {
         Ok(classified) => classified,
@@ -872,16 +1049,6 @@ fn predict(
             clauses(alter)
         ));
     };
-
-    // All of the case's scenarios must agree on this server.
-    let verdict = match agreed(case.scenarios, case.id, variant, results) {
-        Ok(verdict) => verdict,
-        Err(reason) => return unknown(reason),
-    };
-
-    // A situation kilit can see in the table decides the answer; one it
-    // cannot see becomes a note. When several hold, the exception measured
-    // with all of their conditions decides, never the order of the list.
     let situation = Situation {
         table,
         column: column.as_deref(),
@@ -904,10 +1071,36 @@ fn predict(
         session,
         schema,
     };
+    match myisam {
+        None => answer(case, &situation, variant, results, notes),
+        Some(table) => on_myisam(
+            operation, sql, case, table, &situation, variant, results, notes,
+        ),
+    }
+}
+
+/// The answer from `case`'s measurements on this server, with what the
+/// situation shows.
+fn answer(
+    case: &'static Case,
+    situation: &Situation<'_>,
+    variant: Variant,
+    results: &ServerResults,
+    mut notes: Vec<String>,
+) -> Prediction {
+    // All of the case's scenarios must agree on this server.
+    let verdict = match agreed(case.scenarios, case.id, variant, results) {
+        Ok(verdict) => verdict,
+        Err(reason) => return unknown(reason),
+    };
+
+    // A situation kilit can see in the table decides the answer; one it
+    // cannot see becomes a note. When several hold, the exception measured
+    // with all of their conditions decides, never the order of the list.
     let mut holding = Vec::new();
     let mut unseen = Vec::new();
     for exception in case.exceptions {
-        match holds(exception, &situation) {
+        match holds(exception, situation) {
             Applies::Yes(why) => holding.push((exception, why)),
             Applies::Unmeasured(reason) => return unknown(reason),
             Applies::No => {}
@@ -952,6 +1145,335 @@ fn predict(
         verdict,
         evidence: case.scenarios.to_vec(),
         notes,
+    }
+}
+
+/// Which measurements a table gets: `None` for InnoDB's, the table for
+/// MyISAM's, or why there are none. A table created without `ENGINE` is
+/// InnoDB, the server's default, and so is one kilit does not know. A
+/// table kilit lost track of keeps the InnoDB answer only when it was
+/// InnoDB or no statement named its engine: MyISAM's are given to known
+/// tables only.
+fn measured_engine<'a>(table: TableState<'a>, name: &str) -> Result<Option<&'a Table>, String> {
+    let engine = match table {
+        TableState::Missing => return Ok(None),
+        TableState::Known(known) => match &known.engine {
+            None | Some(Engine::InnoDb) => return Ok(None),
+            Some(Engine::MyIsam) => return Ok(Some(known)),
+            Some(other) => other,
+        },
+        TableState::Lost { engine, .. } => match engine {
+            None | Some(Engine::InnoDb) => return Ok(None),
+            Some(Engine::MyIsam) => {
+                return Err(format!(
+                    "kilit lost track of {name}, a MyISAM table, and answers for MyISAM \
+                     tables only when it knows them"
+                ));
+            }
+            Some(other) => other,
+        },
+    };
+    Err(match engine {
+        Engine::Unknown => format!(
+            "kilit cannot tell the engine of {name}: the input sets default_storage_engine \
+             or default_tmp_storage_engine before creating it, or a statement kilit could not \
+             read names an engine"
+        ),
+        other => format!(
+            "{name} uses the {other} engine; the lab has measured InnoDB tables, and MyISAM \
+             tables for some changes"
+        ),
+    })
+}
+
+/// A foreign key from an InnoDB table to a table of another engine: MySQL
+/// refuses it with the checks on, and the lab has not measured it.
+fn parent_engine(key: &ForeignKey, schema: &Schema) -> Result<(), String> {
+    let engine = match schema.table(&key.referenced_table) {
+        TableState::Known(parent) => parent.engine.as_ref(),
+        TableState::Lost { engine, .. } => engine,
+        TableState::Missing => None,
+    };
+    match engine {
+        None | Some(Engine::InnoDb) => Ok(()),
+        Some(Engine::Unknown) => Err(format!(
+            "kilit cannot tell the engine of {}, and the lab has measured foreign keys \
+             between InnoDB tables only",
+            key.referenced_table
+        )),
+        Some(other) => Err(format!(
+            "{} uses the {other} engine, and the lab has measured foreign keys between \
+             InnoDB tables only",
+            key.referenced_table
+        )),
+    }
+}
+
+/// The answer for a MyISAM table: the MyISAM case of the change, if the lab
+/// measured it in this shape and situation, never an InnoDB one.
+#[allow(clippy::too_many_arguments)]
+fn on_myisam(
+    operation: &Operation,
+    sql: &str,
+    innodb: &'static Case,
+    table: &Table,
+    situation: &Situation<'_>,
+    variant: Variant,
+    results: &ServerResults,
+    mut notes: Vec<String>,
+) -> Prediction {
+    let Some((_, _, measured)) = ON_MYISAM.iter().find(|(id, ..)| *id == innodb.id) else {
+        return unknown(format!(
+            "{} has not been measured on a MyISAM table",
+            innodb.id
+        ));
+    };
+    let case = match myisam_case(
+        operation,
+        sql,
+        innodb.id,
+        table,
+        situation.session,
+        &mut notes,
+    ) {
+        Ok(case) => case,
+        Err(reason) => return unknown(reason),
+    };
+    // InnoDB's exceptions show the situations the MyISAM scenarios did not
+    // measure.
+    for exception in innodb.exceptions {
+        let seen = exception
+            .conditions
+            .iter()
+            .all(|condition| *condition == Condition::Hidden || measured.contains(condition));
+        match holds(exception, situation) {
+            Applies::No => {}
+            Applies::Unmeasured(reason) => return unknown(reason),
+            _ if seen => {}
+            Applies::Yes(why) => {
+                return unknown(format!(
+                    "{}, and the lab has not measured that on a MyISAM table",
+                    why.join(", and ")
+                ));
+            }
+            Applies::Maybe => {
+                return unknown(format!(
+                    "kilit cannot tell {}, and the lab has not measured that on a MyISAM table",
+                    exception.when
+                ));
+            }
+        }
+    }
+    answer(case, situation, variant, results, notes)
+}
+
+/// The MyISAM case of a change in the InnoDB case `innodb`, if the lab
+/// measured that shape on MyISAM: the shapes of the MyISAM scenarios.
+fn myisam_case(
+    operation: &Operation,
+    sql: &str,
+    innodb: &str,
+    table: &Table,
+    session: &Session,
+    notes: &mut Vec<String>,
+) -> Result<&'static Case, String> {
+    let not_measured = |what: &str| Err(format!("{what} has not been measured on a MyISAM table"));
+    match (innodb, operation) {
+        ("add-column", Operation::AddColumn { .. }) => Ok(&MYISAM_ADD_COLUMN),
+        ("drop-column", Operation::DropColumn { name }) => {
+            let in_own_plain_index = |index: &Index| {
+                index.kind == IndexKind::Plain
+                    && matches!(index.columns.as_slice(), [only] if only.eq_ignore_ascii_case(name))
+            };
+            let in_other_key = table
+                .primary_key
+                .iter()
+                .chain(
+                    table
+                        .indexes
+                        .iter()
+                        .filter(|index| !in_own_plain_index(index))
+                        .flat_map(|index| &index.columns),
+                )
+                .any(|entry| entry_column(entry).is_some_and(|c| c.eq_ignore_ascii_case(name)));
+            if in_other_key {
+                return not_measured(&format!(
+                    "dropping a column that is in a key other than a plain index of its own, \
+                     such as {name},"
+                ));
+            }
+            Ok(&MYISAM_DROP_COLUMN)
+        }
+        ("rename-column", Operation::RenameColumn { .. }) => Ok(&MYISAM_RENAME_COLUMN),
+        ("set-column-default", Operation::SetColumnDefault { .. }) => {
+            Ok(&MYISAM_SET_COLUMN_DEFAULT)
+        }
+        ("change-integer-type", Operation::ModifyColumn { column, .. }) => {
+            let int = DataType::Integer {
+                size: IntegerSize::Int,
+                unsigned: false,
+            };
+            let bigint = DataType::Integer {
+                size: IntegerSize::Big,
+                unsigned: false,
+            };
+            let old = table.column(&column.name).map(|old| &old.data_type);
+            if old == Some(&int) && column.data_type == bigint {
+                Ok(&MYISAM_CHANGE_INTEGER_TYPE)
+            } else {
+                not_measured("an integer change other than INT to BIGINT")
+            }
+        }
+        ("add-index" | "add-unique-index", Operation::AddIndex(index)) => {
+            let [entry] = index.columns.as_slice() else {
+                return not_measured("an index of several columns");
+            };
+            if has_descending(sql) {
+                return not_measured("a descending index");
+            }
+            let bytes = myisam_key(table, entry)?;
+            if bytes > MYISAM_KEY_BYTES {
+                if session.sql_mode_set {
+                    return not_measured(
+                        "a key longer than 1000 bytes after the input sets sql_mode",
+                    );
+                }
+                notes.push(ASSUMES_STRICT_SQL_MODE.to_owned());
+                return Ok(&MYISAM_ADD_KEY_TOO_LONG);
+            }
+            Ok(if index.kind == IndexKind::Unique {
+                &MYISAM_ADD_UNIQUE_INDEX
+            } else {
+                &MYISAM_ADD_INDEX
+            })
+        }
+        ("add-fulltext-index", Operation::AddIndex(index)) => {
+            let [entry] = index.columns.as_slice() else {
+                return not_measured("a FULLTEXT index of several columns");
+            };
+            match table.column(entry).map(|column| &column.data_type) {
+                Some(DataType::VarChar { .. }) => Ok(&MYISAM_ADD_FULLTEXT_INDEX),
+                _ => not_measured("a FULLTEXT index on anything but one VARCHAR column"),
+            }
+        }
+        ("drop-index", Operation::DropIndex { name }) => {
+            let plain = table.indexes.iter().any(|index| {
+                index.kind == IndexKind::Plain
+                    && index
+                        .name
+                        .as_deref()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
+            });
+            if plain {
+                Ok(&MYISAM_DROP_INDEX)
+            } else {
+                not_measured(&format!(
+                    "dropping {name}, which is not a plain index kilit knows,"
+                ))
+            }
+        }
+        ("add-foreign-key", Operation::AddForeignKey(key)) => {
+            let [column] = key.columns.as_slice() else {
+                return not_measured("a foreign key of several columns");
+            };
+            if names_foreign_key_index(sql) {
+                return not_measured("a foreign key that names its index");
+            }
+            if table.column(column).is_none() {
+                return Err(format!(
+                    "{} has no column {column} that kilit knows",
+                    table.name
+                ));
+            }
+            let own_index = table.indexes.iter().any(|index| {
+                index.kind == IndexKind::Plain
+                    && matches!(index.columns.as_slice(), [only] if only.eq_ignore_ascii_case(column))
+            });
+            if !own_index {
+                // MySQL adds the key's index, which must fit: see `myisam_key`.
+                let in_other_key = table
+                    .primary_key
+                    .iter()
+                    .chain(table.indexes.iter().flat_map(|index| &index.columns))
+                    .any(|entry| {
+                        entry_column(entry).is_some_and(|c| c.eq_ignore_ascii_case(column))
+                    });
+                if in_other_key {
+                    return not_measured(&format!(
+                        "a foreign key on {column}, which is in a key of another shape,"
+                    ));
+                }
+                let name = key.name.as_deref().unwrap_or(column);
+                let taken = table.indexes.iter().any(|index| {
+                    index
+                        .name
+                        .as_deref()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                });
+                if taken {
+                    return not_measured(&format!(
+                        "a foreign key whose index would take the name {name}, which an index \
+                         of the table has,"
+                    ));
+                }
+                if myisam_key(table, column)? > MYISAM_KEY_BYTES {
+                    return not_measured(&format!(
+                        "a foreign key whose index on {column} would be longer than \
+                         {MYISAM_KEY_BYTES} bytes"
+                    ));
+                }
+            }
+            Ok(&MYISAM_ADD_FOREIGN_KEY)
+        }
+        ("drop-foreign-key", Operation::DropForeignKey { .. }) => Ok(&MYISAM_DROP_FOREIGN_KEY),
+        _ => not_measured(&format!("this form of {innodb}")),
+    }
+}
+
+const ASSUMES_STRICT_SQL_MODE: &str = "assumes strict SQL mode, the MySQL default";
+
+/// The most bytes a MyISAM key holds.
+const MYISAM_KEY_BYTES: u64 = 1000;
+
+/// The bytes a key of one column of a MyISAM table takes, for the types the
+/// lab measured: an integer, which is far below the limit, and a utf8mb4
+/// VARCHAR, at 4 bytes a character. A prefix, any other type, and any other
+/// character set have not been measured.
+fn myisam_key(table: &Table, entry: &str) -> Result<u64, String> {
+    let not_measured =
+        |what: String| Err(format!("{what} has not been measured on a MyISAM table"));
+    if is_expression(entry) || has_prefix(entry) {
+        return not_measured(format!("a key on {entry}"));
+    }
+    let Some(column) = table.column(entry) else {
+        return Err(format!(
+            "{} has no column {entry} that kilit knows",
+            table.name
+        ));
+    };
+    match &column.data_type {
+        DataType::Integer { .. } => Ok(8),
+        DataType::VarChar { length } => {
+            let settings = table.text_settings(column)?;
+            if settings.charset.name == "utf8mb4" {
+                Ok(length.saturating_mul(settings.charset.max_bytes))
+            } else {
+                not_measured(format!(
+                    "a key on a {} VARCHAR column",
+                    settings.charset.name
+                ))
+            }
+        }
+        other => not_measured(format!("a key on a column of type {}", type_name(other))),
+    }
+}
+
+/// A type as kilit shows it in a reason.
+fn type_name(data_type: &DataType) -> String {
+    match data_type {
+        DataType::Integer { .. } => "integer".to_owned(),
+        DataType::VarChar { length } => format!("VARCHAR({length})"),
+        DataType::Text(text) | DataType::Other(text) => text.clone(),
     }
 }
 
@@ -2340,7 +2862,7 @@ fn check_new_constraint(
 fn dropped_constraint(name: &str, table: TableState<'_>) -> Result<&'static Case, String> {
     let table = match table {
         TableState::Known(table) => table,
-        TableState::Lost { reason } => {
+        TableState::Lost { reason, .. } => {
             return Err(format!(
                 "kilit lost track of this table ({reason}), so it cannot tell what kind of \
                  constraint {name} is"
@@ -2744,7 +3266,7 @@ fn check_functional_index(index: &Index, table: TableState<'_>) -> Result<(), St
     };
     let table = match table {
         TableState::Known(table) => table,
-        TableState::Lost { reason } => {
+        TableState::Lost { reason, .. } => {
             return Err(format!(
                 "kilit lost track of this table ({reason}), and a functional index was \
                  measured only on LOWER() of a VARCHAR column"
@@ -2936,7 +3458,7 @@ fn modified(
 ) -> Result<&'static Case, String> {
     let table = match table {
         TableState::Known(table) => table,
-        TableState::Lost { reason } => {
+        TableState::Lost { reason, .. } => {
             return Err(format!(
                 "kilit lost track of this table ({reason}), and a MODIFY or CHANGE depends \
                  on the column's current definition"
@@ -7071,6 +7593,229 @@ mod tests {
                     assert!(!same, "{}: {conditions:?} twice", case.id);
                 }
             }
+        }
+    }
+
+    /// The lab's tables with `orders` as MyISAM, as mysqldump writes them.
+    const MYISAM_ORDERS: &str = "
+        CREATE TABLE users (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(100) NOT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        CREATE TABLE orders (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            user_id BIGINT UNSIGNED NOT NULL,
+            amount INT NOT NULL,
+            email VARCHAR(255) NULL,
+            note VARCHAR(50) NULL
+        ) ENGINE=MyISAM AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;";
+
+    /// The prediction for the last statement of `sql`, with `schema`.
+    fn last_with(schema: &str, sql: &str) -> Prediction {
+        predictions_with(schema, sql).pop().unwrap()
+    }
+
+    fn case_of(prediction: Prediction) -> &'static str {
+        measured(prediction).0
+    }
+
+    #[test]
+    fn tables_of_other_engines_get_no_answer() {
+        for engine in ["MEMORY", "ARCHIVE", "BLACKHOLE"] {
+            let schema = MYISAM_ORDERS.replace("ENGINE=MyISAM", &format!("ENGINE={engine}"));
+            let reason = reason(last_with(
+                &schema,
+                "ALTER TABLE orders ADD COLUMN c INT NULL",
+            ));
+            assert!(reason.contains(engine), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_table_created_after_default_storage_engine_changes_gets_no_answer() {
+        for set in [
+            "SET default_storage_engine = MyISAM",
+            "SET GLOBAL default_storage_engine = MyISAM",
+            "SET @@session.default_storage_engine = DEFAULT",
+        ] {
+            let sql =
+                format!("{set}; CREATE TABLE t (id INT); ALTER TABLE t ADD COLUMN c INT NULL;");
+            let reason = reason(predictions(&sql).pop().unwrap());
+            assert!(reason.contains("default_storage_engine"), "{reason}");
+            let sql = format!(
+                "{set}; CREATE TABLE t (id INT) ENGINE=InnoDB; ALTER TABLE t ADD COLUMN c INT NULL;"
+            );
+            assert_eq!(case_of(predictions(&sql).pop().unwrap()), "add-column");
+        }
+    }
+
+    #[test]
+    fn a_lost_table_keeps_the_innodb_answer_only_when_it_was_innodb() {
+        let add = "ALTER TABLE orders ADD COLUMN c INT NULL";
+        let innodb = MYISAM_ORDERS.replace("ENGINE=MyISAM", "ENGINE=InnoDB");
+        assert_eq!(
+            case_of(last_with(
+                MYISAM_ORDERS,
+                &format!("ALTER TABLE orders ENGINE=InnoDB; {add}")
+            )),
+            "add-column"
+        );
+        assert_eq!(
+            case_of(last_with(
+                &innodb,
+                &format!("ALTER TABLE orders ENGINE=InnoDB; {add}")
+            )),
+            "add-column"
+        );
+        for (schema, before) in [
+            (innodb.as_str(), "ALTER TABLE orders ENGINE=MyISAM"),
+            (
+                MYISAM_ORDERS,
+                "ALTER TABLE orders ADD COLUMN x INT, ALGORITHM=SOMETHING",
+            ),
+        ] {
+            let reason = reason(last_with(schema, &format!("{before}; {add}")));
+            assert!(reason.contains("MyISAM"), "{reason}");
+        }
+        // A table kilit never knew stays InnoDB.
+        assert_eq!(case_of(only(add)), "add-column");
+    }
+
+    #[test]
+    fn a_foreign_key_from_an_innodb_table_to_a_myisam_one_gets_no_answer() {
+        let schema = MYISAM_ORDERS
+            .replace("ENGINE=MyISAM", "ENGINE=InnoDB")
+            .replacen("ENGINE=InnoDB", "ENGINE=MyISAM", 1);
+        let reason = reason(last_with(
+            &schema,
+            "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users (id)",
+        ));
+        assert!(reason.contains("users uses the MyISAM engine"), "{reason}");
+    }
+
+    #[test]
+    fn a_myisam_table_gets_the_answers_measured_on_myisam() {
+        for (sql, case) in [
+            (
+                "ALTER TABLE orders ADD COLUMN c INT NULL",
+                "myisam-add-column",
+            ),
+            ("ALTER TABLE orders DROP COLUMN note", "myisam-drop-column"),
+            (
+                "ALTER TABLE orders RENAME COLUMN note TO memo",
+                "myisam-rename-column",
+            ),
+            (
+                "ALTER TABLE orders ALTER COLUMN note SET DEFAULT 'x'",
+                "myisam-set-column-default",
+            ),
+            (
+                "ALTER TABLE orders MODIFY amount BIGINT NOT NULL",
+                "myisam-change-integer-type",
+            ),
+            (
+                "ALTER TABLE orders ADD INDEX i (amount)",
+                "myisam-add-index",
+            ),
+            (
+                "ALTER TABLE orders ADD UNIQUE INDEX u (amount)",
+                "myisam-add-unique-index",
+            ),
+            (
+                "ALTER TABLE orders ADD FULLTEXT INDEX f (note)",
+                "myisam-add-fulltext-index",
+            ),
+            (
+                "ALTER TABLE orders ADD INDEX i (amount); ALTER TABLE orders DROP INDEX i",
+                "myisam-drop-index",
+            ),
+            (
+                "ALTER TABLE orders ADD COLUMN ref INT NULL;
+                 ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (ref) REFERENCES users (id)",
+                "myisam-add-foreign-key",
+            ),
+            (
+                "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users (id);
+                 ALTER TABLE orders DROP COLUMN user_id",
+                "myisam-drop-column",
+            ),
+            (
+                "ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users (id);
+                 ALTER TABLE orders DROP INDEX user_id",
+                "myisam-drop-index",
+            ),
+            (
+                "ALTER TABLE orders DROP FOREIGN KEY anything",
+                "myisam-drop-foreign-key",
+            ),
+        ] {
+            assert_eq!(case_of(last_with(MYISAM_ORDERS, sql)), case, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_myisam_key_counts_its_bytes_in_utf8mb4_only() {
+        let index = |definition: &str, key: &str| {
+            last_with(
+                MYISAM_ORDERS,
+                &format!(
+                    "ALTER TABLE orders ADD COLUMN code {definition} NULL;
+                     ALTER TABLE orders ADD {key} k (code)"
+                ),
+            )
+        };
+        assert_eq!(case_of(index("VARCHAR(250)", "INDEX")), "myisam-add-index");
+        assert_eq!(
+            case_of(index("VARCHAR(250)", "UNIQUE INDEX")),
+            "myisam-add-unique-index"
+        );
+        for key in ["INDEX", "UNIQUE INDEX"] {
+            let (case, verdict, _) = measured(index("VARCHAR(251)", key));
+            assert_eq!(case, "myisam-add-key-too-long");
+            assert!(verdict.contains("1071"), "{verdict}");
+        }
+        for definition in [
+            "VARCHAR(10) CHARACTER SET latin1",
+            "CHAR(10)",
+            "DATE",
+            "TEXT",
+        ] {
+            assert!(
+                matches!(index(definition, "INDEX"), Prediction::Unknown { .. }),
+                "{definition}"
+            );
+        }
+        for key in ["(email(10))", "(amount, user_id)"] {
+            let sql = format!("ALTER TABLE orders ADD INDEX k {key}");
+            assert!(
+                matches!(last_with(MYISAM_ORDERS, &sql), Prediction::Unknown { .. }),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn changes_not_measured_on_a_myisam_table_get_no_answer() {
+        for sql in [
+            "ALTER TABLE orders MODIFY note VARCHAR(60) NULL",
+            "ALTER TABLE orders MODIFY amount SMALLINT NOT NULL",
+            "ALTER TABLE orders CHANGE note memo VARCHAR(50) NULL",
+            "ALTER TABLE orders ADD COLUMN c INT NULL, ALGORITHM=INSTANT, ADD COLUMN d INT",
+            "ALTER TABLE orders ADD FULLTEXT INDEX f (note); ALTER TABLE orders ADD COLUMN c INT NULL",
+            "ALTER TABLE orders ADD INDEX i (amount, note); ALTER TABLE orders DROP COLUMN amount",
+            "ALTER TABLE orders ADD UNIQUE INDEX u (amount); ALTER TABLE orders DROP INDEX u",
+            "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id, amount) \
+             REFERENCES users (id, name)",
+            "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (email) REFERENCES users (name)",
+            "ALTER TABLE orders ADD COLUMN g INT AS (amount * 2)",
+            "ALTER TABLE orders ADD COLUMN c INT NULL DEFAULT (RAND())",
+            "SET foreign_key_checks = 0;
+             ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users (id)",
+        ] {
+            assert!(
+                matches!(last_with(MYISAM_ORDERS, sql), Prediction::Unknown { .. }),
+                "{sql}"
+            );
         }
     }
 }

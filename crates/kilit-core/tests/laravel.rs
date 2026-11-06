@@ -760,3 +760,543 @@ fn a_foreign_id_that_is_not_nullable_with_null_on_delete_is_unknown_on_both_serv
         assert_eq!(answers(server, &schema, output), [INSTANT, "unknown"]);
     }
 }
+
+// Step 9a: Laravel and the storage engine. `Schema::create` writes the
+// engine last, as ` engine = MyISAM`, with spaces around the equals sign and
+// the name as the project wrote it. `Schema::table` never writes an engine,
+// so an ALTER from Laravel says nothing about the engine of its table. The
+// outputs below are what Laravel 12.71.0 prints (the same bytes in Laravel
+// 13.40.0 in a terminal) and what Laravel 13.40.0 prints where it detects an
+// automated environment. Laravel 10 and 11 run the same code for these
+// statements. The migrations that put several steps in one output are the
+// real outputs of the steps, joined as one `migrate --pretend` run prints
+// them.
+
+const MYISAM_CREATE_FK_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_01_01_000001_create_orders_table ......................................  \n",
+    "  \u{21c2} create table `orders` (`id` bigint unsigned not null auto_increment primary key, `user_id` bigint unsigned not null, `amount` int not null, `email` varchar(255) null, `note` varchar(50) null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = MyISAM  \n",
+    "  \u{21c2} alter table `orders` add constraint `orders_user_id_foreign` foreign key (`user_id`) references `users` (`id`)  \n",
+    "\n",
+);
+
+const MYISAM_CREATE_FK_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_01_01_000001_create_orders_table .. \n",
+    " \u{21c2} create table `orders` (`id` bigint unsigned not null auto_increment primary key, `user_id` bigint unsigned not null, `amount` int not null, `email` varchar(255) null, `note` varchar(50) null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = MyISAM \n",
+    " \u{21c2} alter table `orders` add constraint `orders_user_id_foreign` foreign key (`user_id`) references `users` (`id`) \n",
+    "\n",
+);
+
+const MYISAM_ADD_QTY_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_01_01_000001_add_qty_to_orders_table ..................................  \n",
+    "  \u{21c2} alter table `orders` add `qty` int null  \n",
+    "\n",
+);
+
+const MYISAM_ADD_QTY_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_01_01_000001_add_qty_to_orders_table .. \n",
+    " \u{21c2} alter table `orders` add `qty` int null \n",
+    "\n",
+);
+
+const MYISAM_ADD_INDEX_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_01_01_000001_add_index_to_orders_table ................................  \n",
+    "  \u{21c2} alter table `orders` add index `orders_amount_index`(`amount`)  \n",
+    "\n",
+);
+
+const MYISAM_ADD_INDEX_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_01_01_000001_add_index_to_orders_table .. \n",
+    " \u{21c2} alter table `orders` add index `orders_amount_index`(`amount`) \n",
+    "\n",
+);
+
+const MYISAM_FOREIGN_ID_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_01_01_000001_add_user_id_to_orders_table ..............................  \n",
+    "  \u{21c2} alter table `orders` add `user_id` bigint unsigned not null  \n",
+    "  \u{21c2} alter table `orders` add constraint `orders_user_id_foreign` foreign key (`user_id`) references `users` (`id`)  \n",
+    "\n",
+);
+
+const MYISAM_FOREIGN_ID_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_01_01_000001_add_user_id_to_orders_table .. \n",
+    " \u{21c2} alter table `orders` add `user_id` bigint unsigned not null \n",
+    " \u{21c2} alter table `orders` add constraint `orders_user_id_foreign` foreign key (`user_id`) references `users` (`id`) \n",
+    "\n",
+);
+
+const MYISAM_INTEGER_FOREIGN_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_01_01_000001_add_ref_to_orders_table ..................................  \n",
+    "  \u{21c2} alter table `orders` add `ref` int not null  \n",
+    "  \u{21c2} alter table `orders` add constraint `orders_ref_foreign` foreign key (`ref`) references `users` (`id`)  \n",
+    "\n",
+);
+
+const MYISAM_INTEGER_FOREIGN_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_01_01_000001_add_ref_to_orders_table .. \n",
+    " \u{21c2} alter table `orders` add `ref` int not null \n",
+    " \u{21c2} alter table `orders` add constraint `orders_ref_foreign` foreign key (`ref`) references `users` (`id`) \n",
+    "\n",
+);
+
+const MYISAM_NULLABLE_FOREIGN_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_01_01_000001_add_ref_to_orders_table ..................................  \n",
+    "  \u{21c2} alter table `orders` add `ref` int null  \n",
+    "  \u{21c2} alter table `orders` add constraint `orders_ref_foreign` foreign key (`ref`) references `users` (`id`)  \n",
+    "\n",
+);
+
+const MYISAM_NULLABLE_FOREIGN_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_01_01_000001_add_ref_to_orders_table .. \n",
+    " \u{21c2} alter table `orders` add `ref` int null \n",
+    " \u{21c2} alter table `orders` add constraint `orders_ref_foreign` foreign key (`ref`) references `users` (`id`) \n",
+    "\n",
+);
+
+const MYISAM_LOWERCASE_CREATE_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_01_01_000001_create_orders_table ......................................  \n",
+    "  \u{21c2} create table `orders` (`id` bigint unsigned not null auto_increment primary key, `user_id` bigint unsigned not null, `amount` int not null, `email` varchar(255) null, `note` varchar(50) null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = myisam  \n",
+    "\n",
+);
+
+const MYISAM_LOWERCASE_CREATE_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_01_01_000001_create_orders_table .. \n",
+    " \u{21c2} create table `orders` (`id` bigint unsigned not null auto_increment primary key, `user_id` bigint unsigned not null, `amount` int not null, `email` varchar(255) null, `note` varchar(50) null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = myisam \n",
+    "\n",
+);
+
+const INNODB_CREATE_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_01_01_000001_create_orders_table ......................................  \n",
+    "  \u{21c2} create table `orders` (`id` bigint unsigned not null auto_increment primary key, `user_id` bigint unsigned not null, `amount` int not null, `email` varchar(255) null, `note` varchar(50) null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = InnoDB  \n",
+    "\n",
+);
+
+const INNODB_CREATE_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_01_01_000001_create_orders_table .. \n",
+    " \u{21c2} create table `orders` (`id` bigint unsigned not null auto_increment primary key, `user_id` bigint unsigned not null, `amount` int not null, `email` varchar(255) null, `note` varchar(50) null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = InnoDB \n",
+    "\n",
+);
+
+const ENGINE_IN_SCHEMA_TABLE_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_01_01_000001_add_qty_to_orders_table ..................................  \n",
+    "  \u{21c2} alter table `orders` add `qty` int null  \n",
+    "\n",
+);
+
+const ENGINE_IN_SCHEMA_TABLE_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_01_01_000001_add_qty_to_orders_table .. \n",
+    " \u{21c2} alter table `orders` add `qty` int null \n",
+    "\n",
+);
+
+const MYISAM_CREATE_THEN_INTEGER_FOREIGN_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_01_01_000001_create_orders_table ......................................  \n",
+    "  \u{21c2} create table `orders` (`id` bigint unsigned not null auto_increment primary key, `user_id` bigint unsigned not null, `amount` int not null, `email` varchar(255) null, `note` varchar(50) null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = MyISAM  \n",
+    "  2026_01_01_000002_add_ref_to_orders_table ..................................  \n",
+    "  \u{21c2} alter table `orders` add `ref` int not null  \n",
+    "  \u{21c2} alter table `orders` add constraint `orders_ref_foreign` foreign key (`ref`) references `users` (`id`)  \n",
+    "\n",
+);
+
+const MYISAM_CREATE_THEN_INTEGER_FOREIGN_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_01_01_000001_create_orders_table .. \n",
+    " \u{21c2} create table `orders` (`id` bigint unsigned not null auto_increment primary key, `user_id` bigint unsigned not null, `amount` int not null, `email` varchar(255) null, `note` varchar(50) null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = MyISAM \n",
+    " 2026_01_01_000002_add_ref_to_orders_table .. \n",
+    " \u{21c2} alter table `orders` add `ref` int not null \n",
+    " \u{21c2} alter table `orders` add constraint `orders_ref_foreign` foreign key (`ref`) references `users` (`id`) \n",
+    "\n",
+);
+
+const MYISAM_CREATE_THEN_NULLABLE_FOREIGN_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_01_01_000001_create_orders_table ......................................  \n",
+    "  \u{21c2} create table `orders` (`id` bigint unsigned not null auto_increment primary key, `user_id` bigint unsigned not null, `amount` int not null, `email` varchar(255) null, `note` varchar(50) null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = MyISAM  \n",
+    "  2026_01_01_000002_add_ref_to_orders_table ..................................  \n",
+    "  \u{21c2} alter table `orders` add `ref` int null  \n",
+    "  \u{21c2} alter table `orders` add constraint `orders_ref_foreign` foreign key (`ref`) references `users` (`id`)  \n",
+    "\n",
+);
+
+const MYISAM_CREATE_THEN_NULLABLE_FOREIGN_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_01_01_000001_create_orders_table .. \n",
+    " \u{21c2} create table `orders` (`id` bigint unsigned not null auto_increment primary key, `user_id` bigint unsigned not null, `amount` int not null, `email` varchar(255) null, `note` varchar(50) null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = MyISAM \n",
+    " 2026_01_01_000002_add_ref_to_orders_table .. \n",
+    " \u{21c2} alter table `orders` add `ref` int null \n",
+    " \u{21c2} alter table `orders` add constraint `orders_ref_foreign` foreign key (`ref`) references `users` (`id`) \n",
+    "\n",
+);
+
+const MYISAM_CREATE_THEN_ADD_QTY_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_01_01_000001_create_orders_table ......................................  \n",
+    "  \u{21c2} create table `orders` (`id` bigint unsigned not null auto_increment primary key, `user_id` bigint unsigned not null, `amount` int not null, `email` varchar(255) null, `note` varchar(50) null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = MyISAM  \n",
+    "  2026_01_01_000002_add_qty_to_orders_table ..................................  \n",
+    "  \u{21c2} alter table `orders` add `qty` int null  \n",
+    "\n",
+);
+
+const MYISAM_CREATE_THEN_ADD_QTY_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_01_01_000001_create_orders_table .. \n",
+    " \u{21c2} create table `orders` (`id` bigint unsigned not null auto_increment primary key, `user_id` bigint unsigned not null, `amount` int not null, `email` varchar(255) null, `note` varchar(50) null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = MyISAM \n",
+    " 2026_01_01_000002_add_qty_to_orders_table .. \n",
+    " \u{21c2} alter table `orders` add `qty` int null \n",
+    "\n",
+);
+
+const MYISAM_LOWERCASE_CREATE_THEN_ADD_QTY_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_01_01_000001_create_orders_table ......................................  \n",
+    "  \u{21c2} create table `orders` (`id` bigint unsigned not null auto_increment primary key, `user_id` bigint unsigned not null, `amount` int not null, `email` varchar(255) null, `note` varchar(50) null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = myisam  \n",
+    "  2026_01_01_000002_add_qty_to_orders_table ..................................  \n",
+    "  \u{21c2} alter table `orders` add `qty` int null  \n",
+    "\n",
+);
+
+const INNODB_CREATE_THEN_ADD_QTY_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_01_01_000001_create_orders_table ......................................  \n",
+    "  \u{21c2} create table `orders` (`id` bigint unsigned not null auto_increment primary key, `user_id` bigint unsigned not null, `amount` int not null, `email` varchar(255) null, `note` varchar(50) null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = InnoDB  \n",
+    "  2026_01_01_000002_add_qty_to_orders_table ..................................  \n",
+    "  \u{21c2} alter table `orders` add `qty` int null  \n",
+    "\n",
+);
+
+const INNODB_CREATE_THEN_ADD_QTY_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_01_01_000001_create_orders_table .. \n",
+    " \u{21c2} create table `orders` (`id` bigint unsigned not null auto_increment primary key, `user_id` bigint unsigned not null, `amount` int not null, `email` varchar(255) null, `note` varchar(50) null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = InnoDB \n",
+    " 2026_01_01_000002_add_qty_to_orders_table .. \n",
+    " \u{21c2} alter table `orders` add `qty` int null \n",
+    "\n",
+);
+
+use kilit_core::{Engine, Statement};
+
+/// `orders` as a mysqldump schema writes a MyISAM table.
+const MYISAM_ORDERS: &str = "create table `orders` (`id` bigint unsigned not null auto_increment, \
+    `amount` int not null, primary key (`id`)) \
+    engine=MyISAM default charset=utf8mb4 collate=utf8mb4_unicode_ci;\n";
+
+/// The statements of `output`, in order, whichever form it is in.
+fn statements_of(output: &str) -> Vec<Statement> {
+    let pretend = read_pretend(output).expect("the output of migrate --pretend");
+    assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
+    pretend
+        .migrations
+        .into_iter()
+        .flat_map(|migration| migration.statements)
+        .collect()
+}
+
+/// The engine the CREATE TABLE that comes first in `output` writes.
+fn created_engine(output: &str) -> Option<Engine> {
+    match &statements_of(output)[0].kind {
+        StatementKind::CreateTable { table, .. } => table.engine.clone(),
+        other => panic!("expected a CREATE TABLE, got {other:?}"),
+    }
+}
+
+#[test]
+fn laravel_s_engine_clause_is_read_in_every_form_it_prints() {
+    // $table->engine('MyISAM'), $table->engine = 'MyISAM', and the
+    // connection's 'engine' => 'MyISAM': the same text.
+    for output in [MYISAM_CREATE_FK_LONG, MYISAM_CREATE_FK_SHORT] {
+        assert_eq!(created_engine(output), Some(Engine::MyIsam));
+    }
+    // $table->engine('myisam');
+    for output in [MYISAM_LOWERCASE_CREATE_LONG, MYISAM_LOWERCASE_CREATE_SHORT] {
+        assert_eq!(created_engine(output), Some(Engine::MyIsam));
+    }
+    // $table->innoDb();
+    for output in [INNODB_CREATE_LONG, INNODB_CREATE_SHORT] {
+        assert_eq!(created_engine(output), Some(Engine::InnoDb));
+    }
+    // A connection without charset and collation: the engine follows the
+    // closing parenthesis. And no engine anywhere.
+    let StatementKind::CreateTable { table, .. } = kind(
+        "create table `orders` (`id` bigint unsigned not null auto_increment primary key, \
+         `amount` int not null) engine = MyISAM",
+    ) else {
+        panic!("expected a CREATE TABLE");
+    };
+    assert_eq!(table.engine, Some(Engine::MyIsam));
+    let StatementKind::CreateTable { table, .. } = kind(
+        "create table `orders` (`id` bigint unsigned not null auto_increment primary key, \
+         `amount` int not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'",
+    ) else {
+        panic!("expected a CREATE TABLE");
+    };
+    assert_eq!(table.engine, None);
+}
+
+#[test]
+fn a_myisam_create_followed_by_its_foreign_key_does_not_fail_in_laravel_12_and_13() {
+    // Schema::create('orders', ...): $table->engine('MyISAM'); $table->id();
+    //     $table->foreignId('user_id')->constrained();
+    // The same two statements come out with 'engine' => 'MyISAM' in the
+    // connection's config. Laravel writes no foreign key in the CREATE.
+    assert_both_forms(Run {
+        name: "MyISAM create with foreignId",
+        long: MYISAM_CREATE_FK_LONG,
+        short: MYISAM_CREATE_FK_SHORT,
+        schema: USERS.to_owned(),
+        on_80: vec![NOT_CHECKED, COPY],
+        on_84: vec![NOT_CHECKED, COPY],
+    });
+}
+
+#[test]
+fn an_integer_foreign_key_on_a_myisam_table_created_earlier_copies_instead_of_failing_with_3780() {
+    // Schema::create('orders', ...): $table->engine('MyISAM');
+    // then, in another migration, Schema::table('orders', ...):
+    //     $table->integer('ref'); $table->foreign('ref')->references('id')->on('users');
+    // On InnoDB the key fails with 3780: INT against BIGINT UNSIGNED.
+    assert_both_forms(Run {
+        name: "NOT NULL integer",
+        long: MYISAM_CREATE_THEN_INTEGER_FOREIGN_LONG,
+        short: MYISAM_CREATE_THEN_INTEGER_FOREIGN_SHORT,
+        schema: USERS.to_owned(),
+        on_80: vec![NOT_CHECKED, COPY, COPY],
+        on_84: vec![NOT_CHECKED, COPY, COPY],
+    });
+    // $table->integer('ref')->nullable();
+    assert_both_forms(Run {
+        name: "nullable integer",
+        long: MYISAM_CREATE_THEN_NULLABLE_FOREIGN_LONG,
+        short: MYISAM_CREATE_THEN_NULLABLE_FOREIGN_SHORT,
+        schema: USERS.to_owned(),
+        on_80: vec![NOT_CHECKED, COPY, COPY],
+        on_84: vec![NOT_CHECKED, COPY, COPY],
+    });
+}
+
+#[test]
+fn a_column_added_to_a_myisam_table_created_earlier_copies_the_table() {
+    // $table->integer('qty')->nullable(); after Schema::create with
+    // $table->engine('MyISAM') (and with engine('myisam')).
+    assert_both_forms(Run {
+        name: "engine('MyISAM')",
+        long: MYISAM_CREATE_THEN_ADD_QTY_LONG,
+        short: MYISAM_CREATE_THEN_ADD_QTY_SHORT,
+        schema: String::new(),
+        on_80: vec![NOT_CHECKED, COPY],
+        on_84: vec![NOT_CHECKED, COPY],
+    });
+    for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+        assert_eq!(
+            answers(server, "", MYISAM_LOWERCASE_CREATE_THEN_ADD_QTY_LONG),
+            [NOT_CHECKED, COPY],
+            "engine('myisam') on {server}"
+        );
+    }
+}
+
+#[test]
+fn laravel_statements_on_a_myisam_table_from_the_schema_file_get_the_myisam_answers() {
+    // Schema::table never writes the engine: it comes from the schema file.
+    let schema = format!("{USERS}{MYISAM_ORDERS}");
+    // $table->integer('qty')->nullable();
+    assert_both_forms(Run {
+        name: "add a nullable column",
+        long: MYISAM_ADD_QTY_LONG,
+        short: MYISAM_ADD_QTY_SHORT,
+        schema: schema.clone(),
+        on_80: vec![COPY],
+        on_84: vec![COPY],
+    });
+    // $table->index('amount');
+    assert_both_forms(Run {
+        name: "add an index",
+        long: MYISAM_ADD_INDEX_LONG,
+        short: MYISAM_ADD_INDEX_SHORT,
+        schema: schema.clone(),
+        on_80: vec![COPY],
+        on_84: vec![COPY],
+    });
+    // $table->foreignId('user_id')->constrained();
+    assert_both_forms(Run {
+        name: "foreignId",
+        long: MYISAM_FOREIGN_ID_LONG,
+        short: MYISAM_FOREIGN_ID_SHORT,
+        schema: schema.clone(),
+        on_80: vec![COPY, COPY],
+        on_84: vec![COPY, COPY],
+    });
+    // $table->integer('ref'); $table->foreign('ref')->references('id')->on('users');
+    assert_both_forms(Run {
+        name: "NOT NULL integer foreign key",
+        long: MYISAM_INTEGER_FOREIGN_LONG,
+        short: MYISAM_INTEGER_FOREIGN_SHORT,
+        schema: schema.clone(),
+        on_80: vec![COPY, COPY],
+        on_84: vec![COPY, COPY],
+    });
+    // The same with ->nullable().
+    assert_both_forms(Run {
+        name: "nullable integer foreign key",
+        long: MYISAM_NULLABLE_FOREIGN_LONG,
+        short: MYISAM_NULLABLE_FOREIGN_SHORT,
+        schema: schema.clone(),
+        on_80: vec![COPY, COPY],
+        on_84: vec![COPY, COPY],
+    });
+    // $table->engine('MyISAM') inside Schema::table is dropped by Laravel: the
+    // statement is the plain ADD COLUMN, on a MyISAM table here.
+    assert_both_forms(Run {
+        name: "engine() in Schema::table",
+        long: ENGINE_IN_SCHEMA_TABLE_LONG,
+        short: ENGINE_IN_SCHEMA_TABLE_SHORT,
+        schema,
+        on_80: vec![COPY],
+        on_84: vec![COPY],
+    });
+}
+
+#[test]
+fn the_same_laravel_statements_on_an_innodb_table_keep_their_answers() {
+    let schema = format!("{USERS}{ORDERS}");
+    // engine() in Schema::table, and no engine at all: an InnoDB table.
+    assert_both_forms(Run {
+        name: "engine() in Schema::table",
+        long: ENGINE_IN_SCHEMA_TABLE_LONG,
+        short: ENGINE_IN_SCHEMA_TABLE_SHORT,
+        schema: schema.clone(),
+        on_80: vec![INSTANT],
+        on_84: vec![INSTANT],
+    });
+    assert_both_forms(Run {
+        name: "add a nullable column",
+        long: MYISAM_ADD_QTY_LONG,
+        short: MYISAM_ADD_QTY_SHORT,
+        schema,
+        on_80: vec![INSTANT],
+        on_84: vec![INSTANT],
+    });
+    // $table->innoDb() on a new table.
+    assert_both_forms(Run {
+        name: "innoDb() create",
+        long: INNODB_CREATE_THEN_ADD_QTY_LONG,
+        short: INNODB_CREATE_THEN_ADD_QTY_SHORT,
+        schema: String::new(),
+        on_80: vec![NOT_CHECKED, INSTANT],
+        on_84: vec![NOT_CHECKED, INSTANT],
+    });
+    // The integer foreign key still fails when the table is InnoDB.
+    assert_both_forms(Run {
+        name: "integer foreign key",
+        long: MYISAM_INTEGER_FOREIGN_LONG,
+        short: MYISAM_INTEGER_FOREIGN_SHORT,
+        schema: format!("{USERS}{ORDERS}"),
+        on_80: vec![INSTANT, "fails with error 3780"],
+        on_84: vec![INSTANT, "fails with error 3780"],
+    });
+}
+
+#[test]
+fn the_short_and_the_long_form_of_the_engine_outputs_give_the_same_statements() {
+    for (long, short) in [
+        (MYISAM_CREATE_FK_LONG, MYISAM_CREATE_FK_SHORT),
+        (MYISAM_ADD_QTY_LONG, MYISAM_ADD_QTY_SHORT),
+        (MYISAM_ADD_INDEX_LONG, MYISAM_ADD_INDEX_SHORT),
+        (MYISAM_FOREIGN_ID_LONG, MYISAM_FOREIGN_ID_SHORT),
+        (MYISAM_INTEGER_FOREIGN_LONG, MYISAM_INTEGER_FOREIGN_SHORT),
+        (MYISAM_NULLABLE_FOREIGN_LONG, MYISAM_NULLABLE_FOREIGN_SHORT),
+        (
+            MYISAM_CREATE_THEN_INTEGER_FOREIGN_LONG,
+            MYISAM_CREATE_THEN_INTEGER_FOREIGN_SHORT,
+        ),
+        (
+            MYISAM_CREATE_THEN_NULLABLE_FOREIGN_LONG,
+            MYISAM_CREATE_THEN_NULLABLE_FOREIGN_SHORT,
+        ),
+        (
+            MYISAM_CREATE_THEN_ADD_QTY_LONG,
+            MYISAM_CREATE_THEN_ADD_QTY_SHORT,
+        ),
+        (INNODB_CREATE_LONG, INNODB_CREATE_SHORT),
+        (ENGINE_IN_SCHEMA_TABLE_LONG, ENGINE_IN_SCHEMA_TABLE_SHORT),
+    ] {
+        let sql = |output: &str| -> Vec<String> {
+            statements_of(output)
+                .into_iter()
+                .map(|statement| statement.sql)
+                .collect()
+        };
+        assert_eq!(sql(long), sql(short));
+    }
+}

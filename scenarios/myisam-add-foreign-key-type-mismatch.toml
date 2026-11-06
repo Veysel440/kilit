@@ -1,0 +1,6 @@
+title = "Add a foreign key from an INT column to a BIGINT UNSIGNED column on a MyISAM table"
+engine = "MyISAM"
+setup = [
+    "ALTER TABLE orders ADD COLUMN ref INT NULL",
+]
+operation = "ADD CONSTRAINT fk_orders_ref FOREIGN KEY (ref) REFERENCES users (id)"

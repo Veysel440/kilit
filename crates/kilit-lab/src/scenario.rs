@@ -23,7 +23,14 @@ pub struct Scenario {
     pub session: Vec<String>,
     /// Everything that follows `ALTER TABLE orders`.
     pub operation: String,
+    /// `MyISAM` to create `orders` with that engine instead of InnoDB.
+    /// Nothing else about the tables changes.
+    pub engine: Option<&'static str>,
 }
+
+/// The engines a scenario can give `orders`, besides the InnoDB of
+/// `scenarios/tables.sql`.
+const ENGINES: [&str; 1] = ["MyISAM"];
 
 /// The contents of a scenario file. Unknown keys are an error, so a typo
 /// such as `operaton` cannot silently drop a field.
@@ -36,6 +43,7 @@ struct ScenarioFile {
     #[serde(default)]
     session: Vec<String>,
     operation: String,
+    engine: Option<String>,
 }
 
 impl Scenario {
@@ -77,12 +85,24 @@ fn load(path: &Path) -> Result<Scenario> {
 fn parse(id: &str, text: &str) -> Result<Scenario> {
     check_id(id)?;
     let file: ScenarioFile = toml::from_str(text)?;
+    let engine = match file.engine {
+        None => None,
+        Some(engine) => Some(
+            ENGINES
+                .into_iter()
+                .find(|known| *known == engine)
+                .ok_or_else(|| {
+                    format!("`engine = \"{engine}\"`: the lab knows only {ENGINES:?}")
+                })?,
+        ),
+    };
     Ok(Scenario {
         id: id.to_owned(),
         title: file.title,
         setup: file.setup,
         session: file.session,
         operation: file.operation,
+        engine,
     })
 }
 
@@ -150,6 +170,20 @@ operation = "ADD INDEX i (amount)""#,
         )
         .unwrap();
         assert_eq!(scenario.session, ["SET foreign_key_checks = 0"]);
+    }
+
+    #[test]
+    fn engine_is_optional_and_only_myisam() {
+        let scenario = parse("x", "title = \"t\"\noperation = \"o\"").unwrap();
+        assert_eq!(scenario.engine, None);
+
+        let scenario = parse("x", "title = \"t\"\nengine = \"MyISAM\"\noperation = \"o\"").unwrap();
+        assert_eq!(scenario.engine, Some("MyISAM"));
+
+        for other in ["InnoDB", "myisam", "MEMORY"] {
+            let text = format!("title = \"t\"\nengine = \"{other}\"\noperation = \"o\"");
+            assert!(parse("x", &text).is_err(), "{other} should be refused");
+        }
     }
 
     #[test]

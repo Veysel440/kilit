@@ -1,0 +1,3 @@
+title = "Add a FULLTEXT index to a MyISAM table"
+engine = "MyISAM"
+operation = "ADD FULLTEXT INDEX ft_note (note)"

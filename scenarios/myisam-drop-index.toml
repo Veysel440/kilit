@@ -1,0 +1,6 @@
+title = "Drop a secondary index of a MyISAM table"
+engine = "MyISAM"
+setup = [
+    "ALTER TABLE orders ADD INDEX idx_amount (amount)",
+]
+operation = "DROP INDEX idx_amount"

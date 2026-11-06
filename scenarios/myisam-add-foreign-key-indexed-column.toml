@@ -1,0 +1,6 @@
+title = "Add a foreign key on an indexed column of a MyISAM table"
+engine = "MyISAM"
+setup = [
+    "ALTER TABLE orders ADD INDEX idx_user (user_id)",
+]
+operation = "ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)"

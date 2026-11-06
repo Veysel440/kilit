@@ -21,7 +21,7 @@ use sqlparser::tokenizer::{Location, Token, Tokenizer};
 
 use crate::split::split;
 use crate::statement::{
-    Algorithm, Alter, Check, CheckColumns, Column, DataType, ForeignKey, ForeignKeyAction,
+    Algorithm, Alter, Check, CheckColumns, Column, DataType, Engine, ForeignKey, ForeignKeyAction,
     Generated, Index, IndexKind, IntegerSize, Lock, Operation, Position, Rename, Statement,
     StatementKind, Table, Variable,
 };
@@ -752,6 +752,7 @@ fn create_table(create: ast::CreateTable) -> StatementKind {
     checks.sort_by_key(|(written_at, _)| *written_at);
     table.checks = checks.into_iter().map(|(_, check)| check).collect();
     (table.charset, table.collation) = table_charset(&create.table_options);
+    table.engine = table_engine(&create.table_options);
     StatementKind::CreateTable {
         table,
         if_not_exists: create.if_not_exists,
@@ -782,6 +783,33 @@ fn table_charset(options: &CreateTableOptions) -> (Option<String>, Option<String
         }
     }
     (charset, collation)
+}
+
+/// The table's `ENGINE`, in any letter case, with or without `=`. MySQL
+/// takes the last one when it is written twice. The parser reads a name
+/// only: a quoted engine, which MySQL accepts too, makes the whole
+/// statement unreadable.
+fn table_engine(options: &CreateTableOptions) -> Option<Engine> {
+    let (CreateTableOptions::Plain(options)
+    | CreateTableOptions::With(options)
+    | CreateTableOptions::Options(options)
+    | CreateTableOptions::TableProperties(options)) = options
+    else {
+        return None;
+    };
+    let mut engine = None;
+    for option in options {
+        if let SqlOption::NamedParenthesizedList(list) = option
+            && list.key.value.eq_ignore_ascii_case("ENGINE")
+        {
+            engine = Some(match &list.name {
+                // `ENGINE=name(...)` is not MySQL's.
+                Some(name) if list.values.is_empty() => Engine::named(&name.value),
+                _ => Engine::Unknown,
+            });
+        }
+    }
+    engine
 }
 
 /// `utf8mb4`, whether written as a name or as a string.
@@ -2844,5 +2872,48 @@ SET FOREIGN_KEY_CHECKS=1;
                 "{sql}"
             );
         }
+    }
+
+    fn engine(sql: &str) -> Option<Engine> {
+        match kind(sql) {
+            StatementKind::CreateTable { table, .. } => table.engine,
+            other => panic!("{sql}: expected a CREATE TABLE, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reads_the_engine_in_each_spelling() {
+        for tail in [
+            ") ENGINE=MyISAM AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+            ") default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = MyISAM",
+            ") engine=myisam",
+            ") ENGINE MyISAM",
+            ") ENGINE=`MyISAM`",
+            ") ENGINE=InnoDB ENGINE=MyISAM",
+        ] {
+            let sql = format!("CREATE TABLE t (id INT{tail}");
+            assert_eq!(engine(&sql), Some(Engine::MyIsam), "{sql}");
+        }
+        assert_eq!(
+            engine("CREATE TABLE t (id INT) ENGINE=MyISAM ENGINE=InnoDB"),
+            Some(Engine::InnoDb)
+        );
+        assert_eq!(
+            engine("CREATE TABLE t (id INT) ENGINE=memory"),
+            Some(Engine::Other("memory".into()))
+        );
+        assert_eq!(
+            engine("CREATE TABLE t (id INT) DEFAULT CHARSET=utf8mb4"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_quoted_engine_makes_the_table_unreadable() {
+        let StatementKind::Unparsed { table, .. } = kind("CREATE TABLE t (id INT) ENGINE='MyISAM'")
+        else {
+            panic!("expected an unreadable statement");
+        };
+        assert_eq!(table.as_deref(), Some("t"));
     }
 }

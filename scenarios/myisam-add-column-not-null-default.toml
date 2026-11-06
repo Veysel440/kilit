@@ -1,0 +1,3 @@
+title = "Add a NOT NULL column with a default to a MyISAM table"
+engine = "MyISAM"
+operation = "ADD COLUMN c INT NOT NULL DEFAULT 0"

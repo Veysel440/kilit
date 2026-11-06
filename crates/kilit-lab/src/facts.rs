@@ -68,7 +68,7 @@ pub async fn check_metadata_lock(conn: &mut Conn, opts: &Opts) -> Result<()> {
         .into());
     }
     for algorithm in ALGORITHMS_THAT_WAIT {
-        fixture::reset(conn).await?;
+        fixture::reset(conn, None).await?;
         let alter = probe(algorithm);
         check_waits(conn, opts, alter)
             .await

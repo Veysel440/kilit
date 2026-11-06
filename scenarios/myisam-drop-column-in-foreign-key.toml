@@ -1,0 +1,7 @@
+# MyISAM keeps no foreign key, so the column it names can be dropped.
+title = "Drop a column that a foreign key named, on a MyISAM table"
+engine = "MyISAM"
+setup = [
+    "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)",
+]
+operation = "DROP COLUMN user_id"

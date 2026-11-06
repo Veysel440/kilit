@@ -1,0 +1,3 @@
+title = "Add a secondary index to a MyISAM table"
+engine = "MyISAM"
+operation = "ADD INDEX idx_amount (amount)"

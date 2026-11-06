@@ -1,0 +1,8 @@
+# Each key length scenario indexes a column code: 250 characters of utf8mb4
+# take 1000 bytes, the longest key a MyISAM table accepts; 251 take 1004.
+title = "Add a unique index of more than 1000 bytes to a MyISAM table"
+engine = "MyISAM"
+setup = [
+    "ALTER TABLE orders ADD COLUMN code VARCHAR(251) NULL",
+]
+operation = "ADD UNIQUE INDEX uq_code (code)"

@@ -10917,6 +10917,1694 @@
       ]
     },
     {
+      "id": "myisam-add-column-not-null-default",
+      "title": "Add a NOT NULL column with a default to a MyISAM table",
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders ADD COLUMN c INT NOT NULL DEFAULT 0",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-add-foreign-key",
+      "title": "Add a foreign key to a MyISAM table",
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-add-foreign-key-indexed-column",
+      "title": "Add a foreign key on an indexed column of a MyISAM table",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_user (user_id)"
+      ],
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-add-foreign-key-no-parent-index",
+      "title": "Add a foreign key to a parent column with no index on a MyISAM table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-add-foreign-key-type-mismatch",
+      "title": "Add a foreign key from an INT column to a BIGINT UNSIGNED column on a MyISAM table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN ref INT NULL"
+      ],
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_ref FOREIGN KEY (ref) REFERENCES users (id)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-add-fulltext-index",
+      "title": "Add a FULLTEXT index to a MyISAM table",
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-add-index",
+      "title": "Add a secondary index to a MyISAM table",
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders ADD INDEX idx_amount (amount)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-add-index-key-at-limit",
+      "title": "Add an index of 1000 bytes to a MyISAM table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(250) NULL"
+      ],
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders ADD INDEX idx_code (code)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-add-index-key-over-limit",
+      "title": "Add an index of more than 1000 bytes to a MyISAM table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(251) NULL"
+      ],
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders ADD INDEX idx_code (code)",
+      "verdict": {
+        "result": "fails",
+        "code": 1071,
+        "message": "Specified key was too long; max key length is 1000 bytes"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 1000 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 1000 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 1000 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 1000 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 1000 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 1000 bytes"
+        }
+      ]
+    },
+    {
+      "id": "myisam-add-nullable-column",
+      "title": "Add a nullable column to a MyISAM table",
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders ADD COLUMN c INT NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-add-unique-index",
+      "title": "Add a unique index on a column without duplicates to a MyISAM table",
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_amount (amount)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-add-unique-index-duplicates",
+      "title": "Add a unique index on a column with duplicates to a MyISAM table",
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_user (user_id)",
+      "verdict": {
+        "result": "fails",
+        "code": 1062,
+        "message": "Duplicate entry '<value>' for key 'orders.uq_user'"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1062,
+          "message": "Duplicate entry '<value>' for key 'orders.uq_user'"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1062,
+          "message": "Duplicate entry '<value>' for key 'orders.uq_user'"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-add-unique-index-key-at-limit",
+      "title": "Add a unique index of 1000 bytes to a MyISAM table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(250) NULL"
+      ],
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_code (code)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-add-unique-index-key-over-limit",
+      "title": "Add a unique index of more than 1000 bytes to a MyISAM table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(251) NULL"
+      ],
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_code (code)",
+      "verdict": {
+        "result": "fails",
+        "code": 1071,
+        "message": "Specified key was too long; max key length is 1000 bytes"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 1000 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 1000 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 1000 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 1000 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 1000 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 1000 bytes"
+        }
+      ]
+    },
+    {
+      "id": "myisam-drop-column",
+      "title": "Drop a column of a MyISAM table",
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders DROP COLUMN note",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-drop-column-in-foreign-key",
+      "title": "Drop a column that a foreign key named, on a MyISAM table",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)"
+      ],
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders DROP COLUMN user_id",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-drop-foreign-key",
+      "title": "Drop a foreign key of a MyISAM table",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)"
+      ],
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders DROP FOREIGN KEY fk_orders_user",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-drop-index",
+      "title": "Drop a secondary index of a MyISAM table",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_amount (amount)"
+      ],
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders DROP INDEX idx_amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-modify-int-to-bigint",
+      "title": "Change a column type from INT to BIGINT on a MyISAM table",
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders MODIFY amount BIGINT NOT NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-rename-column",
+      "title": "Rename a column of a MyISAM table",
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders RENAME COLUMN note TO memo",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "myisam-set-default",
+      "title": "Set a column default on a MyISAM table",
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders ALTER COLUMN note SET DEFAULT 'x'",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
       "id": "not-null-no-nulls",
       "title": "Make a column NOT NULL when no row is NULL",
       "session": [],
