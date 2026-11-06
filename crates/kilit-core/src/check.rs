@@ -179,14 +179,23 @@ const ADD_COLUMN_EXPRESSION_DEFAULT: Case = Case {
 /// in [`EXPRESSION_DEFAULTS`] belong here, not every such function.
 const ADD_COLUMN_BINLOG_UNSAFE_DEFAULT: Case = Case {
     id: "add-column-binlog-unsafe-default",
-    scenarios: &["add-column-default-uuid", "add-column-default-rand"],
+    scenarios: &[
+        "add-column-default-uuid",
+        "add-column-default-rand",
+        "add-column-default-uuid-short",
+        "add-column-default-uuid-short-nullable",
+        "add-column-default-sysdate",
+        "add-column-default-sysdate-nullable",
+        "add-column-default-user",
+        "add-column-default-user-nullable",
+    ],
     exceptions: &[],
 };
 
 /// The expression defaults the lab measured, as kilit reads them, in
 /// uppercase, with the case of each. Any other expression default is
 /// unknown: a function the lab has not run may behave either way.
-const EXPRESSION_DEFAULTS: [(&str, &Case); 7] = [
+const EXPRESSION_DEFAULTS: [(&str, &Case); 10] = [
     ("(NOW())", &ADD_COLUMN_EXPRESSION_DEFAULT),
     ("(CURRENT_TIMESTAMP)", &ADD_COLUMN_EXPRESSION_DEFAULT),
     ("(CURDATE())", &ADD_COLUMN_EXPRESSION_DEFAULT),
@@ -197,6 +206,9 @@ const EXPRESSION_DEFAULTS: [(&str, &Case); 7] = [
     ("(JSON_ARRAY())", &ADD_COLUMN_EXPRESSION_DEFAULT),
     ("(UUID())", &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT),
     ("(RAND())", &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT),
+    ("(UUID_SHORT())", &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT),
+    ("(SYSDATE())", &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT),
+    ("(USER())", &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT),
 ];
 
 /// Shapes the lab has not measured, such as a column in a foreign key of
@@ -857,6 +869,9 @@ pub fn check(statements: &[Statement], schema: &Schema, results: &ServerResults)
             if sql.contains("sql_mode") {
                 session.sql_mode_set = true;
             }
+            if sql.contains("binlog_format") {
+                session.binlog_format_set = true;
+            }
         }
         let prediction = match &statement.kind {
             StatementKind::Alter(alter) => predict(
@@ -946,6 +961,10 @@ struct Session {
     /// refuses a key too long for a MyISAM index or shortens it depends on
     /// it, and the lab measured the default, which is strict.
     sql_mode_set: bool,
+    /// The input names `binlog_format`, in any form kilit can see. Whether
+    /// MySQL refuses an expression default as unsafe for the binary log
+    /// depends on it, and the lab measured it as `ROW`, the default.
+    binlog_format_set: bool,
 }
 
 /// Whether the session's statements go to the binary log, as far as the
@@ -1047,7 +1066,7 @@ fn predict<'r>(
         case,
         notes,
         column,
-    } = match classify(operation, session, table, schema, results) {
+    } = match classify(operation, sql, session, table, schema, results) {
         Ok(classified) => classified,
         Err(reason) => return unknown(reason),
     };
@@ -3092,6 +3111,7 @@ struct Classified {
 /// Finds the case an operation belongs to, or says why it has none.
 fn classify(
     operation: &Operation,
+    sql: &str,
     session: &Session,
     table: TableState<'_>,
     schema: &Schema,
@@ -3106,11 +3126,18 @@ fn classify(
                 None => &ADD_COLUMN,
                 Some(default) => {
                     let case = measured_default(default)?;
+                    check_written_default(sql, default)?;
                     if let BinaryLog::Other(setting) = &session.binary_log {
                         return Err(format!(
                             "a statement before this one sets {setting}, and the lab has \
                              measured expression defaults only with the binary log on"
                         ));
+                    }
+                    if session.binlog_format_set {
+                        return Err("a statement before this one names binlog_format, and the \
+                                    lab has measured expression defaults only with \
+                                    binlog_format = ROW, the MySQL default"
+                            .into());
                     }
                     notes.push(ASSUMES_BINARY_LOG.to_owned());
                     case
@@ -3289,6 +3316,108 @@ fn measured_default(default: &str) -> Result<&'static Case, String> {
         .find(|(measured, _)| *measured == written)
         .map(|(_, case)| *case)
         .ok_or_else(|| format!("the expression default {default} has not been measured yet"))
+}
+
+/// kilit reads `(SYSDATE ())` as `(SYSDATE())`, but MySQL does not: with
+/// a space or a comment before the parenthesis, NOW, CURDATE, SYSDATE and
+/// others are not the built-in function, and MySQL refuses the default
+/// (error 3770). So a measured default must be written in the statement
+/// with each function name right before its parenthesis.
+fn check_written_default(sql: &str, default: &str) -> Result<(), String> {
+    let not_measured = || {
+        format!(
+            "the expression default {default} is written with a space or a comment where \
+             the lab measured none, and MySQL may read it as another function"
+        )
+    };
+    let written = written_default(sql).ok_or_else(not_measured)?;
+    if written.contains("/*") || written.contains("--") || written.contains('#') {
+        return Err(not_measured());
+    }
+    let bytes = written.as_bytes();
+    for (at, byte) in bytes.iter().enumerate() {
+        if *byte != b'(' {
+            continue;
+        }
+        let before = written[..at].trim_end();
+        let spaced = before.len() < at;
+        let after_name = before
+            .bytes()
+            .next_back()
+            .is_some_and(|last| last.is_ascii_alphanumeric() || last == b'_');
+        if spaced && after_name {
+            return Err(not_measured());
+        }
+    }
+    Ok(())
+}
+
+/// The parenthesized default of an ADD COLUMN as written in `sql`: from
+/// the parenthesis after the word DEFAULT to the one that closes it.
+/// Quoted text is skipped. `None` if there is none, or something stands
+/// between DEFAULT and its parenthesis.
+fn written_default(sql: &str) -> Option<&str> {
+    let bytes = sql.as_bytes();
+    let mut at = 0;
+    let mut quote = None;
+    while at < bytes.len() {
+        let byte = bytes[at];
+        if let Some(open) = quote {
+            if byte == open {
+                quote = None;
+            }
+            at += 1;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"' | b'`') {
+            quote = Some(byte);
+            at += 1;
+            continue;
+        }
+        let word_starts = at == 0 || !is_word_byte(bytes[at - 1]);
+        let end = at + "DEFAULT".len();
+        if word_starts
+            && sql
+                .get(at..end)
+                .is_some_and(|word| word.eq_ignore_ascii_case("DEFAULT"))
+            && bytes.get(end).is_none_or(|next| !is_word_byte(*next))
+        {
+            let open = end + (sql[end..].len() - sql[end..].trim_start().len());
+            return (bytes.get(open) == Some(&b'(')).then(|| closing(sql, open))?;
+        }
+        at += 1;
+    }
+    None
+}
+
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
+}
+
+/// `sql` from the parenthesis at `open` to the one that closes it.
+fn closing(sql: &str, open: usize) -> Option<&str> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    for (at, byte) in sql.bytes().enumerate().skip(open) {
+        if let Some(open_quote) = quote {
+            if byte == open_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' | b'`' => quote = Some(byte),
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&sql[open..=at]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The lab measured MODIFY and CHANGE with literal defaults only.
@@ -4665,6 +4794,36 @@ mod tests {
                 "fails with error 1674",
             ),
             (
+                "ref BIGINT UNSIGNED NOT NULL DEFAULT (UUID_SHORT())",
+                "add-column-binlog-unsafe-default",
+                "fails with error 1674",
+            ),
+            (
+                "ref BIGINT UNSIGNED NULL DEFAULT (uuid_short( ))",
+                "add-column-binlog-unsafe-default",
+                "fails with error 1674",
+            ),
+            (
+                "placed_at DATETIME NOT NULL DEFAULT (SYSDATE())",
+                "add-column-binlog-unsafe-default",
+                "fails with error 1674",
+            ),
+            (
+                "placed_at DATETIME NULL DEFAULT (sysdate())",
+                "add-column-binlog-unsafe-default",
+                "fails with error 1674",
+            ),
+            (
+                "created_by VARCHAR(288) NOT NULL DEFAULT (USER())",
+                "add-column-binlog-unsafe-default",
+                "fails with error 1674",
+            ),
+            (
+                "created_by VARCHAR(288) NULL DEFAULT (user( ))",
+                "add-column-binlog-unsafe-default",
+                "fails with error 1674",
+            ),
+            (
                 "placed_at DATETIME NOT NULL DEFAULT (NOW())",
                 "add-column-expression-default",
                 "COPY, copies every row, writes wait",
@@ -4729,6 +4888,13 @@ mod tests {
             "(CURDATE() + INTERVAL 1 DAY)",
             "(YEAR(CURDATE()))",
             "(UUID_TO_BIN(UUID()))",
+            // Next to the measured UUID_SHORT(), SYSDATE() and USER().
+            "((SYSDATE()))",
+            "(SYSDATE(6))",
+            "(UUID_SHORT() + 1)",
+            "(CURRENT_USER())",
+            "(SESSION_USER())",
+            "(SYSTEM_USER())",
             "(0)",
             "('x')",
         ] {
@@ -4747,6 +4913,74 @@ mod tests {
             ))
             .starts_with("2 changes in one statement")
         );
+    }
+
+    #[test]
+    fn a_measured_default_must_be_written_without_a_space_before_a_parenthesis() {
+        let spaced = "is written with a space or a comment where the lab measured none";
+        for written in [
+            "(SYSDATE ())",
+            "( SYSDATE ( ) )",
+            "(SYSDATE /*x*/ ())",
+            "(NOW ())",
+            "(CURDATE\t())",
+            "(uuid_short ())",
+            "(JSON_ARRAY ())",
+        ] {
+            let sql = format!("ALTER TABLE orders ADD COLUMN c DATETIME NULL DEFAULT {written}");
+            assert!(reason(only(&sql)).contains(spaced), "{sql}");
+        }
+        for (written, case) in [
+            ("(sysdate( ))", "add-column-binlog-unsafe-default"),
+            ("( NOW() )", "add-column-expression-default"),
+            (
+                "(current_date + interval 1 year)",
+                "add-column-expression-default",
+            ),
+        ] {
+            let sql = format!("ALTER TABLE orders ADD COLUMN c DATE NULL DEFAULT {written}");
+            assert_eq!(measured(only(&sql)).0, case, "{sql}");
+        }
+        // The word DEFAULT in a comment or a name is not the default.
+        let sql = "ALTER TABLE orders ADD COLUMN `default` VARCHAR(288) NOT NULL \
+                   COMMENT 'default (x)' DEFAULT (USER())";
+        assert_eq!(measured(only(sql)).0, "add-column-binlog-unsafe-default");
+        assert_eq!(
+            written_default("ADD COLUMN c INT COMMENT 'DEFAULT (1)' DEFAULT (RAND())"),
+            Some("(RAND())")
+        );
+        assert_eq!(written_default("ADD COLUMN c INT DEFAULT 1"), None);
+        assert_eq!(
+            written_default("ADD COLUMN c INT DEFAULT/**/(RAND())"),
+            None
+        );
+    }
+
+    #[test]
+    fn binlog_format_anywhere_earlier_makes_expression_defaults_unknown() {
+        for set in [
+            "SET SESSION binlog_format = 'STATEMENT';",
+            "SET binlog_format = ROW;",
+            "SET GLOBAL binlog_format = 'MIXED';",
+            "SET @@SESSION.binlog_format = 'STATEMENT', sql_log_bin = 1;",
+        ] {
+            for column in [
+                "t CHAR(36) NULL DEFAULT (UUID())",
+                "d DATETIME NULL DEFAULT (SYSDATE())",
+                "n DATETIME NOT NULL DEFAULT (NOW())",
+            ] {
+                let sql = format!("{set}\nALTER TABLE orders ADD COLUMN {column};");
+                let predictions = predictions(&sql);
+                let Prediction::Unknown { reason } = &predictions[1] else {
+                    panic!("{sql}: {:?}", predictions[1]);
+                };
+                assert!(reason.contains("names binlog_format"), "{sql}: {reason}");
+            }
+        }
+        // A literal default does not depend on it.
+        let sql = "SET binlog_format = 'STATEMENT';\n\
+                   ALTER TABLE orders ADD COLUMN c INT NULL DEFAULT 1;";
+        assert!(matches!(predictions(sql)[1], Prediction::Measured { .. }));
     }
 
     #[test]

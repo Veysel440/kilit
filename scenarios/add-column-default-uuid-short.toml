@@ -1,0 +1,2 @@
+title = "Add a column with DEFAULT (UUID_SHORT())"
+operation = "ADD COLUMN ref BIGINT UNSIGNED NOT NULL DEFAULT (UUID_SHORT())"

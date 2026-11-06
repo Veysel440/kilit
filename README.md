@@ -146,7 +146,7 @@ one does what.
 | Add a column¹<br>`$table->string('coupon')->nullable()` | INSTANT | continue |
 | ↳ when the table has a FULLTEXT index | COPY, copies every row | **wait** |
 | ↳ after 64 instant column changes | INPLACE, rebuilds the table | continue |
-| ↳ with `DEFAULT (UUID())` or `DEFAULT (RAND())` | fails, error 1674 (binary log on) | – |
+| ↳ with `DEFAULT (UUID())`, `(RAND())`, `(UUID_SHORT())`, `(SYSDATE())` or `(USER())` | fails, error 1674 (binary log on) | – |
 | ↳ with `DEFAULT (NOW())`, `(CURRENT_TIMESTAMP)`, `(CURDATE())`, `(CURRENT_DATE + INTERVAL 1 YEAR)` or `(JSON_ARRAY())`<br>`$table->date('due_on')->useCurrent()` | COPY, copies every row | **wait** |
 | Drop a column<br>`$table->dropColumn('note')` | INSTANT | continue |
 | ↳ when the table has a FULLTEXT index | COPY, copies every row | **wait** |

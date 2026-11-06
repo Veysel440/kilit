@@ -1,0 +1,3 @@
+title = "Add a nullable column with DEFAULT (SYSDATE())"
+# The same column as add-column-default-sysdate, without NOT NULL.
+operation = "ADD COLUMN placed_at DATETIME NULL DEFAULT (SYSDATE())"

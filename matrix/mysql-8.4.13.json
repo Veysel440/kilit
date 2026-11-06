@@ -1186,10 +1186,412 @@
       ]
     },
     {
+      "id": "add-column-default-sysdate",
+      "title": "Add a column with DEFAULT (SYSDATE())",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN placed_at DATETIME NOT NULL DEFAULT (SYSDATE())",
+      "verdict": {
+        "result": "fails",
+        "code": 1674,
+        "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        }
+      ]
+    },
+    {
+      "id": "add-column-default-sysdate-nullable",
+      "title": "Add a nullable column with DEFAULT (SYSDATE())",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN placed_at DATETIME NULL DEFAULT (SYSDATE())",
+      "verdict": {
+        "result": "fails",
+        "code": 1674,
+        "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        }
+      ]
+    },
+    {
+      "id": "add-column-default-user",
+      "title": "Add a column with DEFAULT (USER())",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN created_by VARCHAR(288) NOT NULL DEFAULT (USER())",
+      "verdict": {
+        "result": "fails",
+        "code": 1674,
+        "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        }
+      ]
+    },
+    {
+      "id": "add-column-default-user-nullable",
+      "title": "Add a nullable column with DEFAULT (USER())",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN created_by VARCHAR(288) NULL DEFAULT (USER())",
+      "verdict": {
+        "result": "fails",
+        "code": 1674,
+        "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        }
+      ]
+    },
+    {
       "id": "add-column-default-uuid",
       "title": "Add a column with DEFAULT (UUID())",
       "session": [],
       "statement": "ALTER TABLE orders ADD COLUMN token CHAR(36) NOT NULL DEFAULT (UUID())",
+      "verdict": {
+        "result": "fails",
+        "code": 1674,
+        "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        }
+      ]
+    },
+    {
+      "id": "add-column-default-uuid-short",
+      "title": "Add a column with DEFAULT (UUID_SHORT())",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN ref BIGINT UNSIGNED NOT NULL DEFAULT (UUID_SHORT())",
+      "verdict": {
+        "result": "fails",
+        "code": 1674,
+        "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1674,
+          "message": "Statement is unsafe because it uses a system function that may return a different value on the replica."
+        }
+      ]
+    },
+    {
+      "id": "add-column-default-uuid-short-nullable",
+      "title": "Add a nullable column with DEFAULT (UUID_SHORT())",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN ref BIGINT UNSIGNED NULL DEFAULT (UUID_SHORT())",
       "verdict": {
         "result": "fails",
         "code": 1674,

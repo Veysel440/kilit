@@ -1,0 +1,3 @@
+title = "Add a nullable column with DEFAULT (USER())"
+# The same column as add-column-default-user, without NOT NULL.
+operation = "ADD COLUMN created_by VARCHAR(288) NULL DEFAULT (USER())"

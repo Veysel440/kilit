@@ -1,0 +1,3 @@
+title = "Add a nullable column with DEFAULT (UUID_SHORT())"
+# The same column as add-column-default-uuid-short, without NOT NULL.
+operation = "ADD COLUMN ref BIGINT UNSIGNED NULL DEFAULT (UUID_SHORT())"

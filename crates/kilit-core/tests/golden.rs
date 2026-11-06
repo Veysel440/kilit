@@ -3696,3 +3696,324 @@ fn the_reason_for_a_myisam_foreign_key_with_an_unknown_parent_starts_with_kilit_
         }
     }
 }
+
+// Step 9c: UUID_SHORT(), SYSDATE() and USER() as the default of a new
+// column. The lab measured all three on both servers, NULL and NOT NULL, in
+// all six variants: error 1674, "Statement is unsafe because it uses a system
+// function that may return a different value on the replica", the answer
+// UUID() and RAND() have had since step 4.
+
+/// The three functions in the shapes the lab ran, with letter case and spaces
+/// that do not matter inside the parentheses.
+const BINLOG_UNSAFE_COLUMNS: [&str; 12] = [
+    "ref BIGINT UNSIGNED NULL DEFAULT (UUID_SHORT())",
+    "ref BIGINT UNSIGNED NOT NULL DEFAULT (UUID_SHORT())",
+    "ref BIGINT UNSIGNED NOT NULL DEFAULT (uuid_short( ))",
+    "ref BIGINT UNSIGNED NOT NULL DEFAULT (Uuid_Short())",
+    "placed_at DATETIME NULL DEFAULT (SYSDATE())",
+    "placed_at DATETIME NOT NULL DEFAULT (SYSDATE())",
+    "placed_at DATETIME NOT NULL DEFAULT (sysdate( ))",
+    "placed_at DATETIME NOT NULL DEFAULT (SysDate())",
+    "created_by VARCHAR(288) NULL DEFAULT (USER())",
+    "created_by VARCHAR(288) NOT NULL DEFAULT (USER())",
+    "created_by VARCHAR(288) NOT NULL DEFAULT (user( ))",
+    "created_by VARCHAR(288) NOT NULL DEFAULT (User())",
+];
+
+/// The reason kilit gives for the last statement of `sql` on `server`, when
+/// it has no answer.
+fn unknown_reason_on(server: &str, schema: &str, sql: &str) -> String {
+    let results = Knowledge::built_in().server(server).unwrap();
+    let findings = check(&parse(sql), &Schema::from_sql(schema), results);
+    match &findings.last().unwrap().prediction {
+        Prediction::Unknown { reason } => reason.clone(),
+        other => panic!("{server}: {sql}: {other:?}"),
+    }
+}
+
+#[test]
+fn a_new_column_defaulting_to_uuid_short_sysdate_or_user_fails_with_1674_on_both_servers() {
+    for column in BINLOG_UNSAFE_COLUMNS {
+        assert_answer(
+            column,
+            LAB_TABLES,
+            &format!("ALTER TABLE orders ADD COLUMN {column};"),
+            "fails with error 1674",
+        );
+    }
+}
+
+#[test]
+fn the_same_three_defaults_fail_without_a_schema_and_on_a_lost_innodb_table() {
+    // The lab's table is not needed for the answer: the failure does not
+    // depend on anything in the table. A lost table keeps its InnoDB answers.
+    let lost = format!("{LAB_TABLES}ALTER TABLE orders AUTO_INCREMENT = 5;");
+    for column in BINLOG_UNSAFE_COLUMNS {
+        let sql = format!("ALTER TABLE orders ADD COLUMN {column};");
+        assert_answer(column, "", &sql, "fails with error 1674");
+        assert_answer(column, &lost, &sql, "fails with error 1674");
+    }
+}
+
+#[test]
+fn the_three_defaults_fail_on_a_table_created_earlier_in_the_same_input() {
+    let sql = "CREATE TABLE tokens (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, \
+               note VARCHAR(50) NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+               ALTER TABLE tokens ADD COLUMN ref BIGINT UNSIGNED NOT NULL DEFAULT (UUID_SHORT());
+               ALTER TABLE tokens ADD COLUMN placed_at DATETIME NULL DEFAULT (SYSDATE());
+               ALTER TABLE tokens ADD COLUMN created_by VARCHAR(288) NULL DEFAULT (USER());";
+    for answers in all_on_both("", sql) {
+        assert_eq!(answers[1..], ["fails with error 1674"; 3], "{answers:?}");
+    }
+}
+
+#[test]
+fn forcing_an_algorithm_or_a_lock_on_the_three_defaults_still_fails_with_1674() {
+    // The lab ran each of them as written, with ALGORITHM=INSTANT, INPLACE,
+    // INPLACE with LOCK=NONE, COPY, and with LOCK=NONE: 1674 in every run.
+    for column in [
+        "ref BIGINT UNSIGNED NOT NULL DEFAULT (UUID_SHORT())",
+        "placed_at DATETIME NULL DEFAULT (SYSDATE())",
+        "created_by VARCHAR(288) NOT NULL DEFAULT (USER())",
+    ] {
+        for clause in [
+            "ALGORITHM=INSTANT",
+            "ALGORITHM=INPLACE",
+            "ALGORITHM=INPLACE, LOCK=NONE",
+            "ALGORITHM=COPY",
+            "LOCK=NONE",
+        ] {
+            assert_answer(
+                &format!("{column}, {clause}"),
+                LAB_TABLES,
+                &format!("ALTER TABLE orders ADD COLUMN {column}, {clause};"),
+                "fails with error 1674",
+            );
+        }
+    }
+}
+
+#[test]
+fn the_three_defaults_on_a_myisam_table_are_unknown_as_uuid_is() {
+    assert_myisam(
+        "UUID()",
+        &[],
+        "ADD COLUMN token CHAR(36) NOT NULL DEFAULT (UUID())",
+        "unknown",
+    );
+    for column in BINLOG_UNSAFE_COLUMNS {
+        assert_myisam(column, &[], &format!("ADD COLUMN {column}"), "unknown");
+    }
+}
+
+#[test]
+fn a_failed_uuid_short_default_leaves_the_table_as_it_was() {
+    // ref is not on the table after the failure, so a MODIFY of it is about
+    // a column kilit cannot find. With the column really added, it can.
+    let modify = "ALTER TABLE orders MODIFY ref BIGINT NULL;";
+    let not_there = "orders has no column ref";
+    for server in [MYSQL_80, MYSQL_84] {
+        let results = Knowledge::built_in().server(server).unwrap();
+        let last = |sql: &str| {
+            check(&parse(sql), &Schema::from_sql(LAB_TABLES), results)
+                .pop()
+                .unwrap()
+                .prediction
+        };
+        let added = last(&format!(
+            "ALTER TABLE orders ADD COLUMN ref BIGINT UNSIGNED NULL;\n{modify}"
+        ));
+        assert!(
+            !matches!(&added, Prediction::Unknown { reason } if reason.contains(not_there)),
+            "{server}: {added:?}"
+        );
+        for default in ["(UUID_SHORT())", "(SYSDATE())", "(USER())"] {
+            let sql = format!(
+                "ALTER TABLE orders ADD COLUMN ref BIGINT UNSIGNED NULL DEFAULT {default};\n{modify}"
+            );
+            match last(&sql) {
+                Prediction::Unknown { reason } => {
+                    assert!(reason.contains(not_there), "{server}: {default}: {reason}")
+                }
+                other => panic!("{server}: {default}: {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn the_binary_log_setting_decides_the_three_defaults_like_uuid() {
+    let reason = "a statement before this one sets sql_log_bin = 0, and the lab has measured \
+                  expression defaults only with the binary log on";
+    for column in [
+        "token CHAR(36) NOT NULL DEFAULT (UUID())",
+        "ref BIGINT UNSIGNED NOT NULL DEFAULT (UUID_SHORT())",
+        "placed_at DATETIME NULL DEFAULT (SYSDATE())",
+        "created_by VARCHAR(288) NOT NULL DEFAULT (USER())",
+    ] {
+        let add = format!("ALTER TABLE orders ADD COLUMN {column};");
+        // Off: the server accepts and copies the table, but the lab did not
+        // measure the three with the binary log off: unknown, as for UUID().
+        for server in [MYSQL_80, MYSQL_84] {
+            assert_eq!(
+                unknown_reason_on(server, LAB_TABLES, &format!("SET sql_log_bin = 0;\n{add}")),
+                reason,
+                "{server}: {column}"
+            );
+        }
+        // On: the measured answer stays.
+        assert_answer(
+            column,
+            LAB_TABLES,
+            &format!("SET sql_log_bin = 1;\n{add}"),
+            "fails with error 1674",
+        );
+        assert_answer(
+            column,
+            LAB_TABLES,
+            &format!("SET sql_log_bin = 0;\nSET sql_log_bin = 1;\n{add}"),
+            "fails with error 1674",
+        );
+    }
+}
+
+#[test]
+fn modify_change_and_set_default_with_the_three_functions_stay_unknown() {
+    for default in ["(UUID_SHORT())", "(SYSDATE())", "(USER())"] {
+        for operation in [
+            format!("MODIFY note VARCHAR(50) NULL DEFAULT {default}"),
+            format!("CHANGE note remark VARCHAR(50) NULL DEFAULT {default}"),
+            format!("ALTER COLUMN note SET DEFAULT {default}"),
+        ] {
+            assert_answer(
+                &operation,
+                LAB_TABLES,
+                &format!("ALTER TABLE orders {operation};"),
+                "unknown",
+            );
+        }
+    }
+}
+
+#[test]
+fn other_forms_of_the_three_functions_are_still_unknown() {
+    // Only the measured shape has an answer: extra parentheses, arguments,
+    // arithmetic, and the neighbours of USER().
+    for default in [
+        "((SYSDATE()))",
+        "(SYSDATE(6))",
+        "(UUID_SHORT() + 1)",
+        "(CURRENT_USER())",
+        "(SESSION_USER())",
+        "(SYSTEM_USER())",
+    ] {
+        assert_answer(
+            default,
+            LAB_TABLES,
+            &format!("ALTER TABLE orders ADD COLUMN c VARCHAR(100) NULL DEFAULT {default};"),
+            "unknown",
+        );
+    }
+}
+
+#[test]
+fn laravel_s_expression_default_with_uuid_short_sysdate_or_user_fails_with_1674() {
+    // The form Laravel's grammar produces for
+    // $table->unsignedBigInteger('ref')->default(new Expression('(UUID_SHORT())'));
+    // an Expression is written as it is after `default`. The same for
+    // '(SYSDATE())' on a dateTime and '(USER())' on a string.
+    for statement in [
+        "alter table `orders` add `ref` bigint unsigned not null default (UUID_SHORT())",
+        "alter table `orders` add `placed_at` datetime not null default (SYSDATE())",
+        "alter table `orders` add `created_by` varchar(255) not null default (USER())",
+    ] {
+        assert_eq!(
+            pretend_on_mysql_84(
+                LARAVEL_TABLES,
+                &pretend(
+                    "2026_11_05_100000_add_a_default_to_orders_table",
+                    &[statement]
+                )
+            ),
+            ["fails with error 1674"],
+            "{statement}"
+        );
+    }
+}
+
+// Regression tests for what the step 9c review found.
+
+#[test]
+fn a_space_or_comment_between_a_function_name_and_its_parenthesis_is_unknown() {
+    // Measured on both servers (manual/step9c/review/t1): `(SYSDATE ())`,
+    // `( SYSDATE ( ) )`, `(SYSDATE /*x*/ ())` and `(NOW ())` fail with 3770,
+    // because MySQL reads the name with a space as another function. A space
+    // only inside the parentheses, `(sysdate( ))`, is 1674.
+    let reason = "is written with a space or a comment where the lab measured none";
+    for default in [
+        "(SYSDATE ())",
+        "( SYSDATE ( ) )",
+        "(SYSDATE /*x*/ ())",
+        "(NOW ())",
+        "(USER ( ))",
+        "(UUID_SHORT ( ))",
+    ] {
+        let sql = format!("ALTER TABLE orders ADD COLUMN c DATETIME NULL DEFAULT {default};");
+        for server in [MYSQL_80, MYSQL_84] {
+            let found = unknown_reason_on(server, LAB_TABLES, &sql);
+            assert!(found.contains(reason), "{server}: {default}: {found}");
+        }
+    }
+    // The shapes the lab measured keep their answers.
+    assert_answer(
+        "space inside only",
+        LAB_TABLES,
+        "ALTER TABLE orders ADD COLUMN c DATETIME NULL DEFAULT (sysdate( ));",
+        "fails with error 1674",
+    );
+    assert_answer(
+        "NOW without a space",
+        LAB_TABLES,
+        "ALTER TABLE orders ADD COLUMN c DATETIME NULL DEFAULT (NOW());",
+        COPY,
+    );
+}
+
+#[test]
+fn an_earlier_statement_naming_binlog_format_makes_every_expression_default_unknown() {
+    // Measured on both servers (manual/step9c/review/t2): after SET SESSION
+    // binlog_format = 'STATEMENT' the server accepts UUID(), RAND(), USER()
+    // and UUID_SHORT() defaults and copies the table.
+    let reason = "names binlog_format";
+    for set in [
+        "SET SESSION binlog_format = 'STATEMENT'",
+        "SET binlog_format = 'ROW'",
+        "SET @@session.binlog_format = MIXED",
+        "SET GLOBAL binlog_format = 'ROW'",
+    ] {
+        for default in [
+            "token CHAR(36) NULL DEFAULT (UUID())",
+            "weight DOUBLE NULL DEFAULT (RAND())",
+            "ref BIGINT UNSIGNED NULL DEFAULT (UUID_SHORT())",
+            "placed_at DATETIME NULL DEFAULT (SYSDATE())",
+            "created_by VARCHAR(288) NULL DEFAULT (USER())",
+            "placed_at DATETIME NULL DEFAULT (NOW())",
+        ] {
+            let sql = format!("{set};\nALTER TABLE orders ADD COLUMN {default};");
+            for server in [MYSQL_80, MYSQL_84] {
+                let found = unknown_reason_on(server, LAB_TABLES, &sql);
+                assert!(
+                    found.contains(reason),
+                    "{server}: {set}: {default}: {found}"
+                );
+            }
+        }
+        // A literal default does not depend on it.
+        assert_answer(
+            "literal default",
+            LAB_TABLES,
+            &format!("{set};\nALTER TABLE orders ADD COLUMN c INT NULL DEFAULT 0;"),
+            INSTANT,
+        );
+    }
+}

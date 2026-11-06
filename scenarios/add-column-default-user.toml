@@ -1,0 +1,3 @@
+title = "Add a column with DEFAULT (USER())"
+# USER() gives user@host: up to 32 + 1 + 255 characters.
+operation = "ADD COLUMN created_by VARCHAR(288) NOT NULL DEFAULT (USER())"

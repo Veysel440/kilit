@@ -247,7 +247,7 @@ fn expression_defaults_and_a_functional_index_get_their_measured_answers() {
         for answer in [
             "  line 1: alter table `orders` add `token` char(36) not null default (UUID())\n\
              \x20   fails with error 1674\n\
-             \x20   measured as add-column-binlog-unsafe-default (2 lab scenarios)\n\
+             \x20   measured as add-column-binlog-unsafe-default (8 lab scenarios)\n\
              \x20   - assumes the binary log is on, the MySQL default\n",
             "    INPLACE, no rebuild, writes wait\n\
              \x20   measured as add-functional-index (1 lab scenario)\n\
@@ -1024,4 +1024,90 @@ fn a_myisam_key_over_1000_bytes_is_unknown_after_a_sql_mode_and_says_it_assumes_
     assert_eq!(json["sources"][0]["statements"][1]["impact"], "unknown");
     assert_eq!(status, Some(0));
     assert_eq!(json_against(&schema, true, &sql).1, Some(1));
+}
+
+#[test]
+fn uuid_short_sysdate_and_user_defaults_fail_with_1674_and_the_exit_code_says_so() {
+    // The form Laravel's grammar produces for an Expression default:
+    // $table->unsignedBigInteger('ref')->default(new Expression('(UUID_SHORT())'));
+    let schema = example("mysql-schema.sql");
+    let schema = schema.to_str().unwrap();
+    let sql = "alter table `orders` add `ref` bigint unsigned not null default (UUID_SHORT());
+               alter table `orders` add `placed_at` datetime null default (SYSDATE());
+               alter table `orders` add `created_by` varchar(288) not null default (USER());";
+    for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+        for strict in [false, true] {
+            let mut args = vec!["check", "--schema", schema, "--server", server];
+            if strict {
+                args.push("--strict");
+            }
+            let output = kilit(&args, sql);
+            let text = stdout(&output);
+            for (line, statement) in [
+                (
+                    1,
+                    "alter table `orders` add `ref` bigint unsigned not null default (UUID_SHORT())",
+                ),
+                (
+                    2,
+                    "alter table `orders` add `placed_at` datetime null default (SYSDATE())",
+                ),
+                (
+                    3,
+                    "alter table `orders` add `created_by` varchar(288) not null default (USER())",
+                ),
+            ] {
+                assert!(
+                    text.contains(&format!(
+                        "  line {line}: {statement}\n    fails with error 1674\n    measured as \
+                         add-column-binlog-unsafe-default ("
+                    )),
+                    "{server}: {text}"
+                );
+            }
+            assert!(
+                text.contains("    - assumes the binary log is on, the MySQL default\n"),
+                "{text}"
+            );
+            assert!(text.ends_with("\n3 statements: 3 fail\n"), "{text}");
+            // Three failures: 1, with --strict or without.
+            assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+
+            args.extend(["--format", "json"]);
+            let output = kilit(&args, sql);
+            let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let statements = json["sources"][0]["statements"].as_array().unwrap();
+            assert_eq!(statements.len(), 3);
+            for statement in statements {
+                assert_eq!(statement["impact"], "fails", "{server}");
+                assert_eq!(statement["case"], "add-column-binlog-unsafe-default");
+                assert_eq!(statement["error"], 1674);
+                assert_eq!(
+                    statement["notes"][0],
+                    "assumes the binary log is on, the MySQL default"
+                );
+            }
+            assert_eq!(output.status.code(), Some(1));
+        }
+    }
+}
+
+#[test]
+fn a_uuid_short_default_after_sql_log_bin_is_off_is_unknown_and_only_strict_exits_with_1() {
+    let schema = example("mysql-schema.sql");
+    let schema = schema.to_str().unwrap();
+    let sql = "SET sql_log_bin = 0;
+               alter table `orders` add `ref` bigint unsigned not null default (UUID_SHORT());";
+    let output = kilit(&["check", "--schema", schema, "--format", "json"], sql);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let statement = &json["sources"][0]["statements"][1];
+    assert_eq!(statement["impact"], "unknown");
+    assert_eq!(
+        statement["reason"],
+        "a statement before this one sets sql_log_bin = 0, and the lab has measured expression \
+         defaults only with the binary log on"
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let output = kilit(&["check", "--schema", schema, "--strict"], sql);
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
 }
