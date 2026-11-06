@@ -27,7 +27,8 @@ Exit status:
   1  a statement fails or makes writes wait; with --strict, also when kilit
      cannot tell what a statement does
   2  kilit could not check everything: a bad option, a file it cannot read,
-     an unknown server, or lines of the input it does not understand";
+     an unknown server, lines of the input it does not understand, or
+     Laravel stopping with an error";
 
 #[derive(Parser)]
 #[command(

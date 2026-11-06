@@ -4,7 +4,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use kilit_core::{Statement, UnreadableLine, parse, read_pretend};
+use kilit_core::{LaravelError, Statement, UnreadableLine, parse, read_pretend};
 use serde::Serialize;
 
 /// Everything to check, in the order it runs.
@@ -14,6 +14,8 @@ pub struct Input {
     pub unreadable: Vec<Unreadable>,
     /// Some input was the output of `migrate --pretend`.
     pub from_laravel: bool,
+    /// Each time Laravel stopped with an error.
+    pub laravel_errors: Vec<LaravelError>,
 }
 
 /// Statements that belong together: one Laravel migration, or one SQL file.
@@ -22,6 +24,9 @@ pub struct Source {
     pub name: String,
     pub kind: SourceKind,
     pub statements: Vec<Statement>,
+    /// Which of `statements` is the first that asks the database something,
+    /// in a Laravel migration.
+    pub first_read: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
@@ -48,6 +53,7 @@ impl Input {
             sources: Vec::new(),
             unreadable: Vec::new(),
             from_laravel: false,
+            laravel_errors: Vec::new(),
         };
         let mut stdin_read = false;
         for file in files {
@@ -77,6 +83,7 @@ impl Input {
                         name: migration.name,
                         kind: SourceKind::LaravelMigration,
                         statements: migration.statements,
+                        first_read: migration.first_read,
                     });
                 }
                 for line in pretend.unreadable {
@@ -85,11 +92,15 @@ impl Input {
                         line,
                     });
                 }
+                if let Some(error) = pretend.error {
+                    self.laravel_errors.push(error);
+                }
             }
             None => self.sources.push(Source {
                 name,
                 kind: SourceKind::Sql,
                 statements: parse(text),
+                first_read: None,
             }),
         }
     }

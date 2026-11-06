@@ -1300,3 +1300,1518 @@ fn the_short_and_the_long_form_of_the_engine_outputs_give_the_same_statements() 
         assert_eq!(sql(long), sql(short));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Laravel's error screen and migrations that read the database.
+//
+// The inputs are `php artisan migrate --pretend` runs of hand-written
+// migrations: Laravel 12.71.0 and 13.40.0 (the long form, and the short form
+// 13.40.0 prints where it detects an automated environment), with Collision
+// (the default in a new application) and without it (Symfony's error screen),
+// piped, with `--ansi`, and in a terminal (CRLF line ends and colors, `_PTY`).
+// `COLS40`, `COLS48` and `COLS50` ran with COLUMNS set, so Laravel fits each
+// name line to the terminal. `DERIVED_L10_*` and `DERIVED_L11_*` were not run:
+// Laravel 10 and 11 cannot be installed here, so they are the Laravel 12
+// output with the lines whose framework source (v10.50.4 and v11.57.1)
+// differs replaced. Some tests edit a real output (cut a name line, add a
+// statement); each says so.
+// ---------------------------------------------------------------------------
+
+const C1_THROW_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000001_throw_after_alter_orders_table ...........................  \n",
+    "\n",
+    "   RuntimeException \n",
+    "\n",
+    "  boom from a migration\n",
+    "\n",
+    "  at database/migrations/step10/c1_throw/2026_02_01_000001_throw_after_alter_orders_table.php:15\n",
+    "     11▕     {\n",
+    "     12▕         Schema::table('orders', function (Blueprint $table) {\n",
+    "     13▕             $table->integer('qty')->nullable();\n",
+    "     14▕         });\n",
+    "  ➜  15▕         throw new RuntimeException('boom from a migration');\n",
+    "     16▕     }\n",
+    "     17▕ };\n",
+    "     18▕\n",
+    "\n",
+    "      \u{1b}[2m+27 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  28  artisan:16\n",
+    "      Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\n",
+    "\n",
+);
+
+const C1_THROW_L12_ANSI: &str = concat!(
+    "\n",
+    "  \u{1b}[37;44m INFO \u{1b}[39;49m Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000001_throw_after_alter_orders_table \u{1b}[90m...........................\u{1b}[39m  \n",
+    "\n",
+    "  \u{1b}[41;1m RuntimeException \u{1b}[49;22m\n",
+    "\n",
+    "\u{1b}[39;1m  boom from a migration\u{1b}[39;22m\n",
+    "\n",
+    "  at \u{1b}[32mdatabase/migrations/step10/c1_throw/2026_02_01_000001_throw_after_alter_orders_table.php\u{1b}[39m:\u{1b}[32m15\u{1b}[39m\n",
+    "     11▕     {\n",
+    "     12▕         Schema::table('orders', function (Blueprint $table) {\n",
+    "     13▕             $table->integer('qty')->nullable();\n",
+    "     14▕         });\n",
+    "  ➜  15▕         throw new RuntimeException('boom from a migration');\n",
+    "     16▕     }\n",
+    "     17▕ };\n",
+    "     18▕\n",
+    "\n",
+    "      \u{1b}[2m+27 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  \u{1b}[33m28  \u{1b}[39m\u{1b}[39;1martisan\u{1b}[39;22m:\u{1b}[39;1m16\u{1b}[39;22m\n",
+    "  \u{1b}[90m    Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\u{1b}[39m\n",
+    "\n",
+);
+
+const C1_THROW_L12_PTY: &str = concat!(
+    "\r\n",
+    "  \u{1b}[37;44m INFO \u{1b}[39;49m Running migrations.  \r\n",
+    "\r\n",
+    "  2026_02_01_000001_throw_after_alter_orders_table \u{1b}[90m...........................\u{1b}[39m  \r\n",
+    "\r\n",
+    "  \u{1b}[41;1m RuntimeException \u{1b}[49;22m\r\n",
+    "\r\n",
+    "\u{1b}[39;1m  boom from a migration\u{1b}[39;22m\r\n",
+    "\r\n",
+    "  at \u{1b}[32mdatabase/migrations/step10/c1_throw/2026_02_01_000001_throw_after_alter_orders_table.php\u{1b}[39m:\u{1b}[32m15\u{1b}[39m\r\n",
+    "    \u{1b}[90m 11\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[39;1m    \u{1b}[0m\u{1b}[35;1m{\u{1b}[0m\r\n",
+    "    \u{1b}[90m 12\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m        \u{1b}[0m\u{1b}[39;1mSchema\u{1b}[0m\u{1b}[35;1m::\u{1b}[0m\u{1b}[39;1mtable\u{1b}[0m\u{1b}[35;1m(\u{1b}[0m\u{1b}[37m'orders'\u{1b}[0m\u{1b}[35;1m, function (\u{1b}[0m\u{1b}[39;1mBlueprint $table\u{1b}[0m\u{1b}[35;1m) {\u{1b}[0m\r\n",
+    "    \u{1b}[90m 13\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m            \u{1b}[0m\u{1b}[39;1m$table\u{1b}[0m\u{1b}[35;1m->\u{1b}[0m\u{1b}[39;1minteger\u{1b}[0m\u{1b}[35;1m(\u{1b}[0m\u{1b}[37m'qty'\u{1b}[0m\u{1b}[35;1m)->\u{1b}[0m\u{1b}[39;1mnullable\u{1b}[0m\u{1b}[35;1m();\u{1b}[0m\r\n",
+    "    \u{1b}[90m 14\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m        });\u{1b}[0m\r\n",
+    "\u{1b}[31;1m  ➜ \u{1b}[0m\u{1b}[3;1m 15\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m        throw new \u{1b}[0m\u{1b}[39;1mRuntimeException\u{1b}[0m\u{1b}[35;1m(\u{1b}[0m\u{1b}[37m'boom from a migration'\u{1b}[0m\u{1b}[35;1m);\u{1b}[0m\r\n",
+    "    \u{1b}[90m 16\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m    }\u{1b}[0m\r\n",
+    "    \u{1b}[90m 17\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m};\u{1b}[0m\r\n",
+    "    \u{1b}[90m 18\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\r\n",
+    "\r\n",
+    "      \u{1b}[2m+27 vendor frames \u{1b}[22m\r\n",
+    "\r\n",
+    "  \u{1b}[33m28  \u{1b}[39m\u{1b}[39;1martisan\u{1b}[39;22m:\u{1b}[39;1m16\u{1b}[39;22m\r\n",
+    "  \u{1b}[90m    Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\u{1b}[39m\r\n",
+    "\r\n",
+);
+
+const C1_THROW_L13_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000001_throw_after_alter_orders_table ...........................  \n",
+    "\n",
+    "   RuntimeException \n",
+    "\n",
+    "  boom from a migration\n",
+    "\n",
+    "  at database/migrations/step10/c1_throw/2026_02_01_000001_throw_after_alter_orders_table.php:15\n",
+    "     11▕     {\n",
+    "     12▕         Schema::table('orders', function (Blueprint $table) {\n",
+    "     13▕             $table->integer('qty')->nullable();\n",
+    "     14▕         });\n",
+    "  ➜  15▕         throw new RuntimeException('boom from a migration');\n",
+    "     16▕     }\n",
+    "     17▕ };\n",
+    "     18▕\n",
+    "\n",
+    "      \u{1b}[2m+27 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  28  artisan:16\n",
+    "      Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\n",
+    "\n",
+);
+
+const C1_THROW_L13_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_02_01_000001_throw_after_alter_orders_table .. \n",
+    "\n",
+    "   RuntimeException \n",
+    "\n",
+    "  boom from a migration\n",
+    "\n",
+    "  at database/migrations/step10/c1_throw/2026_02_01_000001_throw_after_alter_orders_table.php:15\n",
+    "     11▕     {\n",
+    "     12▕         Schema::table('orders', function (Blueprint $table) {\n",
+    "     13▕             $table->integer('qty')->nullable();\n",
+    "     14▕         });\n",
+    "  ➜  15▕         throw new RuntimeException('boom from a migration');\n",
+    "     16▕     }\n",
+    "     17▕ };\n",
+    "     18▕\n",
+    "\n",
+    "      \u{1b}[2m+27 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  28  artisan:16\n",
+    "      Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\n",
+    "\n",
+);
+
+const C1_THROW_L13_SHORT_PTY: &str = concat!(
+    "\r\n",
+    " INFO Running migrations. \r\n",
+    "\r\n",
+    " 2026_02_01_000001_throw_after_alter_orders_table .. \r\n",
+    "\r\n",
+    "   RuntimeException \r\n",
+    "\r\n",
+    "  boom from a migration\r\n",
+    "\r\n",
+    "  at database/migrations/step10/c1_throw/2026_02_01_000001_throw_after_alter_orders_table.php:15\r\n",
+    "    \u{1b}[90m 11\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[39;1m    \u{1b}[0m\u{1b}[35;1m{\u{1b}[0m\r\n",
+    "    \u{1b}[90m 12\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m        \u{1b}[0m\u{1b}[39;1mSchema\u{1b}[0m\u{1b}[35;1m::\u{1b}[0m\u{1b}[39;1mtable\u{1b}[0m\u{1b}[35;1m(\u{1b}[0m\u{1b}[37m'orders'\u{1b}[0m\u{1b}[35;1m, function (\u{1b}[0m\u{1b}[39;1mBlueprint $table\u{1b}[0m\u{1b}[35;1m) {\u{1b}[0m\r\n",
+    "    \u{1b}[90m 13\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m            \u{1b}[0m\u{1b}[39;1m$table\u{1b}[0m\u{1b}[35;1m->\u{1b}[0m\u{1b}[39;1minteger\u{1b}[0m\u{1b}[35;1m(\u{1b}[0m\u{1b}[37m'qty'\u{1b}[0m\u{1b}[35;1m)->\u{1b}[0m\u{1b}[39;1mnullable\u{1b}[0m\u{1b}[35;1m();\u{1b}[0m\r\n",
+    "    \u{1b}[90m 14\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m        });\u{1b}[0m\r\n",
+    "\u{1b}[31;1m  ➜ \u{1b}[0m\u{1b}[3;1m 15\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m        throw new \u{1b}[0m\u{1b}[39;1mRuntimeException\u{1b}[0m\u{1b}[35;1m(\u{1b}[0m\u{1b}[37m'boom from a migration'\u{1b}[0m\u{1b}[35;1m);\u{1b}[0m\r\n",
+    "    \u{1b}[90m 16\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m    }\u{1b}[0m\r\n",
+    "    \u{1b}[90m 17\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m};\u{1b}[0m\r\n",
+    "    \u{1b}[90m 18\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\r\n",
+    "\r\n",
+    "      \u{1b}[2m+27 vendor frames \u{1b}[22m\r\n",
+    "\r\n",
+    "  28  artisan:16\r\n",
+    "      Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\r\n",
+    "\r\n",
+);
+
+const C1_THROW_L12_SYMFONY: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000001_throw_after_alter_orders_table ...........................  \n",
+    "\n",
+    "In 2026_02_01_000001_throw_after_alter_orders_table.php line 15:\n",
+    "                         \n",
+    "  boom from a migration  \n",
+    "                         \n",
+    "\n",
+);
+
+const C1_THROW_L13_SYMFONY: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000001_throw_after_alter_orders_table ...........................  \n",
+    "\n",
+    "In 2026_02_01_000001_throw_after_alter_orders_table.php line 15:\n",
+    "                         \n",
+    "  boom from a migration  \n",
+    "                         \n",
+    "\n",
+);
+
+const C2_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000002_php_error_in_orders_table ................................  \n",
+    "\n",
+    "   BadMethodCallException \n",
+    "\n",
+    "  Method Illuminate\\Database\\Schema\\Blueprint::notAMethod does not exist.\n",
+    "\n",
+    "  at vendor/laravel/framework/src/Illuminate/Macroable/Traits/Macroable.php:117\n",
+    "    113▕      */\n",
+    "    114▕     public function __call($method, $parameters)\n",
+    "    115▕     {\n",
+    "    116▕         if (! static::hasMacro($method)) {\n",
+    "  ➜ 117▕             throw new BadMethodCallException(sprintf(\n",
+    "    118▕                 'Method %s::%s does not exist.', static::class, $method\n",
+    "    119▕             ));\n",
+    "    120▕         }\n",
+    "    121▕\n",
+    "\n",
+    "  1   database/migrations/step10/c2_php_error/2026_02_01_000002_php_error_in_orders_table.php:14\n",
+    "      Illuminate\\Database\\Schema\\Blueprint::__call(\"notAMethod\", [])\n",
+    "      \u{1b}[2m+9 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  11  database/migrations/step10/c2_php_error/2026_02_01_000002_php_error_in_orders_table.php:12\n",
+    "      Illuminate\\Support\\Facades\\Facade::__callStatic(\"table\")\n",
+    "\n",
+);
+
+const C2_L13_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_02_01_000002_php_error_in_orders_table .. \n",
+    "\n",
+    "   BadMethodCallException \n",
+    "\n",
+    "  Method Illuminate\\Database\\Schema\\Blueprint::notAMethod does not exist.\n",
+    "\n",
+    "  at vendor/laravel/framework/src/Illuminate/Macroable/Traits/Macroable.php:117\n",
+    "    113▕      */\n",
+    "    114▕     public function __call($method, $parameters)\n",
+    "    115▕     {\n",
+    "    116▕         if (! static::hasMacro($method)) {\n",
+    "  ➜ 117▕             throw new BadMethodCallException(sprintf(\n",
+    "    118▕                 'Method %s::%s does not exist.', static::class, $method\n",
+    "    119▕             ));\n",
+    "    120▕         }\n",
+    "    121▕\n",
+    "\n",
+    "  1   database/migrations/step10/c2_php_error/2026_02_01_000002_php_error_in_orders_table.php:14\n",
+    "      Illuminate\\Database\\Schema\\Blueprint::__call(\"notAMethod\", [])\n",
+    "      \u{1b}[2m+9 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  11  database/migrations/step10/c2_php_error/2026_02_01_000002_php_error_in_orders_table.php:12\n",
+    "      Illuminate\\Support\\Facades\\Facade::__callStatic(\"table\")\n",
+    "\n",
+);
+
+const C2_L12_SYMFONY: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000002_php_error_in_orders_table ................................  \n",
+    "\n",
+    "In Macroable.php line 117:\n",
+    "                                                                           \n",
+    "  Method Illuminate\\Database\\Schema\\Blueprint::notAMethod does not exist.  \n",
+    "                                                                           \n",
+    "\n",
+);
+
+const C2_L13_SYMFONY: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000002_php_error_in_orders_table ................................  \n",
+    "\n",
+    "In Macroable.php line 117:\n",
+    "                                                                           \n",
+    "  Method Illuminate\\Database\\Schema\\Blueprint::notAMethod does not exist.  \n",
+    "                                                                           \n",
+    "\n",
+);
+
+const C3_L12: &str = concat!(
+    "\n",
+    "   ParseError \n",
+    "\n",
+    "  syntax error, unexpected token \"}\"\n",
+    "\n",
+    "  at database/migrations/step10/c3_syntax_error/2026_02_01_000003_syntax_error_in_orders_table.php:13\n",
+    "      9▕     public function up(): void\n",
+    "     10▕     {\n",
+    "     11▕         Schema::table('orders', function (Blueprint $table) {\n",
+    "     12▕             $table->integer('qty')->nullable()\n",
+    "  ➜  13▕         });\n",
+    "     14▕     }\n",
+    "     15▕ };\n",
+    "     16▕\n",
+    "\n",
+    "      \u{1b}[2m+20 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  21  artisan:16\n",
+    "      Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\n",
+    "\n",
+);
+
+const C3_L13_SHORT: &str = concat!(
+    "\n",
+    "   ParseError \n",
+    "\n",
+    "  syntax error, unexpected token \"}\"\n",
+    "\n",
+    "  at database/migrations/step10/c3_syntax_error/2026_02_01_000003_syntax_error_in_orders_table.php:13\n",
+    "      9▕     public function up(): void\n",
+    "     10▕     {\n",
+    "     11▕         Schema::table('orders', function (Blueprint $table) {\n",
+    "     12▕             $table->integer('qty')->nullable()\n",
+    "  ➜  13▕         });\n",
+    "     14▕     }\n",
+    "     15▕ };\n",
+    "     16▕\n",
+    "\n",
+    "      \u{1b}[2m+20 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  21  artisan:16\n",
+    "      Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\n",
+    "\n",
+);
+
+const C3_L12_SYMFONY: &str = concat!(
+    "\n",
+    "In 2026_02_01_000003_syntax_error_in_orders_table.php line 13:\n",
+    "                                      \n",
+    "  syntax error, unexpected token \"}\"  \n",
+    "                                      \n",
+    "\n",
+);
+
+const C3B_L12: &str = concat!(
+    "\n",
+    "   ParseError \n",
+    "\n",
+    "  syntax error, unexpected token \"}\"\n",
+    "\n",
+    "  at database/migrations/step10/c3b_syntax_error_in_2nd/2026_02_01_000032_syntax_error_in_orders_table.php:13\n",
+    "      9▕     public function up(): void\n",
+    "     10▕     {\n",
+    "     11▕         Schema::table('orders', function (Blueprint $table) {\n",
+    "     12▕             $table->integer('qty2')->nullable()\n",
+    "  ➜  13▕         });\n",
+    "     14▕     }\n",
+    "     15▕ };\n",
+    "     16▕\n",
+    "\n",
+    "      \u{1b}[2m+20 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  21  artisan:16\n",
+    "      Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\n",
+    "\n",
+);
+
+const C4_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000041_first_alter_orders_table .................................  \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "  2026_02_01_000042_second_throws_orders_table ...............................  \n",
+    "\n",
+    "   RuntimeException \n",
+    "\n",
+    "  boom from a migration\n",
+    "\n",
+    "  at database/migrations/step10/c4_three_error_in_2nd/2026_02_01_000042_second_throws_orders_table.php:15\n",
+    "     11▕     {\n",
+    "     12▕         Schema::table('orders', function (Blueprint $table) {\n",
+    "     13▕             $table->integer('qty2')->nullable();\n",
+    "     14▕         });\n",
+    "  ➜  15▕         throw new RuntimeException('boom from a migration');\n",
+    "     16▕     }\n",
+    "     17▕ };\n",
+    "     18▕\n",
+    "\n",
+    "      \u{1b}[2m+27 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  28  artisan:16\n",
+    "      Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\n",
+    "\n",
+);
+
+const C4_L12_ANSI: &str = concat!(
+    "\n",
+    "  \u{1b}[37;44m INFO \u{1b}[39;49m Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000041_first_alter_orders_table \u{1b}[90m.................................\u{1b}[39m  \n",
+    "  \u{1b}[90m⇂ alter table `orders` add `qty` int null\u{1b}[39m  \n",
+    "  2026_02_01_000042_second_throws_orders_table \u{1b}[90m...............................\u{1b}[39m  \n",
+    "\n",
+    "  \u{1b}[41;1m RuntimeException \u{1b}[49;22m\n",
+    "\n",
+    "\u{1b}[39;1m  boom from a migration\u{1b}[39;22m\n",
+    "\n",
+    "  at \u{1b}[32mdatabase/migrations/step10/c4_three_error_in_2nd/2026_02_01_000042_second_throws_orders_table.php\u{1b}[39m:\u{1b}[32m15\u{1b}[39m\n",
+    "     11▕     {\n",
+    "     12▕         Schema::table('orders', function (Blueprint $table) {\n",
+    "     13▕             $table->integer('qty2')->nullable();\n",
+    "     14▕         });\n",
+    "  ➜  15▕         throw new RuntimeException('boom from a migration');\n",
+    "     16▕     }\n",
+    "     17▕ };\n",
+    "     18▕\n",
+    "\n",
+    "      \u{1b}[2m+27 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  \u{1b}[33m28  \u{1b}[39m\u{1b}[39;1martisan\u{1b}[39;22m:\u{1b}[39;1m16\u{1b}[39;22m\n",
+    "  \u{1b}[90m    Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\u{1b}[39m\n",
+    "\n",
+);
+
+const C4_L12_PTY_COLS60: &str = concat!(
+    "\r\n",
+    "  \u{1b}[37;44m INFO \u{1b}[39;49m Running migrations.  \r\n",
+    "\r\n",
+    "  2026_02_01_000041_first_alter_orders_table \u{1b}[90m.............\u{1b}[39m  \r\n",
+    "  \u{1b}[90m⇂ alter table `orders` add `qty` int null\u{1b}[39m  \r\n",
+    "  2026_02_01_000042_second_throws_orders_table \u{1b}[90m...........\u{1b}[39m  \r\n",
+    "\r\n",
+    "  \u{1b}[41;1m RuntimeException \u{1b}[49;22m\r\n",
+    "\r\n",
+    "\u{1b}[39;1m  boom from a migration\u{1b}[39;22m\r\n",
+    "\r\n",
+    "  at \u{1b}[32mdatabase/migrations/step10/c4_three_error_in_2nd/2026_02_01_000042_second_throws_orders_table.php\u{1b}[39m:\u{1b}[32m15\u{1b}[39m\r\n",
+    "    \u{1b}[90m 11\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[39;1m    \u{1b}[0m\u{1b}[35;1m{\u{1b}[0m\r\n",
+    "    \u{1b}[90m 12\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m        \u{1b}[0m\u{1b}[39;1mSchema\u{1b}[0m\u{1b}[35;1m::\u{1b}[0m\u{1b}[39;1mtable\u{1b}[0m\u{1b}[35;1m(\u{1b}[0m\u{1b}[37m'orders'\u{1b}[0m\u{1b}[35;1m, function (\u{1b}[0m\u{1b}[39;1mBlueprint $table\u{1b}[0m\u{1b}[35;1m) {\u{1b}[0m\r\n",
+    "    \u{1b}[90m 13\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m            \u{1b}[0m\u{1b}[39;1m$table\u{1b}[0m\u{1b}[35;1m->\u{1b}[0m\u{1b}[39;1minteger\u{1b}[0m\u{1b}[35;1m(\u{1b}[0m\u{1b}[37m'qty2'\u{1b}[0m\u{1b}[35;1m)->\u{1b}[0m\u{1b}[39;1mnullable\u{1b}[0m\u{1b}[35;1m();\u{1b}[0m\r\n",
+    "    \u{1b}[90m 14\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m        });\u{1b}[0m\r\n",
+    "\u{1b}[31;1m  ➜ \u{1b}[0m\u{1b}[3;1m 15\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m        throw new \u{1b}[0m\u{1b}[39;1mRuntimeException\u{1b}[0m\u{1b}[35;1m(\u{1b}[0m\u{1b}[37m'boom from a migration'\u{1b}[0m\u{1b}[35;1m);\u{1b}[0m\r\n",
+    "    \u{1b}[90m 16\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m    }\u{1b}[0m\r\n",
+    "    \u{1b}[90m 17\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m};\u{1b}[0m\r\n",
+    "    \u{1b}[90m 18\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\r\n",
+    "\r\n",
+    "      \u{1b}[2m+27 vendor frames \u{1b}[22m\r\n",
+    "\r\n",
+    "  \u{1b}[33m28  \u{1b}[39m\u{1b}[39;1martisan\u{1b}[39;22m:\u{1b}[39;1m16\u{1b}[39;22m\r\n",
+    "  \u{1b}[90m    Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\u{1b}[39m\r\n",
+    "\r\n",
+);
+
+const C4_L12_COLS40: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000041_first_alter_orders_table   \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "  2026_02_01_000042_second_throws_orders_table   \n",
+    "\n",
+    "   RuntimeException \n",
+    "\n",
+    "  boom from a migration\n",
+    "\n",
+    "  at database/migrations/step10/c4_three_error_in_2nd/2026_02_01_000042_second_throws_orders_table.php:15\n",
+    "     11▕     {\n",
+    "     12▕         Schema::table('orders', function (Blueprint $table) {\n",
+    "     13▕             $table->integer('qty2')->nullable();\n",
+    "     14▕         });\n",
+    "  ➜  15▕         throw new RuntimeException('boom from a migration');\n",
+    "     16▕     }\n",
+    "     17▕ };\n",
+    "     18▕\n",
+    "\n",
+    "      \u{1b}[2m+27 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  28  artisan:16\n",
+    "      Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\n",
+    "\n",
+);
+
+const C4_L12_COLS48: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000041_first_alter_orders_table .  \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "  2026_02_01_000042_second_throws_orders_table   \n",
+    "\n",
+    "   RuntimeException \n",
+    "\n",
+    "  boom from a migration\n",
+    "\n",
+    "  at database/migrations/step10/c4_three_error_in_2nd/2026_02_01_000042_second_throws_orders_table.php:15\n",
+    "     11▕     {\n",
+    "     12▕         Schema::table('orders', function (Blueprint $table) {\n",
+    "     13▕             $table->integer('qty2')->nullable();\n",
+    "     14▕         });\n",
+    "  ➜  15▕         throw new RuntimeException('boom from a migration');\n",
+    "     16▕     }\n",
+    "     17▕ };\n",
+    "     18▕\n",
+    "\n",
+    "      \u{1b}[2m+27 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  28  artisan:16\n",
+    "      Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\n",
+    "\n",
+);
+
+const C4_L12_COLS50: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000041_first_alter_orders_table ...  \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "  2026_02_01_000042_second_throws_orders_table .  \n",
+    "\n",
+    "   RuntimeException \n",
+    "\n",
+    "  boom from a migration\n",
+    "\n",
+    "  at database/migrations/step10/c4_three_error_in_2nd/2026_02_01_000042_second_throws_orders_table.php:15\n",
+    "     11▕     {\n",
+    "     12▕         Schema::table('orders', function (Blueprint $table) {\n",
+    "     13▕             $table->integer('qty2')->nullable();\n",
+    "     14▕         });\n",
+    "  ➜  15▕         throw new RuntimeException('boom from a migration');\n",
+    "     16▕     }\n",
+    "     17▕ };\n",
+    "     18▕\n",
+    "\n",
+    "      \u{1b}[2m+27 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  28  artisan:16\n",
+    "      Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\n",
+    "\n",
+);
+
+const C4_L13_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_02_01_000041_first_alter_orders_table .. \n",
+    " ⇂ alter table `orders` add `qty` int null \n",
+    " 2026_02_01_000042_second_throws_orders_table .. \n",
+    "\n",
+    "   RuntimeException \n",
+    "\n",
+    "  boom from a migration\n",
+    "\n",
+    "  at database/migrations/step10/c4_three_error_in_2nd/2026_02_01_000042_second_throws_orders_table.php:15\n",
+    "     11▕     {\n",
+    "     12▕         Schema::table('orders', function (Blueprint $table) {\n",
+    "     13▕             $table->integer('qty2')->nullable();\n",
+    "     14▕         });\n",
+    "  ➜  15▕         throw new RuntimeException('boom from a migration');\n",
+    "     16▕     }\n",
+    "     17▕ };\n",
+    "     18▕\n",
+    "\n",
+    "      \u{1b}[2m+27 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  28  artisan:16\n",
+    "      Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\n",
+    "\n",
+);
+
+const C4_L12_SYMFONY: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000041_first_alter_orders_table .................................  \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "  2026_02_01_000042_second_throws_orders_table ...............................  \n",
+    "\n",
+    "In 2026_02_01_000042_second_throws_orders_table.php line 15:\n",
+    "                         \n",
+    "  boom from a migration  \n",
+    "                         \n",
+    "\n",
+);
+
+const C4_L13_SYMFONY: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000041_first_alter_orders_table .................................  \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "  2026_02_01_000042_second_throws_orders_table ...............................  \n",
+    "\n",
+    "In 2026_02_01_000042_second_throws_orders_table.php line 15:\n",
+    "                         \n",
+    "  boom from a migration  \n",
+    "                         \n",
+    "\n",
+);
+
+const C5A_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000051_guard_has_table_orders_table .............................  \n",
+    "  ⇂ select exists (select 1 from information_schema.tables where table_schema = schema() and table_name = 'orders' and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')) as `exists`  \n",
+    "\n",
+);
+
+const C5A_L12_PTY: &str = concat!(
+    "\r\n",
+    "  \u{1b}[37;44m INFO \u{1b}[39;49m Running migrations.  \r\n",
+    "\r\n",
+    "  2026_02_01_000051_guard_has_table_orders_table \u{1b}[90m.............................\u{1b}[39m  \r\n",
+    "  \u{1b}[90m⇂ select exists (select 1 from information_schema.tables where table_schema = schema() and table_name = 'orders' and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')) as `exists`\u{1b}[39m  \r\n",
+    "\r\n",
+);
+
+const C5A_L13_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_02_01_000051_guard_has_table_orders_table .. \n",
+    " ⇂ select exists (select 1 from information_schema.tables where table_schema = schema() and table_name = 'orders' and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')) as `exists` \n",
+    "\n",
+);
+
+const C5B_L13_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_02_01_000052_guard_has_column_orders_table .. \n",
+    " ⇂ select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as `collation`, is_nullable as `nullable`, column_default as `default`, column_comment as `comment`, generation_expression as `expression`, extra as `extra` from information_schema.columns where table_schema = schema() and table_name = 'orders' order by ordinal_position asc \n",
+    "\n",
+);
+
+const C5B_L12_COLS40: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000052_guard_has_column_orders_table   \n",
+    "  ⇂ select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as `collation`, is_nullable as `nullable`, column_default as `default`, column_comment as `comment`, generation_expression as `expression`, extra as `extra` from information_schema.columns where table_schema = schema() and table_name = 'orders' order by ordinal_position asc  \n",
+    "\n",
+);
+
+const C5C_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000053_guard_exists_orders_table ................................  \n",
+    "  ⇂ select exists(select * from `orders`) as `exists`  \n",
+    "\n",
+);
+
+const C5D_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000054_guard_select_orders_table ................................  \n",
+    "  ⇂ select id from orders where amount = 5  \n",
+    "\n",
+);
+
+const C5E_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000055_guard_not_has_column_orders_table ........................  \n",
+    "  ⇂ select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as `collation`, is_nullable as `nullable`, column_default as `default`, column_comment as `comment`, generation_expression as `expression`, extra as `extra` from information_schema.columns where table_schema = schema() and table_name = 'orders' order by ordinal_position asc  \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "\n",
+);
+
+const C5F_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000056_guard_not_has_table_orders_table .........................  \n",
+    "  ⇂ select exists (select 1 from information_schema.tables where table_schema = schema() and table_name = 'orders' and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')) as `exists`  \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "\n",
+);
+
+const C6_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000006_unguarded_read_orders_table ..............................  \n",
+    "  ⇂ select count(*) as aggregate from `orders`  \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "\n",
+);
+
+const C6_L13_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000006_unguarded_read_orders_table ..............................  \n",
+    "  ⇂ select count(*) as `aggregate` from `orders`  \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "\n",
+);
+
+const C8_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000008_other_reads_orders_table .................................  \n",
+    "  ⇂ select id from orders where amount = 5  \n",
+    "  ⇂ SELECT id FROM orders LIMIT 1  \n",
+    "  ⇂ select count(*) from orders  \n",
+    "  ⇂ select * from `orders` where `amount` = 5 limit 1  \n",
+    "  ⇂ show index from orders  \n",
+    "  ⇂ select index_name as `name`, group_concat(column_name order by seq_in_index) as `columns`, index_type as `type`, not non_unique as `unique` from information_schema.statistics where table_schema = schema() and table_name = 'orders' group by index_name, index_type, non_unique  \n",
+    "  ⇂ select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as `collation`, is_nullable as `nullable`, column_default as `default`, column_comment as `comment`, generation_expression as `expression`, extra as `extra` from information_schema.columns where table_schema = schema() and table_name = 'orders' order by ordinal_position asc  \n",
+    "  ⇂ select table_name as `name`, table_schema as `schema`, (data_length + index_length) as `size`, table_comment as `comment`, engine as `engine`, table_collation as `collation` from information_schema.tables where table_type in ('BASE TABLE', 'SYSTEM VERSIONED') and table_schema not in ('information_schema', 'mysql', 'ndbinfo', 'performance_schema', 'sys') order by table_schema, table_name  \n",
+    "  ⇂ select 1  \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "\n",
+);
+
+const C7_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000007_add_a_very_long_descriptive_name_for_the_note_column_to_the_orders_table   \n",
+    "  ⇂ alter table `orders` add `a_rather_long_column_name_used_for_wrapping_tests` varchar(100) null  \n",
+    "  ⇂ alter table `orders` add index `orders_amount_email_long_index_name_for_wrapping`(`amount`, `email`)  \n",
+    "\n",
+);
+
+const C7_L12_COLS40_PTY: &str = concat!(
+    "\r\n",
+    "  \u{1b}[37;44m INFO \u{1b}[39;49m Running migrations.  \r\n",
+    "\r\n",
+    "  2026_02_01_000007_add_a_very_long_descriptive_name_for_the_note_column_to_the_orders_table   \r\n",
+    "  \u{1b}[90m⇂ alter table `orders` add `a_rather_long_column_name_used_for_wrapping_tests` varchar(100) null\u{1b}[39m  \r\n",
+    "  \u{1b}[90m⇂ alter table `orders` add index `orders_amount_email_long_index_name_for_wrapping`(`amount`, `email`)\u{1b}[39m  \r\n",
+    "\r\n",
+);
+
+const C9_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  AddQtyToOrdersTable ........................................................  \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "\n",
+);
+
+const C9_L12_COLS40: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  AddQtyToOrdersTable ................  \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "\n",
+);
+
+const C9_L12_COLS60_PTY: &str = concat!(
+    "\r\n",
+    "  \u{1b}[37;44m INFO \u{1b}[39;49m Running migrations.  \r\n",
+    "\r\n",
+    "  AddQtyToOrdersTable \u{1b}[90m....................................\u{1b}[39m  \r\n",
+    "  \u{1b}[90m⇂ alter table `orders` add `qty` int null\u{1b}[39m  \r\n",
+    "\r\n",
+);
+
+const C10_L12: &str = concat!("\n", "   INFO  Nothing to migrate.  \n", "\n",);
+
+const C10_L13_SHORT: &str = concat!("\n", " INFO Nothing to migrate. \n", "\n",);
+
+const DERIVED_L10_C5A: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000051_guard_has_table_orders_table .............................  \n",
+    "  ⇂ select table_name as `name`, (data_length + index_length) as `size`, table_comment as `comment`, engine as `engine`, table_collation as `collation` from information_schema.tables where table_schema = 'kilit_laravel_10' and table_type in ('BASE TABLE', 'SYSTEM VERSIONED') order by table_name  \n",
+    "\n",
+);
+
+const DERIVED_L10_C5B: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000052_guard_has_column_orders_table ............................  \n",
+    "  ⇂ select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as `collation`, is_nullable as `nullable`, column_default as `default`, column_comment as `comment`, extra as `extra` from information_schema.columns where table_schema = 'kilit_laravel_10' and table_name = 'orders' order by ordinal_position asc  \n",
+    "\n",
+);
+
+const DERIVED_L11_C5A: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000051_guard_has_table_orders_table .............................  \n",
+    "  ⇂ select table_name as `name`, (data_length + index_length) as `size`, table_comment as `comment`, engine as `engine`, table_collation as `collation` from information_schema.tables where table_schema = 'kilit_laravel_11' and table_type in ('BASE TABLE', 'SYSTEM VERSIONED') order by table_name  \n",
+    "\n",
+);
+
+const DERIVED_L11_C5B: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000052_guard_has_column_orders_table ............................  \n",
+    "  ⇂ select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as `collation`, is_nullable as `nullable`, column_default as `default`, column_comment as `comment`, generation_expression as `expression`, extra as `extra` from information_schema.columns where table_schema = 'kilit_laravel_11' and table_name = 'orders' order by ordinal_position asc  \n",
+    "\n",
+);
+
+use kilit_core::{LaravelMigration, PRETEND_READ_NOTE, Pretend};
+
+const THROW_NAME: &str = "2026_02_01_000001_throw_after_alter_orders_table";
+const PHP_ERROR_NAME: &str = "2026_02_01_000002_php_error_in_orders_table";
+const SYNTAX_ERROR_NAME: &str = "2026_02_01_000003_syntax_error_in_orders_table";
+const SYNTAX_ERROR_2ND_NAME: &str = "2026_02_01_000032_syntax_error_in_orders_table";
+const FIRST_NAME: &str = "2026_02_01_000041_first_alter_orders_table";
+const SECOND_NAME: &str = "2026_02_01_000042_second_throws_orders_table";
+const ADD_QTY: &str = "alter table `orders` add `qty` int null";
+const BEFORE_ANY_MIGRATION: &str =
+    "Laravel stopped with an error before it printed any migration; no statement was seen";
+
+fn stopped_in(name: &str) -> String {
+    format!(
+        "Laravel stopped with an error in {name}; its statements and the migrations after it \
+         were not seen"
+    )
+}
+
+fn stopped_after(name: &str) -> String {
+    format!("Laravel stopped with an error after {name}; the migrations after it were not seen")
+}
+
+fn stopped_in_before_any_migration(name: &str) -> String {
+    format!(
+        "Laravel stopped with an error in {name} before it printed any migration; no statement \
+         was seen"
+    )
+}
+
+/// The output as Laravel output: an output that is only an error screen is
+/// still Laravel's, not SQL.
+fn pretend_of(output: &str) -> Pretend {
+    read_pretend(output).expect("Laravel's output")
+}
+
+fn migration_names(pretend: &Pretend) -> Vec<&str> {
+    pretend
+        .migrations
+        .iter()
+        .map(|migration| migration.name.as_str())
+        .collect()
+}
+
+fn sql_of(migration: &LaravelMigration) -> Vec<&str> {
+    migration
+        .statements
+        .iter()
+        .map(|statement| statement.sql.as_str())
+        .collect()
+}
+
+/// `output` without the lines that start with `prefix`.
+fn without_lines_starting_with(output: &str, prefix: &str) -> String {
+    output
+        .split_inclusive('\n')
+        .filter(|line| !line.trim_start().starts_with(prefix))
+        .collect()
+}
+
+/// Every output of a migration that throws, with what each form must give.
+/// Laravel prints a migration's name before it runs it and its statements
+/// after, so the migration that throws is the last name and has none.
+#[test]
+fn a_migration_that_throws_is_the_one_laravel_stopped_in_in_every_form_of_the_screen() {
+    // Schema::table('orders', ...) with $table->integer('qty')->nullable(),
+    // then throw new RuntimeException('boom from a migration').
+    for (form, output) in [
+        ("Laravel 12, Collision, piped", C1_THROW_L12),
+        ("Laravel 12, Collision, --ansi", C1_THROW_L12_ANSI),
+        ("Laravel 12, Collision, terminal", C1_THROW_L12_PTY),
+        ("Laravel 13, Collision, long form", C1_THROW_L13_LONG),
+        ("Laravel 13, Collision, short form", C1_THROW_L13_SHORT),
+        (
+            "Laravel 13, Collision, short form, terminal",
+            C1_THROW_L13_SHORT_PTY,
+        ),
+        ("Laravel 12, Symfony", C1_THROW_L12_SYMFONY),
+        ("Laravel 13, Symfony, --no-ansi", C1_THROW_L13_SYMFONY),
+    ] {
+        let pretend = pretend_of(output);
+        assert!(
+            pretend.migrations.is_empty(),
+            "{form}: {:?}",
+            pretend.migrations
+        );
+        assert!(
+            pretend.unreadable.is_empty(),
+            "{form}: {:?}",
+            pretend.unreadable
+        );
+        let error = pretend.error.unwrap_or_else(|| panic!("{form}: no error"));
+        assert_eq!(error.migration.as_deref(), Some(THROW_NAME), "{form}");
+        assert_eq!(error.message, stopped_in(THROW_NAME), "{form}");
+        // The screen's first line: the exception class, or Symfony's "In".
+        assert_eq!(error.line, 6, "{form}");
+    }
+}
+
+#[test]
+fn an_error_thrown_in_a_vendor_file_is_still_attributed_to_the_migration_from_its_name_line() {
+    // $table->notAMethod() on a Blueprint: BadMethodCallException from
+    // vendor/.../Macroable.php. Symfony's screen names only "Macroable.php".
+    for (form, output) in [
+        ("Laravel 12, Collision", C2_L12),
+        ("Laravel 13, Collision, short form", C2_L13_SHORT),
+        ("Laravel 12, Symfony", C2_L12_SYMFONY),
+        ("Laravel 13, Symfony", C2_L13_SYMFONY),
+    ] {
+        let pretend = pretend_of(output);
+        assert!(pretend.migrations.is_empty(), "{form}");
+        assert!(
+            pretend.unreadable.is_empty(),
+            "{form}: {:?}",
+            pretend.unreadable
+        );
+        let error = pretend.error.unwrap_or_else(|| panic!("{form}: no error"));
+        assert_eq!(error.migration.as_deref(), Some(PHP_ERROR_NAME), "{form}");
+        assert_eq!(error.message, stopped_in(PHP_ERROR_NAME), "{form}");
+        assert_eq!(error.line, 6, "{form}");
+    }
+}
+
+#[test]
+fn a_parse_error_is_laravel_output_and_names_the_file_before_any_migration() {
+    // A missing semicolon in the only migration: ParseError, and Laravel
+    // prints no INFO line and no migration name.
+    for (form, output, name, line) in [
+        ("Laravel 12, Collision", C3_L12, SYNTAX_ERROR_NAME, 2),
+        (
+            "Laravel 13, Collision, short form",
+            C3_L13_SHORT,
+            SYNTAX_ERROR_NAME,
+            2,
+        ),
+        ("Laravel 12, Symfony", C3_L12_SYMFONY, SYNTAX_ERROR_NAME, 2),
+        // The syntax error is in the 2nd of 3 migrations; Laravel still
+        // prints nothing before the screen.
+        ("2nd of 3, Collision", C3B_L12, SYNTAX_ERROR_2ND_NAME, 2),
+    ] {
+        let pretend = pretend_of(output);
+        assert!(pretend.migrations.is_empty(), "{form}");
+        assert!(
+            pretend.unreadable.is_empty(),
+            "{form}: {:?}",
+            pretend.unreadable
+        );
+        let error = pretend.error.unwrap_or_else(|| panic!("{form}: no error"));
+        assert_eq!(error.migration.as_deref(), Some(name), "{form}");
+        assert_eq!(
+            error.message,
+            stopped_in_before_any_migration(name),
+            "{form}"
+        );
+        assert_eq!(error.line, line, "{form}");
+    }
+}
+
+#[test]
+fn an_error_in_the_second_migration_keeps_the_first_and_names_the_second() {
+    // Three migrations: an ALTER, one that throws, an ALTER. Only the first
+    // is printed. The runs at 40 columns have no dots on a name line, those
+    // at 48 and 50 have one to three.
+    for (form, output) in [
+        ("Laravel 12, Collision, piped", C4_L12),
+        ("Laravel 12, Collision, --ansi", C4_L12_ANSI),
+        (
+            "Laravel 12, Collision, terminal, 60 columns",
+            C4_L12_PTY_COLS60,
+        ),
+        ("Laravel 12, Collision, 40 columns", C4_L12_COLS40),
+        ("Laravel 12, Collision, 48 columns", C4_L12_COLS48),
+        ("Laravel 12, Collision, 50 columns", C4_L12_COLS50),
+        ("Laravel 13, Collision, short form", C4_L13_SHORT),
+        ("Laravel 12, Symfony", C4_L12_SYMFONY),
+        ("Laravel 13, Symfony", C4_L13_SYMFONY),
+    ] {
+        let pretend = pretend_of(output);
+        assert!(
+            pretend.unreadable.is_empty(),
+            "{form}: {:?}",
+            pretend.unreadable
+        );
+        assert_eq!(migration_names(&pretend), [FIRST_NAME], "{form}");
+        assert_eq!(sql_of(&pretend.migrations[0]), [ADD_QTY], "{form}");
+        assert_eq!(pretend.migrations[0].statements[0].line, 5, "{form}");
+        let error = pretend.error.unwrap_or_else(|| panic!("{form}: no error"));
+        assert_eq!(error.migration.as_deref(), Some(SECOND_NAME), "{form}");
+        assert_eq!(error.message, stopped_in(SECOND_NAME), "{form}");
+        assert_eq!(error.line, 8, "{form}");
+    }
+}
+
+#[test]
+fn the_statements_printed_before_the_error_keep_their_answers() {
+    // ADD COLUMN `qty` int null on a table that has no `qty`: INSTANT.
+    for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+        for output in [C4_L12, C4_L12_SYMFONY, C4_L13_SHORT] {
+            assert_eq!(answers(server, ORDERS, output), [INSTANT], "{server}");
+        }
+    }
+}
+
+#[test]
+fn an_error_screen_after_a_migration_that_printed_statements_names_the_migration_before_it() {
+    // Edited output: the 2nd migration's name line is cut from the output
+    // above, so the screen follows the first migration's statement.
+    for (form, output) in [
+        ("Collision", C4_L12),
+        ("Collision, short form", C4_L13_SHORT),
+        ("Symfony", C4_L12_SYMFONY),
+    ] {
+        let output = without_lines_starting_with(output, "2026_02_01_000042");
+        let pretend = pretend_of(&output);
+        assert_eq!(migration_names(&pretend), [FIRST_NAME], "{form}");
+        assert_eq!(sql_of(&pretend.migrations[0]), [ADD_QTY], "{form}");
+        let error = pretend.error.unwrap_or_else(|| panic!("{form}: no error"));
+        assert_eq!(error.migration, None, "{form}");
+        assert_eq!(error.message, stopped_after(FIRST_NAME), "{form}");
+        assert_eq!(error.line, 7, "{form}");
+    }
+}
+
+const UNIX_THROW_FILE: &str = "at database/migrations/step10/c1_throw/2026_02_01_000001_throw_after_alter_orders_table.php:15";
+const WINDOWS_THROW_FILE: &str =
+    "at C:\\app\\database\\migrations\\2026_02_01_000001_throw_after_alter_orders_table.php:15";
+
+#[test]
+fn an_error_screen_with_no_migration_name_names_the_file_only_if_it_is_a_migration() {
+    // Edited outputs: the migration's name line is cut, so Laravel appears to
+    // have printed no migration before the screen.
+    for (form, output) in [
+        (
+            "Collision",
+            without_lines_starting_with(C1_THROW_L12, "2026_02_01_000001"),
+        ),
+        (
+            "Symfony",
+            without_lines_starting_with(C1_THROW_L12_SYMFONY, "2026_02_01_000001"),
+        ),
+        // Windows: the file in the screen has backslashes.
+        (
+            "Collision, Windows path",
+            without_lines_starting_with(C1_THROW_L12, "2026_02_01_000001")
+                .replace(UNIX_THROW_FILE, WINDOWS_THROW_FILE),
+        ),
+    ] {
+        let pretend = pretend_of(&output);
+        assert!(pretend.migrations.is_empty(), "{form}");
+        let error = pretend.error.unwrap_or_else(|| panic!("{form}: no error"));
+        assert_eq!(error.migration.as_deref(), Some(THROW_NAME), "{form}");
+        assert_eq!(
+            error.message,
+            stopped_in_before_any_migration(THROW_NAME),
+            "{form}"
+        );
+    }
+
+    // The same with the vendor file of a BadMethodCallException: Macroable
+    // is no migration.
+    for (form, output) in [
+        (
+            "Collision",
+            without_lines_starting_with(C2_L12, "2026_02_01_000002"),
+        ),
+        (
+            "Symfony",
+            without_lines_starting_with(C2_L12_SYMFONY, "2026_02_01_000002"),
+        ),
+    ] {
+        let pretend = pretend_of(&output);
+        assert!(pretend.migrations.is_empty(), "{form}");
+        let error = pretend.error.unwrap_or_else(|| panic!("{form}: no error"));
+        assert_eq!(error.migration, None, "{form}");
+        assert_eq!(error.message, BEFORE_ANY_MIGRATION, "{form}");
+    }
+}
+
+#[test]
+fn nothing_on_the_error_screen_becomes_a_migration_a_statement_or_an_unreadable_line() {
+    // RuntimeException, "11▕", "➜  15▕ throw new ...", "+27 vendor frames",
+    // "Illuminate\Foundation\Application::handleCommand(...)", "artisan:16",
+    // "In ... line 15:" and the message are all on the screen.
+    for output in [
+        C1_THROW_L12,
+        C1_THROW_L12_ANSI,
+        C1_THROW_L12_PTY,
+        C1_THROW_L13_LONG,
+        C1_THROW_L13_SHORT,
+        C1_THROW_L13_SHORT_PTY,
+        C1_THROW_L12_SYMFONY,
+        C1_THROW_L13_SYMFONY,
+        C2_L12,
+        C2_L13_SHORT,
+        C2_L12_SYMFONY,
+        C2_L13_SYMFONY,
+        C3_L12,
+        C3_L13_SHORT,
+        C3_L12_SYMFONY,
+        C3B_L12,
+        C4_L12,
+        C4_L12_ANSI,
+        C4_L12_PTY_COLS60,
+        C4_L12_COLS40,
+        C4_L13_SHORT,
+        C4_L12_SYMFONY,
+        C4_L13_SYMFONY,
+    ] {
+        let pretend = pretend_of(output);
+        assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
+        for migration in &pretend.migrations {
+            assert!(
+                migration.name.starts_with("2026_02_01_00004"),
+                "{}",
+                migration.name
+            );
+            assert_eq!(sql_of(migration), [ADD_QTY]);
+        }
+        assert!(pretend.error.is_some());
+    }
+}
+
+#[test]
+fn a_migration_that_read_before_the_error_keeps_its_first_read() {
+    // Edited output: the first migration of the run above reads the
+    // database before its ALTER.
+    let output = C4_L12.replacen(
+        "  \u{21c2} alter table `orders` add `qty` int null  \n",
+        "  \u{21c2} select count(*) as aggregate from `orders`  \n  \u{21c2} alter table `orders` add `qty` int null  \n",
+        1,
+    );
+    let pretend = pretend_of(&output);
+    assert_eq!(migration_names(&pretend), [FIRST_NAME]);
+    assert_eq!(pretend.migrations[0].first_read, Some(0));
+    assert_eq!(pretend.migrations[0].statements.len(), 2);
+    assert_eq!(
+        pretend.error.unwrap().migration.as_deref(),
+        Some(SECOND_NAME)
+    );
+}
+
+// Laravel prints a name line with dots, or, where the terminal is too narrow
+// for them (a long name, a small COLUMNS), without.
+
+#[test]
+fn a_name_line_without_dots_is_a_migration_if_it_has_the_migration_file_pattern() {
+    // A 90-character name does not fit 80 columns: no dots at 80, 60 and 40.
+    let name = "2026_02_01_000007_add_a_very_long_descriptive_name_for_the_note_column_to_the_orders_table";
+    for (form, output) in [
+        ("Laravel 12, 80 columns", C7_L12),
+        ("Laravel 12, 40 columns, terminal", C7_L12_COLS40_PTY),
+    ] {
+        let pretend = pretend_of(output);
+        assert!(
+            pretend.unreadable.is_empty(),
+            "{form}: {:?}",
+            pretend.unreadable
+        );
+        assert_eq!(migration_names(&pretend), [name], "{form}");
+        assert_eq!(pretend.migrations[0].statements.len(), 2, "{form}");
+        assert_eq!(pretend.migrations[0].first_read, None, "{form}");
+        assert!(pretend.error.is_none(), "{form}");
+    }
+}
+
+#[test]
+fn a_line_without_dots_that_is_not_a_migration_file_name_is_unreadable() {
+    for text in [
+        "RuntimeException",
+        "AddQtyToOrdersTable",
+        "add_qty_to_orders_table",
+        // year, month, day or time with the wrong number of digits
+        "26_02_01_000007_add_qty",
+        "2026_2_01_000007_add_qty",
+        "2026_02_1_000007_add_qty",
+        "2026_02_01_00007_add_qty",
+        "2026_02_01_0000007_add_qty",
+        // letters where digits belong
+        "2026_02_01_00000a_add_qty",
+    ] {
+        let output = format!("\n   INFO  Running migrations.  \n\n  {text}  \n\n");
+        let pretend = pretend_of(&output);
+        assert!(
+            pretend.migrations.is_empty(),
+            "{text}: {:?}",
+            pretend.migrations
+        );
+        assert!(pretend.error.is_none(), "{text}");
+        let unreadable: Vec<_> = pretend
+            .unreadable
+            .iter()
+            .map(|line| (line.line, line.text.as_str()))
+            .collect();
+        assert_eq!(unreadable, [(4, text)], "{text}");
+    }
+}
+
+#[test]
+fn a_migration_with_a_class_name_is_read_with_and_without_dots() {
+    // class AddQtyToOrdersTable extends Migration, in the file
+    // 2026_02_01_000009_add_qty_to_orders_table.php: Laravel prints the class.
+    for (form, output) in [
+        ("80 columns", C9_L12),
+        ("40 columns", C9_L12_COLS40),
+        ("60 columns, terminal", C9_L12_COLS60_PTY),
+    ] {
+        let pretend = pretend_of(output);
+        assert!(
+            pretend.unreadable.is_empty(),
+            "{form}: {:?}",
+            pretend.unreadable
+        );
+        assert_eq!(migration_names(&pretend), ["AddQtyToOrdersTable"], "{form}");
+        assert_eq!(sql_of(&pretend.migrations[0]), [ADD_QTY], "{form}");
+        assert!(pretend.error.is_none(), "{form}");
+    }
+}
+
+#[test]
+fn nothing_to_migrate_is_laravel_output_with_no_migration_error_or_unreadable_line() {
+    for (form, output) in [("long form", C10_L12), ("short form", C10_L13_SHORT)] {
+        let pretend = pretend_of(output);
+        assert!(pretend.migrations.is_empty(), "{form}");
+        assert!(pretend.unreadable.is_empty(), "{form}");
+        assert!(pretend.error.is_none(), "{form}");
+    }
+}
+
+#[test]
+fn only_the_arrow_and_its_mangled_forms_mark_a_statement() {
+    // Laravel prints a leading arrow; a Windows code page shows its three
+    // UTF-8 bytes as other characters; a console that cannot show it prints
+    // one or three question marks.
+    for mark in [
+        "\u{21c2}",
+        "?",
+        "???",
+        "Γçé",
+        "Ôçé",
+        "РЄѓ",
+        "Γחג",
+        "ﻗ┼∙",
+        "тЗВ",
+        "â‡‚",
+        "в‡‚",
+        "β‡‚",
+        "ג‡‚",
+        "ā‡‚",
+    ] {
+        let output = format!(
+            "\n   INFO  Running migrations.  \n\n  2026_02_01_000001_add_qty_to_orders_table ....  \n  {mark} {ADD_QTY}  \n\n"
+        );
+        let pretend = pretend_of(&output);
+        assert!(
+            pretend.unreadable.is_empty(),
+            "{mark}: {:?}",
+            pretend.unreadable
+        );
+        assert_eq!(pretend.migrations.len(), 1, "{mark}");
+        assert_eq!(sql_of(&pretend.migrations[0]), [ADD_QTY], "{mark}");
+    }
+}
+
+#[test]
+fn other_leading_words_are_no_statement_mark() {
+    // The error screen's pointer, an arrow of another kind, an accented
+    // word, a path and a class name.
+    for word in [
+        "\u{279c}",
+        "\u{2192}",
+        "ünlü",
+        "->",
+        "RuntimeException",
+        "Illuminate\\Foundation\\Application::handleCommand",
+        "??",
+        "????",
+    ] {
+        let output = format!(
+            "\n   INFO  Running migrations.  \n\n  2026_02_01_000001_add_qty_to_orders_table ....  \n  {word} {ADD_QTY}  \n\n"
+        );
+        let pretend = pretend_of(&output);
+        assert_eq!(pretend.migrations.len(), 1, "{word}");
+        assert!(pretend.migrations[0].statements.is_empty(), "{word}");
+        let unreadable: Vec<_> = pretend.unreadable.iter().map(|line| line.line).collect();
+        assert_eq!(unreadable, [5], "{word}");
+    }
+}
+
+// Reads. Under --pretend every read returns nothing, so what a migration
+// does after a read is not what it would do on the database.
+
+#[test]
+fn a_migration_that_asks_the_database_first_has_its_first_read_at_statement_0() {
+    // Schema::hasTable('orders'), Schema::hasColumn('orders', 'note'),
+    // DB::table('orders')->exists() and DB::select('select id from orders
+    // ...') each guard an ALTER: under --pretend the read returns nothing, so
+    // Laravel prints the read and not the ALTER. `! Schema::hasColumn()` and
+    // `! Schema::hasTable()` guard it the other way, so the ALTER is printed
+    // after the read, and DB::table('orders')->count() is a read with no guard.
+    for (what, output, statements) in [
+        ("hasTable, Laravel 12", C5A_L12, 1),
+        ("hasTable, Laravel 12, terminal", C5A_L12_PTY, 1),
+        ("hasTable, Laravel 13, short form", C5A_L13_SHORT, 1),
+        ("hasColumn, Laravel 13, short form", C5B_L13_SHORT, 1),
+        ("hasColumn, Laravel 12, 40 columns", C5B_L12_COLS40, 1),
+        ("exists(), Laravel 12", C5C_L12, 1),
+        ("DB::select(), Laravel 12", C5D_L12, 1),
+        ("!hasColumn then ALTER, Laravel 12", C5E_L12, 2),
+        ("!hasTable then ALTER, Laravel 12", C5F_L12, 2),
+        ("count() then ALTER, Laravel 12", C6_L12, 2),
+        ("count() then ALTER, Laravel 13", C6_L13_LONG, 2),
+    ] {
+        let pretend = pretend_of(output);
+        assert!(
+            pretend.unreadable.is_empty(),
+            "{what}: {:?}",
+            pretend.unreadable
+        );
+        assert!(pretend.error.is_none(), "{what}");
+        assert_eq!(pretend.migrations.len(), 1, "{what}");
+        assert_eq!(pretend.migrations[0].statements.len(), statements, "{what}");
+        assert_eq!(pretend.migrations[0].first_read, Some(0), "{what}");
+    }
+}
+
+#[test]
+fn laravel_10_and_11_reads_of_has_table_and_has_column_are_found_too() {
+    // Derived from the framework source, not run: Laravel 10 and 11 cannot be
+    // installed here (see the note above the constants).
+    for (what, output) in [
+        ("Laravel 10 hasTable", DERIVED_L10_C5A),
+        ("Laravel 10 hasColumn", DERIVED_L10_C5B),
+        ("Laravel 11 hasTable", DERIVED_L11_C5A),
+        ("Laravel 11 hasColumn", DERIVED_L11_C5B),
+    ] {
+        let pretend = pretend_of(output);
+        assert!(
+            pretend.unreadable.is_empty(),
+            "{what}: {:?}",
+            pretend.unreadable
+        );
+        assert_eq!(pretend.migrations.len(), 1, "{what}");
+        assert_eq!(pretend.migrations[0].statements.len(), 1, "{what}");
+        assert_eq!(pretend.migrations[0].first_read, Some(0), "{what}");
+    }
+}
+
+#[test]
+fn many_reads_in_one_migration_give_one_first_read_and_the_alter_comes_last() {
+    // select with a binding, selectOne, scalar, first, `show index`,
+    // hasIndex, getColumnListing, getTables and DB::statement('select 1'),
+    // then the ALTER.
+    let pretend = pretend_of(C8_L12);
+    assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
+    assert_eq!(pretend.migrations.len(), 1);
+    let migration = &pretend.migrations[0];
+    assert_eq!(migration.statements.len(), 10);
+    assert_eq!(migration.first_read, Some(0));
+    assert_eq!(migration.statements[9].sql, ADD_QTY);
+}
+
+#[test]
+fn the_first_read_is_the_first_statement_that_asks_not_the_first_statement() {
+    // Edited output: an ALTER, a read, an ALTER; then a migration with no
+    // read; then one whose second statement reads.
+    let output = concat!(
+        "\n   INFO  Running migrations.  \n\n",
+        "  2026_02_01_000001_a ....  \n",
+        "  \u{21c2} alter table `orders` add `qty` int null  \n",
+        "  \u{21c2} select count(*) as aggregate from `orders`  \n",
+        "  \u{21c2} alter table `orders` add `qty2` int null  \n",
+        "  2026_02_01_000002_b ....  \n",
+        "  \u{21c2} alter table `orders` add `qty3` int null  \n",
+        "  2026_02_01_000003_c ....  \n",
+        "  \u{21c2} alter table `orders` add `qty4` int null  \n",
+        "  \u{21c2} select 1  \n",
+        "  \u{21c2} select 2  \n",
+    );
+    let pretend = pretend_of(output);
+    let first_reads: Vec<_> = pretend
+        .migrations
+        .iter()
+        .map(|migration| migration.first_read)
+        .collect();
+    assert_eq!(first_reads, [Some(1), None, Some(1)]);
+}
+
+#[test]
+fn every_statement_that_starts_a_query_counts_as_a_read_in_any_letter_case() {
+    for read in [
+        "select 1",
+        "SELECT 1",
+        "Select id from orders",
+        "(select 1)",
+        "show index from orders",
+        "SHOW TABLES",
+        "describe orders",
+        "desc orders",
+        "explain select 1",
+        "with x as (select 1) select * from x",
+        "table orders",
+        "values row(1, 2)",
+    ] {
+        let output = format!(
+            "\n   INFO  Running migrations.  \n\n  2026_02_01_000001_a ....  \n  \u{21c2} {ADD_QTY}  \n  \u{21c2} {read}  \n"
+        );
+        let pretend = pretend_of(&output);
+        assert!(
+            pretend.unreadable.is_empty(),
+            "{read}: {:?}",
+            pretend.unreadable
+        );
+        assert_eq!(pretend.migrations[0].statements.len(), 2, "{read}");
+        assert_eq!(pretend.migrations[0].first_read, Some(1), "{read}");
+    }
+}
+
+#[test]
+fn statements_that_only_contain_a_read_word_are_no_read() {
+    for write in [
+        ADD_QTY,
+        "alter table `orders` add `selection` int null",
+        "alter table `orders` add `show_all` tinyint(1) null",
+        "create table `selects` (`id` int not null)",
+        "insert into `orders` (`id`) values (1)",
+        "update `orders` set `qty` = 1",
+        "delete from `orders`",
+        "drop table `orders`",
+        "rename table `orders` to `old_orders`",
+        "set foreign_key_checks = 0",
+    ] {
+        let output = format!(
+            "\n   INFO  Running migrations.  \n\n  2026_02_01_000001_a ....  \n  \u{21c2} {write}  \n"
+        );
+        let pretend = pretend_of(&output);
+        assert_eq!(pretend.migrations[0].first_read, None, "{write}");
+    }
+    for output in [C1_THROW_L12, C4_L12, C7_L12, C9_L12, C10_L12] {
+        for migration in &pretend_of(output).migrations {
+            assert_eq!(migration.first_read, None, "{}", migration.name);
+        }
+    }
+}
+
+#[test]
+fn a_read_changes_the_answer_of_no_statement() {
+    // The ALTER after the read gets the answer it gets without the read.
+    let alone = "\n   INFO  Running migrations.  \n\n  2026_02_01_000006_unguarded_read_orders_table ....  \n  \u{21c2} alter table `orders` add `qty` int null  \n";
+    for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+        let expected = answers(server, ORDERS, alone);
+        assert_eq!(expected, [INSTANT], "{server}");
+        for output in [C5E_L12, C5F_L12, C6_L12, C6_L13_LONG] {
+            let all = answers(server, ORDERS, output);
+            assert_eq!(all.len(), 2, "{server}");
+            assert_eq!(all[1], expected[0], "{server}");
+        }
+        let all = answers(server, ORDERS, C8_L12);
+        assert_eq!(all.len(), 10, "{server}");
+        assert_eq!(all[9], expected[0], "{server}");
+    }
+}
+
+#[test]
+fn the_read_note_says_the_read_returns_nothing_under_pretend() {
+    assert_eq!(
+        PRETEND_READ_NOTE,
+        "this migration reads the database: under --pretend every read returns nothing, so \
+         statements that depend on what it reads may be missing here, or may appear although \
+         they would not run"
+    );
+}
+
+#[test]
+fn the_oem_code_page_forms_of_the_mark_read_the_statement() {
+    // The mark's bytes E2 87 82 as Windows code pages 720, 737 and 775 show
+    // them.
+    for mark in ["ظçé", "έΘΓ", "Ōćé"] {
+        let output = format!(
+            "\n   INFO  Running migrations.  \n\n  2026_02_01_000001_add_qty_to_orders_table ....  \n  {mark} {ADD_QTY}  \n\n"
+        );
+        let pretend = pretend_of(&output);
+        assert!(
+            pretend.unreadable.is_empty(),
+            "{mark}: {:?}",
+            pretend.unreadable
+        );
+        assert!(pretend.error.is_none(), "{mark}");
+        assert_eq!(pretend.migrations.len(), 1, "{mark}");
+        assert_eq!(sql_of(&pretend.migrations[0]), [ADD_QTY], "{mark}");
+    }
+}
+
+#[test]
+fn sql_with_lines_that_look_like_an_error_screen_is_not_laravel_output() {
+    // The "file" of the screen must end in .php. A comment with a bare word
+    // between blank lines and a line "at 10:30", or "In plan line 3:", is no
+    // error screen.
+    for sql in [
+        "/*\n\nRollout\n\nat 10:30\n*/\nALTER TABLE orders DROP COLUMN note;\n",
+        "/*\n\nnotes\n\nat 20261106:1\n*/\nALTER TABLE orders DROP COLUMN note;\n",
+        "/*\n\nRollout\n\nIn plan line 3:\n\n*/\nALTER TABLE orders DROP COLUMN note;\n",
+    ] {
+        assert!(read_pretend(sql).is_none(), "{sql}");
+    }
+}

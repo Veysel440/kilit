@@ -1392,3 +1392,567 @@ fn old_alter_table_set_globally_is_unknown_and_only_strict_exits_with_1() {
     assert_eq!(json["exit_code"], 1);
     assert_eq!(status, Some(1));
 }
+
+// ---------------------------------------------------------------------------
+// Laravel's error screen and migrations that read the database.
+//
+// The inputs are `php artisan migrate --pretend` runs of hand-written
+// migrations on Laravel 12.71.0 and 13.40.0 (the short form is what 13.40.0
+// prints where it detects an automated environment), with Collision (the
+// default in a new application) and without it (Symfony's error screen),
+// piped and in a terminal (CRLF line ends and colors, `_PTY`).
+// ---------------------------------------------------------------------------
+
+const C1_THROW_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000001_throw_after_alter_orders_table ...........................  \n",
+    "\n",
+    "   RuntimeException \n",
+    "\n",
+    "  boom from a migration\n",
+    "\n",
+    "  at database/migrations/step10/c1_throw/2026_02_01_000001_throw_after_alter_orders_table.php:15\n",
+    "     11▕     {\n",
+    "     12▕         Schema::table('orders', function (Blueprint $table) {\n",
+    "     13▕             $table->integer('qty')->nullable();\n",
+    "     14▕         });\n",
+    "  ➜  15▕         throw new RuntimeException('boom from a migration');\n",
+    "     16▕     }\n",
+    "     17▕ };\n",
+    "     18▕\n",
+    "\n",
+    "      \u{1b}[2m+27 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  28  artisan:16\n",
+    "      Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\n",
+    "\n",
+);
+
+const C1_THROW_L12_PTY: &str = concat!(
+    "\r\n",
+    "  \u{1b}[37;44m INFO \u{1b}[39;49m Running migrations.  \r\n",
+    "\r\n",
+    "  2026_02_01_000001_throw_after_alter_orders_table \u{1b}[90m...........................\u{1b}[39m  \r\n",
+    "\r\n",
+    "  \u{1b}[41;1m RuntimeException \u{1b}[49;22m\r\n",
+    "\r\n",
+    "\u{1b}[39;1m  boom from a migration\u{1b}[39;22m\r\n",
+    "\r\n",
+    "  at \u{1b}[32mdatabase/migrations/step10/c1_throw/2026_02_01_000001_throw_after_alter_orders_table.php\u{1b}[39m:\u{1b}[32m15\u{1b}[39m\r\n",
+    "    \u{1b}[90m 11\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[39;1m    \u{1b}[0m\u{1b}[35;1m{\u{1b}[0m\r\n",
+    "    \u{1b}[90m 12\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m        \u{1b}[0m\u{1b}[39;1mSchema\u{1b}[0m\u{1b}[35;1m::\u{1b}[0m\u{1b}[39;1mtable\u{1b}[0m\u{1b}[35;1m(\u{1b}[0m\u{1b}[37m'orders'\u{1b}[0m\u{1b}[35;1m, function (\u{1b}[0m\u{1b}[39;1mBlueprint $table\u{1b}[0m\u{1b}[35;1m) {\u{1b}[0m\r\n",
+    "    \u{1b}[90m 13\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m            \u{1b}[0m\u{1b}[39;1m$table\u{1b}[0m\u{1b}[35;1m->\u{1b}[0m\u{1b}[39;1minteger\u{1b}[0m\u{1b}[35;1m(\u{1b}[0m\u{1b}[37m'qty'\u{1b}[0m\u{1b}[35;1m)->\u{1b}[0m\u{1b}[39;1mnullable\u{1b}[0m\u{1b}[35;1m();\u{1b}[0m\r\n",
+    "    \u{1b}[90m 14\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m        });\u{1b}[0m\r\n",
+    "\u{1b}[31;1m  ➜ \u{1b}[0m\u{1b}[3;1m 15\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m        throw new \u{1b}[0m\u{1b}[39;1mRuntimeException\u{1b}[0m\u{1b}[35;1m(\u{1b}[0m\u{1b}[37m'boom from a migration'\u{1b}[0m\u{1b}[35;1m);\u{1b}[0m\r\n",
+    "    \u{1b}[90m 16\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m    }\u{1b}[0m\r\n",
+    "    \u{1b}[90m 17\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\u{1b}[35;1m};\u{1b}[0m\r\n",
+    "    \u{1b}[90m 18\u{1b}[0m\u{1b}[90m▕ \u{1b}[0m\r\n",
+    "\r\n",
+    "      \u{1b}[2m+27 vendor frames \u{1b}[22m\r\n",
+    "\r\n",
+    "  \u{1b}[33m28  \u{1b}[39m\u{1b}[39;1martisan\u{1b}[39;22m:\u{1b}[39;1m16\u{1b}[39;22m\r\n",
+    "  \u{1b}[90m    Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\u{1b}[39m\r\n",
+    "\r\n",
+);
+
+const C1_THROW_L13_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_02_01_000001_throw_after_alter_orders_table .. \n",
+    "\n",
+    "   RuntimeException \n",
+    "\n",
+    "  boom from a migration\n",
+    "\n",
+    "  at database/migrations/step10/c1_throw/2026_02_01_000001_throw_after_alter_orders_table.php:15\n",
+    "     11▕     {\n",
+    "     12▕         Schema::table('orders', function (Blueprint $table) {\n",
+    "     13▕             $table->integer('qty')->nullable();\n",
+    "     14▕         });\n",
+    "  ➜  15▕         throw new RuntimeException('boom from a migration');\n",
+    "     16▕     }\n",
+    "     17▕ };\n",
+    "     18▕\n",
+    "\n",
+    "      \u{1b}[2m+27 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  28  artisan:16\n",
+    "      Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\n",
+    "\n",
+);
+
+const C1_THROW_L12_SYMFONY: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000001_throw_after_alter_orders_table ...........................  \n",
+    "\n",
+    "In 2026_02_01_000001_throw_after_alter_orders_table.php line 15:\n",
+    "                         \n",
+    "  boom from a migration  \n",
+    "                         \n",
+    "\n",
+);
+
+const C3_L12: &str = concat!(
+    "\n",
+    "   ParseError \n",
+    "\n",
+    "  syntax error, unexpected token \"}\"\n",
+    "\n",
+    "  at database/migrations/step10/c3_syntax_error/2026_02_01_000003_syntax_error_in_orders_table.php:13\n",
+    "      9▕     public function up(): void\n",
+    "     10▕     {\n",
+    "     11▕         Schema::table('orders', function (Blueprint $table) {\n",
+    "     12▕             $table->integer('qty')->nullable()\n",
+    "  ➜  13▕         });\n",
+    "     14▕     }\n",
+    "     15▕ };\n",
+    "     16▕\n",
+    "\n",
+    "      \u{1b}[2m+20 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  21  artisan:16\n",
+    "      Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\n",
+    "\n",
+);
+
+const C3_L12_SYMFONY: &str = concat!(
+    "\n",
+    "In 2026_02_01_000003_syntax_error_in_orders_table.php line 13:\n",
+    "                                      \n",
+    "  syntax error, unexpected token \"}\"  \n",
+    "                                      \n",
+    "\n",
+);
+
+const C4_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000041_first_alter_orders_table .................................  \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "  2026_02_01_000042_second_throws_orders_table ...............................  \n",
+    "\n",
+    "   RuntimeException \n",
+    "\n",
+    "  boom from a migration\n",
+    "\n",
+    "  at database/migrations/step10/c4_three_error_in_2nd/2026_02_01_000042_second_throws_orders_table.php:15\n",
+    "     11▕     {\n",
+    "     12▕         Schema::table('orders', function (Blueprint $table) {\n",
+    "     13▕             $table->integer('qty2')->nullable();\n",
+    "     14▕         });\n",
+    "  ➜  15▕         throw new RuntimeException('boom from a migration');\n",
+    "     16▕     }\n",
+    "     17▕ };\n",
+    "     18▕\n",
+    "\n",
+    "      \u{1b}[2m+27 vendor frames \u{1b}[22m\n",
+    "\n",
+    "  28  artisan:16\n",
+    "      Illuminate\\Foundation\\Application::handleCommand(Object(Symfony\\Component\\Console\\Input\\ArgvInput))\n",
+    "\n",
+);
+
+const C4_L12_SYMFONY: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000041_first_alter_orders_table .................................  \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "  2026_02_01_000042_second_throws_orders_table ...............................  \n",
+    "\n",
+    "In 2026_02_01_000042_second_throws_orders_table.php line 15:\n",
+    "                         \n",
+    "  boom from a migration  \n",
+    "                         \n",
+    "\n",
+);
+
+const C6_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000006_unguarded_read_orders_table ..............................  \n",
+    "  ⇂ select count(*) as aggregate from `orders`  \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "\n",
+);
+
+const C8_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_02_01_000008_other_reads_orders_table .................................  \n",
+    "  ⇂ select id from orders where amount = 5  \n",
+    "  ⇂ SELECT id FROM orders LIMIT 1  \n",
+    "  ⇂ select count(*) from orders  \n",
+    "  ⇂ select * from `orders` where `amount` = 5 limit 1  \n",
+    "  ⇂ show index from orders  \n",
+    "  ⇂ select index_name as `name`, group_concat(column_name order by seq_in_index) as `columns`, index_type as `type`, not non_unique as `unique` from information_schema.statistics where table_schema = schema() and table_name = 'orders' group by index_name, index_type, non_unique  \n",
+    "  ⇂ select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as `collation`, is_nullable as `nullable`, column_default as `default`, column_comment as `comment`, generation_expression as `expression`, extra as `extra` from information_schema.columns where table_schema = schema() and table_name = 'orders' order by ordinal_position asc  \n",
+    "  ⇂ select table_name as `name`, table_schema as `schema`, (data_length + index_length) as `size`, table_comment as `comment`, engine as `engine`, table_collation as `collation` from information_schema.tables where table_type in ('BASE TABLE', 'SYSTEM VERSIONED') and table_schema not in ('information_schema', 'mysql', 'ndbinfo', 'performance_schema', 'sys') order by table_schema, table_name  \n",
+    "  ⇂ select 1  \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "\n",
+);
+
+const C9_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  AddQtyToOrdersTable ........................................................  \n",
+    "  ⇂ alter table `orders` add `qty` int null  \n",
+    "\n",
+);
+
+const C10_L13_SHORT: &str = concat!("\n", " INFO Nothing to migrate. \n", "\n",);
+
+const THROW_NAME: &str = "2026_02_01_000001_throw_after_alter_orders_table";
+const SYNTAX_ERROR_NAME: &str = "2026_02_01_000003_syntax_error_in_orders_table";
+const FIRST_NAME: &str = "2026_02_01_000041_first_alter_orders_table";
+const SECOND_NAME: &str = "2026_02_01_000042_second_throws_orders_table";
+const READ_NOTE: &str = "this migration reads the database: under --pretend every read returns \
+     nothing, so statements that depend on what it reads may be missing here, or may appear \
+     although they would not run";
+const NOTHING_CHECKED: &str =
+    "nothing checked: Laravel stopped with an error before it printed a statement";
+
+fn stopped_in(name: &str) -> String {
+    format!(
+        "Laravel stopped with an error in {name}; its statements and the migrations after it \
+         were not seen"
+    )
+}
+
+fn json_of(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn an_error_screen_in_the_first_migration_is_named_and_nothing_is_checked() {
+    // Schema::table(...) then throw new RuntimeException(...): Laravel prints
+    // the migration's name, then its error screen.
+    for (form, input) in [
+        ("Collision", C1_THROW_L12),
+        ("Collision, terminal", C1_THROW_L12_PTY),
+        ("Collision, short form", C1_THROW_L13_SHORT),
+        ("Symfony", C1_THROW_L12_SYMFONY),
+    ] {
+        let output = kilit(&["check"], input);
+        let text = stdout(&output);
+        assert!(
+            text.ends_with(&format!(
+                "\n\n{}\n\n{NOTHING_CHECKED}\n",
+                stopped_in(THROW_NAME)
+            )),
+            "{form}: {text}"
+        );
+        for name_or_screen in ["RuntimeException", "▕", "vendor frames", "handleCommand"] {
+            assert!(!text.contains(name_or_screen), "{form}: {text}");
+        }
+        assert_eq!(output.status.code(), Some(2), "{form}: {text}");
+    }
+}
+
+#[test]
+fn an_error_screen_exits_with_2_also_with_strict() {
+    for input in [C1_THROW_L12, C3_L12, C4_L12, C4_L12_SYMFONY] {
+        for args in [&["check"][..], &["check", "--strict"][..]] {
+            let output = kilit(args, input);
+            assert_eq!(
+                output.status.code(),
+                Some(2),
+                "{args:?}: {}",
+                stdout(&output)
+            );
+        }
+    }
+}
+
+#[test]
+fn the_error_is_a_laravel_error_warning_in_the_json_and_the_exit_code_is_2() {
+    for args in [
+        &["check", "--format", "json"][..],
+        &["check", "--format", "json", "--strict"][..],
+    ] {
+        let output = kilit(args, C1_THROW_L12);
+        let json = json_of(&output);
+        assert_eq!(json["sources"], serde_json::json!([]), "{args:?}");
+        assert_eq!(json["unreadable"], serde_json::json!([]), "{args:?}");
+        assert_eq!(
+            json["warnings"],
+            serde_json::json!([{
+                "id": "laravel-error",
+                "tables": [],
+                "message": stopped_in(THROW_NAME),
+            }]),
+            "{args:?}"
+        );
+        assert_eq!(json["summary"]["statements"], 0, "{args:?}");
+        assert_eq!(json["exit_code"], 2, "{args:?}");
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[test]
+fn statements_printed_before_the_error_keep_their_answers_in_text_and_json() {
+    // Three migrations: an ALTER (ADD COLUMN ... null, INSTANT), one that
+    // throws, an ALTER that Laravel never reaches.
+    for input in [C4_L12, C4_L12_SYMFONY] {
+        let output = kilit(&["check"], input);
+        let text = stdout(&output);
+        let migration = text.find(FIRST_NAME).expect(&text);
+        let answer = text
+            .find("    INSTANT, no rebuild, writes continue\n")
+            .expect(&text);
+        let error = text.find(&stopped_in(SECOND_NAME)).expect(&text);
+        assert!(migration < answer && answer < error, "{text}");
+        assert!(!text.contains(&format!("\n{SECOND_NAME}\n")), "{text}");
+        assert!(
+            text.contains(&format!("\n\n{}\n\n", stopped_in(SECOND_NAME))),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("\n1 statement: 1 runs while writes continue\n"),
+            "{text}"
+        );
+        assert_eq!(output.status.code(), Some(2), "{text}");
+
+        let json = json_of(&kilit(&["check", "--format", "json"], input));
+        assert_eq!(json["sources"].as_array().unwrap().len(), 1);
+        assert_eq!(json["sources"][0]["name"], FIRST_NAME);
+        assert_eq!(
+            json["sources"][0]["statements"][0]["impact"],
+            "writes_continue"
+        );
+        assert_eq!(json["warnings"][0]["id"], "laravel-error");
+        assert_eq!(json["warnings"][0]["message"], stopped_in(SECOND_NAME));
+        assert_eq!(json["exit_code"], 2);
+    }
+}
+
+#[test]
+fn a_parse_error_names_the_migration_file_and_says_no_statement_was_seen() {
+    // A missing semicolon: ParseError, and Laravel prints no migration.
+    let message = format!(
+        "Laravel stopped with an error in {SYNTAX_ERROR_NAME} before it printed any migration; \
+         no statement was seen"
+    );
+    for (form, input) in [("Collision", C3_L12), ("Symfony", C3_L12_SYMFONY)] {
+        let output = kilit(&["check"], input);
+        let text = stdout(&output);
+        assert!(
+            text.ends_with(&format!("\n\n{message}\n\n{NOTHING_CHECKED}\n")),
+            "{form}: {text}"
+        );
+        assert_eq!(output.status.code(), Some(2), "{form}: {text}");
+
+        let json = json_of(&kilit(&["check", "--format", "json"], input));
+        assert_eq!(json["warnings"][0]["id"], "laravel-error", "{form}");
+        assert_eq!(json["warnings"][0]["message"], message, "{form}");
+        assert_eq!(json["exit_code"], 2, "{form}");
+    }
+}
+
+#[test]
+fn the_error_warning_comes_before_the_metadata_lock_warning_and_the_exit_code_stays_2() {
+    // The demo's migrations make writes wait on orders (exit code 1 alone);
+    // after the last one, Laravel prints an error screen. Edited input: the
+    // screen is Collision's, as printed for c1, with the file of the last
+    // migration, so the migration has statements.
+    let schema = example("mysql-schema.sql");
+    let schema = schema.to_str().unwrap();
+    let demo = std::fs::read_to_string(example("laravel-pretend.txt")).unwrap();
+    let input = format!(
+        "{demo}\n   RuntimeException \n\n  boom from a migration\n\n  at \
+         database/migrations/2026_11_02_090500_add_note_search_to_orders_table.php:15\n\n"
+    );
+    let message = "Laravel stopped with an error after \
+                   2026_11_02_090500_add_note_search_to_orders_table; the migrations after it \
+                   were not seen";
+
+    let without_error = kilit(&["check", "--schema", schema], &demo);
+    assert_eq!(without_error.status.code(), Some(1));
+
+    for strict in [false, true] {
+        let mut args = vec!["check", "--schema", schema, "--format", "json"];
+        if strict {
+            args.push("--strict");
+        }
+        let output = kilit(&args, &input);
+        let json = json_of(&output);
+        assert_eq!(json["warnings"][0]["id"], "laravel-error");
+        assert_eq!(json["warnings"][0]["tables"], serde_json::json!([]));
+        assert_eq!(json["warnings"][0]["message"], message);
+        assert_eq!(json["warnings"][1]["id"], "metadata-lock");
+        assert_eq!(json["warnings"].as_array().unwrap().len(), 2);
+        assert_eq!(json["sources"].as_array().unwrap().len(), 6);
+        assert_eq!(json["exit_code"], 2);
+        assert_eq!(output.status.code(), Some(2));
+    }
+
+    let text = stdout(&kilit(&["check", "--schema", schema], &input));
+    let error = text.find(message).expect(&text);
+    let lock = text.find("\nmetadata lock on orders:\n").expect(&text);
+    assert!(error < lock, "{text}");
+    assert!(text.contains(&format!("\n\n{message}\n\n")), "{text}");
+}
+
+#[test]
+fn a_read_gets_one_note_under_its_first_statement_and_changes_no_answer_or_exit_code() {
+    // DB::table('orders')->count() then Schema::table('orders', ...): the
+    // select is printed, then the ALTER.
+    let output = kilit(&["check"], C6_L12);
+    let text = stdout(&output);
+    assert_eq!(text.matches(READ_NOTE).count(), 1, "{text}");
+    let select = text
+        .find("select count(*) as aggregate from `orders`")
+        .expect(&text);
+    let note = text.find(&format!("    - {READ_NOTE}\n")).expect(&text);
+    let alter = text
+        .find("alter table `orders` add `qty` int null")
+        .expect(&text);
+    assert!(select < note && note < alter, "{text}");
+    assert!(
+        text.contains("    INSTANT, no rebuild, writes continue\n"),
+        "{text}"
+    );
+    assert_eq!(output.status.code(), Some(0), "{text}");
+    assert_eq!(kilit(&["check", "--strict"], C6_L12).status.code(), Some(0));
+
+    for args in [
+        &["check", "--format", "json"][..],
+        &["check", "--format", "json", "--strict"][..],
+    ] {
+        let output = kilit(args, C6_L12);
+        let json = json_of(&output);
+        let statements = &json["sources"][0]["statements"];
+        assert_eq!(
+            statements[0]["notes"],
+            serde_json::json!([READ_NOTE]),
+            "{args:?}"
+        );
+        assert!(
+            !statements[1].to_string().contains("reads the database"),
+            "{args:?}"
+        );
+        assert_eq!(statements[1]["impact"], "writes_continue", "{args:?}");
+        // The metadata lock warning of every ALTER is the only warning.
+        assert_eq!(json["warnings"].as_array().unwrap().len(), 1, "{args:?}");
+        assert_eq!(json["warnings"][0]["id"], "metadata-lock", "{args:?}");
+        assert_eq!(json["exit_code"], 0, "{args:?}");
+        assert_eq!(output.status.code(), Some(0), "{args:?}");
+    }
+}
+
+#[test]
+fn ten_reads_in_one_migration_give_the_note_once() {
+    // select, selectOne, scalar, first, `show index`, hasIndex,
+    // getColumnListing, getTables, DB::statement('select 1'), then an ALTER.
+    let text = stdout(&kilit(&["check"], C8_L12));
+    assert_eq!(text.matches(READ_NOTE).count(), 1, "{text}");
+    let note = text.find(READ_NOTE).unwrap();
+    let second_read = text.find("SELECT id FROM orders LIMIT 1").expect(&text);
+    assert!(note < second_read, "{text}");
+
+    let json = json_of(&kilit(&["check", "--format", "json"], C8_L12));
+    let statements = json["sources"][0]["statements"].as_array().unwrap();
+    assert_eq!(statements.len(), 10);
+    for (i, statement) in statements.iter().enumerate() {
+        let noted = statement["notes"] == serde_json::json!([READ_NOTE]);
+        assert_eq!(noted, i == 0, "statement {i}");
+    }
+    assert_eq!(json["exit_code"], 0);
+}
+
+#[test]
+fn the_demo_has_no_read_note_and_no_laravel_error() {
+    let output = laravel_demo(&[]);
+    let text = stdout(&output);
+    assert!(!text.contains("reads the database"), "{text}");
+    assert!(!text.contains("Laravel stopped"), "{text}");
+    let json = json_of(&laravel_demo(&["--format", "json"]));
+    assert_eq!(json["warnings"].as_array().unwrap().len(), 1);
+    assert_eq!(json["warnings"][0]["id"], "metadata-lock");
+    assert!(!json.to_string().contains("reads the database"));
+}
+
+#[test]
+fn a_class_named_migration_and_nothing_to_migrate_are_read_as_before() {
+    // class AddQtyToOrdersTable extends Migration: Laravel prints the class.
+    let output = kilit(&["check"], C9_L12);
+    let text = stdout(&output);
+    assert!(
+        text.contains(
+            "\nAddQtyToOrdersTable\n  alter table `orders` add `qty` int null\n    INSTANT, no rebuild, writes continue\n"
+        ),
+        "{text}"
+    );
+    assert_eq!(output.status.code(), Some(0), "{text}");
+
+    let output = kilit(&["check"], C10_L13_SHORT);
+    let text = stdout(&output);
+    assert!(
+        text.ends_with("\nnothing to check: Laravel has no pending migration\n"),
+        "{text}"
+    );
+    assert_eq!(output.status.code(), Some(0), "{text}");
+}
+
+#[test]
+fn the_oem_code_page_forms_of_the_statement_mark_are_read_and_exit_with_0() {
+    // The mark's bytes E2 87 82 as Windows code pages 720, 737 and 775 show
+    // them.
+    for mark in ["ظçé", "έΘΓ", "Ōćé"] {
+        let input = format!(
+            "\n   INFO  Running migrations.  \n\n  2026_02_01_000001_add_qty_to_orders_table ....  \n  {mark} alter table `orders` add `qty` int null  \n\n"
+        );
+        let output = kilit(&["check"], &input);
+        let text = stdout(&output);
+        assert!(!text.contains("could not read"), "{mark}: {text}");
+        assert!(
+            text.contains("alter table `orders` add `qty` int null\n    INSTANT, no rebuild, writes continue\n"),
+            "{mark}: {text}"
+        );
+        assert_eq!(output.status.code(), Some(0), "{mark}: {text}");
+        let json = json_of(&kilit(&["check", "--format", "json"], &input));
+        assert_eq!(json["unreadable"], serde_json::json!([]), "{mark}");
+        assert_eq!(json["exit_code"], 0, "{mark}");
+    }
+}
+
+#[test]
+fn sql_with_lines_that_look_like_an_error_screen_is_checked_as_sql() {
+    let alter = "ALTER TABLE orders DROP COLUMN note;\n";
+    let plain = kilit(&["check", "--format", "json"], alter);
+    let plain_json = json_of(&plain);
+    for comment in [
+        "/*\n\nRollout\n\nat 10:30\n*/\n",
+        "/*\n\nnotes\n\nat 20261106:1\n*/\n",
+        "/*\n\nRollout\n\nIn plan line 3:\n\n*/\n",
+    ] {
+        let input = format!("{comment}{alter}");
+        let output = kilit(&["check", "--format", "json"], &input);
+        let json = json_of(&output);
+        assert_eq!(json["sources"][0]["kind"], "sql", "{comment}");
+        assert_eq!(json["unreadable"], serde_json::json!([]), "{comment}");
+        assert!(
+            !json["warnings"].to_string().contains("laravel-error"),
+            "{comment}"
+        );
+        assert_eq!(
+            json["sources"][0]["statements"][0]["impact"],
+            plain_json["sources"][0]["statements"][0]["impact"],
+            "{comment}"
+        );
+        assert_eq!(json["exit_code"], plain_json["exit_code"], "{comment}");
+        assert_eq!(output.status.code(), plain.status.code(), "{comment}");
+        let text = stdout(&kilit(&["check"], &input));
+        assert!(!text.contains("Laravel stopped"), "{comment}: {text}");
+    }
+}

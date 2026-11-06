@@ -45,7 +45,9 @@ pub use metadata_lock::{
     ALGORITHMS_THAT_WAIT, DEFAULT_LOCK_WAIT_TIMEOUT, LOCK_WAIT_TIMEOUT_ERROR, metadata_lock_warning,
 };
 pub use parse::parse;
-pub use pretend::{LaravelMigration, Pretend, UnreadableLine, read_pretend};
+pub use pretend::{
+    LaravelError, LaravelMigration, PRETEND_READ_NOTE, Pretend, UnreadableLine, read_pretend,
+};
 pub use results::{Observation, Outcome, Server, Variant, Verdict, Writes};
 pub use schema::{Schema, TableState};
 pub use statement::{

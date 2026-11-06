@@ -332,11 +332,12 @@ The lab measured with the defaults of MySQL 8.0.46 and 8.4.13:
 - `binlog_format` ROW, with the binary log on
 - strict `sql_mode`
 - `foreign_key_checks` ON
+- `default_storage_engine` InnoDB
 - on 8.4, `restrict_fk_on_non_standard_key` ON
 
-kilit reads these settings when the input sets them, and answers from what it
-read. It cannot see a server that is configured otherwise, and it prints no
-note about it for each statement.
+When the input sets one of these, kilit follows it where it was measured and
+answers unknown otherwise. It cannot see a server that is configured
+otherwise, and it prints no note about it for each statement.
 
 ## Getting started
 
@@ -377,6 +378,39 @@ through as it is. PowerShell before 7.4 re-encodes text in a pipe and with `>`:
 kilit still reads the statement mark that this garbles, but text in other
 languages inside your SQL can come through garbled.
 
+### When Laravel stops, and what `--pretend` does not run
+
+A line without dots counts as a migration name only in Laravel's file-name
+form, `2026_11_01_000002_add_note_to_orders_table`. The statement mark is `⇂`,
+or `?`, `???` and the byte forms PowerShell leaves in single-byte code pages.
+
+If a migration throws, Laravel prints its name, none of its statements and an
+error screen, and stops. kilit recognizes the Collision screen and the Symfony
+one. Nothing on it is read as a migration or a statement. kilit says one of:
+
+- `Laravel stopped with an error in <migration>; its statements and the
+  migrations after it were not seen`
+- `Laravel stopped with an error after <migration>; the migrations after it
+  were not seen`
+- `Laravel stopped with an error in <migration> before it printed any
+  migration; no statement was seen`
+- `Laravel stopped with an error before it printed any migration; no
+  statement was seen`
+
+The migration it stopped in is named and not listed. Statements printed before
+the error keep their answers. A syntax error in a migration's PHP stops Laravel
+before it prints anything else, so the error screen is all there is. The exit
+status is 2, also without `--strict`. In JSON the message is an entry of
+`warnings` with the id `laravel-error` and no tables, before the
+`metadata-lock` warning.
+
+Under `--pretend` every read returns nothing. A migration such as
+`if (Schema::hasTable('orders')) { ... }` prints the `select` and none of the
+statements it guards, or prints them where they would not run. kilit adds a
+note to the first read of each migration: `select`, `show`, `describe`, `desc`,
+`explain`, `with`, `table` or `values`. Answers and the exit status do not
+change. In JSON the note is in that statement's `notes`.
+
 ### Running the lab
 
 The lab needs Docker with Compose.
@@ -400,7 +434,7 @@ docker compose down                  # remove the servers
 | --- | --- |
 | 0 | no statement fails and none makes writes wait |
 | 1 | a statement fails or makes writes wait; with `--strict`, also when kilit cannot tell what a statement does |
-| 2 | kilit could not check everything: a bad option, a file it cannot read, an unknown server, or lines of the input it does not understand |
+| 2 | kilit could not check everything: a bad option, a file it cannot read, an unknown server, lines of the input it does not understand, or Laravel stopping with an error |
 
 `--format json` prints the same answers as one JSON document: the migrations
 with their statements, each with its `impact` (`fails`, `writes_wait`,
@@ -521,6 +555,13 @@ kilit is young, and it says so when it does not know. Today:
 - "Writes continue" describes the change itself. Every `ALTER TABLE` also
   waits for the metadata lock first; kilit warns about it, but cannot know
   which transactions will be open when you deploy.
+- On Windows, the marks that PowerShell leaves in the double-byte code pages
+  (932, 936, 949, 950) and in 869 and 874 are not known.
+- `--pretend` does not print every read: `DB::getPdo()->query()`, Laravel 10's
+  Doctrine introspection and the affected-row counts of writes are not seen.
+  A `with ... update` gets the read note too. An error raised outside any
+  migration, after a migration that printed no statements, is blamed on that
+  migration. With several input files, the error line names no file or line.
 - Laravel's `migrate --pretend` output turns every run of spaces into one,
   even inside quotes, so kilit sees `DEFAULT 'a  b'` as `DEFAULT 'a b'`.
 

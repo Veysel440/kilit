@@ -3,8 +3,8 @@
 use std::fmt::Write as _;
 
 use kilit_core::{
-    Algorithm, Impact, Prediction, Schema, ServerResults, Statement, StatementKind, Verdict,
-    Writes, check, impacts, metadata_lock_warning, on_new_tables,
+    Algorithm, Impact, PRETEND_READ_NOTE, Prediction, Schema, ServerResults, Statement,
+    StatementKind, Verdict, Writes, check, impacts, metadata_lock_warning, on_new_tables,
 };
 use serde::Serialize;
 
@@ -17,6 +17,8 @@ pub struct Report<'a> {
     sources: Vec<SourceReport<'a>>,
     unreadable: &'a [Unreadable],
     from_laravel: bool,
+    /// What kilit says about each error screen of Laravel in the input.
+    laravel_errors: Vec<&'a str>,
     /// Tables that exist before the migration and that an ALTER changes.
     locked_tables: Vec<String>,
 }
@@ -39,6 +41,8 @@ struct Checked<'a> {
     impact: Impact,
     /// The statement changes only tables that the input created earlier.
     on_new_table: bool,
+    /// The first statement of a Laravel migration that reads the database.
+    first_read: bool,
 }
 
 impl<'a> Report<'a> {
@@ -70,7 +74,8 @@ impl<'a> Report<'a> {
                 statements: source
                     .statements
                     .iter()
-                    .map(|statement| {
+                    .enumerate()
+                    .map(|(i, statement)| {
                         let ((finding, impact), on_new_table) = checked
                             .next()
                             .expect("check gives one finding per statement");
@@ -79,6 +84,7 @@ impl<'a> Report<'a> {
                             prediction: finding.prediction,
                             impact,
                             on_new_table,
+                            first_read: source.first_read == Some(i),
                         }
                     })
                     .collect(),
@@ -114,6 +120,11 @@ impl<'a> Report<'a> {
             sources,
             unreadable: &input.unreadable,
             from_laravel: input.from_laravel,
+            laravel_errors: input
+                .laravel_errors
+                .iter()
+                .map(|error| error.message.as_str())
+                .collect(),
             locked_tables,
         }
     }
@@ -139,9 +150,9 @@ impl<'a> Report<'a> {
     }
 
     /// 0 if nothing fails or makes writes wait, 1 if something does, 2 if
-    /// kilit could not read all of the input.
+    /// kilit could not read all of the input or Laravel stopped with an error.
     pub fn exit_code(&self, strict: bool) -> u8 {
-        if !self.unreadable.is_empty() {
+        if !self.unreadable.is_empty() || !self.laravel_errors.is_empty() {
             return 2;
         }
         let summary = self.summary();
@@ -204,6 +215,11 @@ impl<'a> Report<'a> {
             }
         }
 
+        for error in &self.laravel_errors {
+            writeln!(out)?;
+            writeln!(out, "{error}")?;
+        }
+
         if !self.unreadable.is_empty() {
             writeln!(out)?;
             writeln!(
@@ -232,6 +248,11 @@ impl<'a> Report<'a> {
         let summary = self.summary();
         if summary.statements > 0 {
             writeln!(out, "{}", summary.sentence())?;
+        } else if !self.laravel_errors.is_empty() {
+            writeln!(
+                out,
+                "nothing checked: Laravel stopped with an error before it printed a statement"
+            )?;
         } else if self.from_laravel && self.sources.is_empty() {
             writeln!(out, "nothing to check: Laravel has no pending migration")?;
         } else {
@@ -272,15 +293,20 @@ impl<'a> Report<'a> {
                     text: &unreadable.line.text,
                 })
                 .collect(),
-            warnings: if self.locked_tables.is_empty() {
-                Vec::new()
-            } else {
-                vec![JsonWarning {
+            warnings: self
+                .laravel_errors
+                .iter()
+                .map(|error| JsonWarning {
+                    id: "laravel-error",
+                    tables: &[],
+                    message: (*error).to_owned(),
+                })
+                .chain((!self.locked_tables.is_empty()).then(|| JsonWarning {
                     id: "metadata-lock",
                     tables: &self.locked_tables,
                     message: metadata_lock_warning(),
-                }]
-            },
+                }))
+                .collect(),
             summary: self.summary(),
             exit_code: self.exit_code(strict),
         };
@@ -359,6 +385,9 @@ fn write_prediction(out: &mut String, checked: &Checked) -> std::fmt::Result {
             "    - {table} is created earlier in these migrations: nothing else uses it yet, \
              so nothing waits for it"
         )?;
+    }
+    if checked.first_read {
+        writeln!(out, "    - {PRETEND_READ_NOTE}")?;
     }
     Ok(())
 }
@@ -491,7 +520,7 @@ struct JsonStatement<'a> {
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     evidence: &'a [&'static str],
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
-    notes: &'a [String],
+    notes: Vec<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'a str>,
 }
@@ -509,7 +538,7 @@ impl<'a> From<&'a Checked<'a>> for JsonStatement<'a> {
             writes: None,
             error: None,
             evidence: &[],
-            notes: &[],
+            notes: Vec::new(),
             reason: None,
         };
         match &checked.prediction {
@@ -521,7 +550,7 @@ impl<'a> From<&'a Checked<'a>> for JsonStatement<'a> {
             } => {
                 json.case = Some(case);
                 json.evidence = evidence;
-                json.notes = notes;
+                json.notes = notes.iter().map(String::as_str).collect();
                 match verdict {
                     Verdict::Runs {
                         algorithm,
@@ -541,6 +570,9 @@ impl<'a> From<&'a Checked<'a>> for JsonStatement<'a> {
             Prediction::Unknown { reason } | Prediction::NotChecked { reason } => {
                 json.reason = Some(reason);
             }
+        }
+        if checked.first_read {
+            json.notes.push(PRETEND_READ_NOTE);
         }
         json
     }
