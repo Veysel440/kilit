@@ -6,6 +6,9 @@
 //! It does no I/O: it takes text and returns data. Reading files, talking
 //! to servers and printing belong to the crates that use it.
 //!
+//! kilit-core is kilit's engine, not a library: its API may change in any
+//! release.
+//!
 //! ```
 //! use kilit_core::{Operation, StatementKind};
 //!
@@ -40,7 +43,7 @@ pub use check::{
     OLD_ALTER_TABLE_TWINS, Prediction, ROW_FORMAT_CASES, check, check_sessions, depends_on_rows,
 };
 pub use impact::{Impact, impacts, on_empty_tables, on_new_tables};
-pub use knowledge::{Knowledge, ScenarioResult, ServerResults};
+pub use knowledge::{DEFAULT_SERIES, Knowledge, ScenarioResult, ServerResults};
 pub use metadata_lock::{
     ALGORITHMS_THAT_WAIT, DEFAULT_LOCK_WAIT_TIMEOUT, LOCK_WAIT_TIMEOUT_ERROR, metadata_lock_warning,
 };

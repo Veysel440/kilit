@@ -30,6 +30,11 @@ pub struct Finding {
     pub line: usize,
     pub sql: String,
     pub prediction: Prediction,
+    /// Answering the statement used a lab result that another measured
+    /// server gives differently, or a rule of kilit's that depends on the
+    /// server. When no statement of the input did, every measured server
+    /// answers every statement the same way.
+    pub server_dependent: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1299,6 +1304,7 @@ pub fn check_sessions(
             schema.session_ends();
         }
         for statement in *statements {
+            agreements.server_dependent = false;
             let prediction = check_one(
                 statement,
                 &mut session,
@@ -1310,6 +1316,7 @@ pub fn check_sessions(
                 line: statement.line,
                 sql: statement.sql.clone(),
                 prediction,
+                server_dependent: agreements.server_dependent,
             });
         }
     }
@@ -1325,6 +1332,11 @@ fn check_one<'r>(
     agreements: &mut Agreements<'r>,
 ) -> Prediction {
     let mut unread_foreign_key_checks = false;
+    // 8.0.46 has no restrict_fk_on_non_standard_key and 8.4.13 does: once
+    // the input names it, every answer may depend on the server.
+    if session.restrict_fk_set {
+        agreements.server_dependent = true;
+    }
     // MySQL refuses the whole SET when it assigns sql_log_bin globally
     // (error 1228), and 8.0.46 when it names restrict_fk_on_non_standard_key
     // (error 1193): the session keeps its values, or not.
@@ -1339,6 +1351,7 @@ fn check_one<'r>(
                 if variables.iter().any(|variable| variable.name == "sql_log_bin" && variable.global));
         if sql.contains("restrict_fk_on_non_standard_key") {
             session.restrict_fk_set = true;
+            agreements.server_dependent = true;
         }
         // Any scope, any value: the engine of a table created after it
         // without ENGINE is the server's to pick. `default_tmp_storage_engine`
@@ -2421,7 +2434,7 @@ fn measured_apart<'r>(
         }
     }
     if measured.old_alter_table && variant.algorithm.is_some() {
-        if let Err(reason) = clause_wins(case, variant, results) {
+        if let Err(reason) = clause_wins(case, variant, results, agreements) {
             return unknown(reason);
         }
         return answer(innodb, situation, variant, results, agreements, notes);
@@ -2544,7 +2557,12 @@ fn measured_case(
 /// Whether a written `ALGORITHM` wins over old_alter_table for every
 /// scenario of `case` on this server: the lab's run of `variant` with
 /// old_alter_table on left exactly the traces of its run with it off.
-fn clause_wins(case: &Case, variant: Variant, results: &ServerResults) -> Result<(), String> {
+fn clause_wins(
+    case: &Case,
+    variant: Variant,
+    results: &ServerResults,
+    agreements: &mut Agreements<'_>,
+) -> Result<(), String> {
     let observed = |id: &str| {
         results.scenario(id).and_then(|scenario| {
             scenario
@@ -2559,6 +2577,8 @@ fn clause_wins(case: &Case, variant: Variant, results: &ServerResults) -> Result
             .iter()
             .find(|(scenario, _)| scenario == id)
             .map(|(_, twin)| *twin);
+        agreements.server_dependent |=
+            results.varies(id) || twin.is_some_and(|twin| results.varies(twin));
         let same = twin.is_some_and(|twin| {
             let (with, without) = (observed(id), observed(twin));
             with.is_some() && with == without
@@ -2908,6 +2928,10 @@ enum Group {
 #[derive(Default)]
 struct Agreements<'r> {
     by_case: HashMap<&'static str, Vec<Agreement<'r>>>,
+    /// The statement being checked has read a lab result that another
+    /// measured server gives differently, or depends on the server in a
+    /// way kilit knows: see [`Finding::server_dependent`].
+    server_dependent: bool,
 }
 
 struct Agreement<'r> {
@@ -2915,6 +2939,8 @@ struct Agreement<'r> {
     group: Group,
     variant: Variant,
     said: Result<Verdict, String>,
+    /// One of the scenarios differs on another measured server.
+    varies: bool,
 }
 
 impl<'r> Agreements<'r> {
@@ -2930,6 +2956,7 @@ impl<'r> Agreements<'r> {
         if let Some(agreement) = seen.iter().find(|agreement| {
             agreement.group == group && agreement.variant == variant && agreement.server == server
         }) {
+            self.server_dependent |= agreement.varies;
             return agreement.said.clone();
         }
         let scenarios = match group {
@@ -2937,12 +2964,15 @@ impl<'r> Agreements<'r> {
             Group::Exception(at) => case.exceptions[at].scenarios,
         };
         let said = agreed(scenarios, case.id, variant, results);
+        let varies = scenarios.iter().any(|id| results.varies(id));
         seen.push(Agreement {
             server,
             group,
             variant,
             said: said.clone(),
+            varies,
         });
+        self.server_dependent |= varies;
         said
     }
 }
@@ -7275,6 +7305,62 @@ mod tests {
             assert!(told[0].starts_with("fails with error 1845"), "{server}");
             assert_eq!(told[1], "COPY, copies every row, writes wait", "{server}");
         }
+    }
+
+    /// For each statement of `sql` on MySQL 8.4.13, with the tables of
+    /// `schema`: whether its answer may depend on the server.
+    fn server_dependent(schema: &str, sql: &str) -> Vec<bool> {
+        check(&parse(sql), &Schema::from_sql(schema), results())
+            .iter()
+            .map(|finding| finding.server_dependent)
+            .collect()
+    }
+
+    #[test]
+    fn answers_from_results_every_server_shares_do_not_depend_on_the_server() {
+        let sql = "ALTER TABLE users ADD COLUMN nick VARCHAR(50) NULL;
+                   ALTER TABLE users DROP COLUMN nick;
+                   ALTER TABLE users MODIFY name VARCHAR(300) NOT NULL;
+                   CREATE TABLE coupons (id BIGINT UNSIGNED NOT NULL PRIMARY KEY);
+                   SET foreign_key_checks = 0;
+                   ALTER TABLE users ADD COLUMN code CHAR(8) NULL, ALGORITHM=INPLACE;";
+        assert_eq!(server_dependent(LARAVEL_TABLES, sql), [false; 6]);
+        // Forcing an algorithm under old_alter_table reads the twin runs.
+        let sql = "SET old_alter_table = ON;
+                   ALTER TABLE users ADD COLUMN code CHAR(8) NULL, ALGORITHM=INPLACE;";
+        assert_eq!(server_dependent(LARAVEL_TABLES, sql), [false; 2]);
+    }
+
+    #[test]
+    fn a_foreign_key_the_servers_judge_differently_depends_on_the_server() {
+        let schema = "CREATE TABLE users (id BIGINT UNSIGNED NOT NULL, name VARCHAR(50) NOT NULL,
+                          PRIMARY KEY (id), KEY users_name_index (name))
+                          DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                      CREATE TABLE orders (id BIGINT UNSIGNED NOT NULL,
+                          user_id BIGINT UNSIGNED NOT NULL, user_name VARCHAR(50) NOT NULL,
+                          PRIMARY KEY (id)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;";
+        // To the primary key: the case's own scenarios, the same on every
+        // server. To a plain index: 8.0.46 copies the table, 8.4.13 fails
+        // with error 6125, also the second time, from what is remembered.
+        let sql = "ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users (id);
+                   ALTER TABLE orders ADD FOREIGN KEY (user_name) REFERENCES users (name);
+                   ALTER TABLE orders ADD FOREIGN KEY (user_name) REFERENCES users (name);";
+        assert_eq!(server_dependent(schema, sql), [false, true, true]);
+        // Without the tables, those results are read for the notes.
+        let sql = "ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users (id);";
+        assert_eq!(server_dependent("", sql), [true]);
+    }
+
+    #[test]
+    fn naming_restrict_fk_on_non_standard_key_makes_every_later_answer_depend_on_the_server() {
+        // 8.0.46 has no such variable and refuses the SET; 8.4.13 has it.
+        let sql = "ALTER TABLE users ADD COLUMN a INT NULL;
+                   SET restrict_fk_on_non_standard_key = OFF;
+                   ALTER TABLE users ADD COLUMN b INT NULL;";
+        assert_eq!(server_dependent(LARAVEL_TABLES, sql), [false, true, true]);
+        let sql = "SELECT @@restrict_fk_on_non_standard_key;
+                   ALTER TABLE users ADD COLUMN b INT NULL;";
+        assert_eq!(server_dependent(LARAVEL_TABLES, sql), [true, true]);
     }
 
     #[test]

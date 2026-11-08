@@ -6725,3 +6725,92 @@ fn the_reason_for_a_table_of_unknown_engine_says_a_statement_names_an_engine_it_
         );
     }
 }
+
+// Step 12: the measured servers and the second look at the input.
+
+/// What kilit shows of an answer, apart from its notes: the impact, and the
+/// error number or the algorithm, the rebuild, the copied rows and the writes.
+/// An answer kilit cannot give is compared by its kind only.
+fn shown_answer(impact: Impact, prediction: &Prediction) -> String {
+    match prediction {
+        Prediction::Measured {
+            verdict: Verdict::Fails { code, .. },
+            ..
+        } => format!("{impact:?}: fails with error {code}"),
+        Prediction::Measured {
+            verdict:
+                Verdict::Runs {
+                    algorithm,
+                    rebuilds_table,
+                    copied_rows,
+                    writes,
+                    ..
+                },
+            ..
+        } => format!(
+            "{impact:?}: {algorithm:?}, rebuilds_table {rebuilds_table}, copies rows {}, \
+             writes {writes:?}",
+            copied_rows.is_some_and(|rows| rows > 0)
+        ),
+        Prediction::Unknown { .. } => format!("{impact:?}: unknown"),
+        Prediction::NotChecked { .. } => format!("{impact:?}: not checked"),
+    }
+}
+
+/// What each statement of the scenario's run shows, on `server`, and whether
+/// any of the answers depends on the server.
+fn shown_on(
+    server: &str,
+    scenario: &ScenarioResult,
+    variant: Variant,
+    schema: &Schema,
+) -> (Vec<String>, bool) {
+    let results = Knowledge::built_in().server(server).unwrap();
+    let statements = parse(&sql(scenario, variant));
+    let findings = check(&statements, schema, results);
+    let shown = impacts(&statements, &findings)
+        .into_iter()
+        .zip(&findings)
+        .map(|(impact, finding)| shown_answer(impact, &finding.prediction))
+        .collect();
+    let dependent = findings.iter().any(|finding| finding.server_dependent);
+    (shown, dependent)
+}
+
+#[test]
+fn when_no_answer_of_a_run_depends_on_the_server_every_other_server_answers_the_same() {
+    let knowledge = Knowledge::built_in();
+    assert!(knowledge.servers().len() >= 2);
+    let (mut dependent_runs, mut independent_runs) = (0, 0);
+    for results in knowledge.servers() {
+        let server = results.server.name();
+        for scenario in results.scenarios() {
+            let schema = lab_schema(scenario);
+            for variant in Variant::ALL {
+                let (shown, dependent) = shown_on(&server, scenario, variant, &schema);
+                if dependent {
+                    dependent_runs += 1;
+                    continue;
+                }
+                independent_runs += 1;
+                for other in knowledge.servers() {
+                    let other = other.server.name();
+                    if other == server {
+                        continue;
+                    }
+                    let (shown_there, _) = shown_on(&other, scenario, variant, &schema);
+                    assert_eq!(
+                        shown, shown_there,
+                        "{} as {variant}: no answer depends on the server on {server}, yet \
+                         {other} answers differently",
+                        scenario.id
+                    );
+                }
+            }
+        }
+    }
+    // The check is not empty: some runs depend on the server (the foreign
+    // keys to a parent column without a unique index), most do not.
+    assert!(dependent_runs > 0, "no run depends on the server");
+    assert!(independent_runs > dependent_runs, "{independent_runs}");
+}

@@ -10,7 +10,7 @@
 [![MySQL 8.0 and 8.4](https://img.shields.io/badge/MySQL-8.0%20%7C%208.4-4479A1?logo=mysql&logoColor=white)](#what-mysql-does-with-common-changes)
 [![Status: early development](https://img.shields.io/badge/status-early%20development-yellow)](#roadmap)
 
-[Why](#why) · [Example](#example) · [Findings](#what-mysql-does-with-common-changes) · [Getting started](#getting-started) · [In CI](#in-ci) · [How it works](#how-it-works) · [Roadmap](#roadmap)
+[Why](#why) · [Example](#example) · [Findings](#what-mysql-does-with-common-changes) · [Getting started](#getting-started) · [In CI](#in-ci) · [JSON output](#json-output) · [How it works](#how-it-works) · [Roadmap](#roadmap)
 
 </div>
 
@@ -339,6 +339,23 @@ When the input sets one of these, kilit follows it where it was measured and
 answers unknown otherwise. It cannot see a server that is configured
 otherwise, and it prints no note about it for each statement.
 
+kilit never picks the server from a schema dump. It does read every
+`-- Server version` line of the `--schema` file, such as the one a plain
+`mysqldump` writes (a joined dump can have several; each version counts once),
+and never the `Distrib` line, which is the version of the `mysqldump` client:
+
+- A MySQL series other than the one being checked: a warning, such as `the
+  schema comes from MySQL 8.0.36; answers are for mysql-8.4.13`. In JSON it is
+  a `server-mismatch` entry of `warnings`.
+- A version text kilit cannot read: a warning that names it. In JSON it is a
+  `server-mismatch` entry too.
+- MariaDB: kilit has no MariaDB measurements, so it stops with exit status 2
+  unless you give `--server`. With `--server` it warns and checks against that
+  MySQL server.
+
+`php artisan schema:dump` runs `mysqldump` without comments, so a Laravel dump
+has no such line and kilit cannot warn.
+
 ## Getting started
 
 You need [Rust](https://rustup.rs) 1.88 or newer. Checking a migration needs no
@@ -369,9 +386,16 @@ For SQL files, or saved `--pretend` output:
 
 ```sh
 kilit check --schema schema.sql migration.sql   # several files run in order, each in a session of its own
-kilit check --server mysql-8.0.46 migration.sql # the default is the newest server, mysql-8.4.13
+kilit check --server mysql-8.0 migration.sql    # a series: the newest release measured in it
+kilit check --server mysql-8.0.46 migration.sql # or one release
 kilit servers                                   # the servers kilit has results for
 ```
+
+`--server` takes a release (`mysql-8.4.13`) or a series (`mysql-8.4`,
+`mysql-8.0`), which means the newest release the lab measured in that series.
+Without it kilit uses the series `mysql-8.4`, the 8.4 LTS. The default does not
+move when the lab measures another series; `kilit servers` marks it. The header
+of every report names the exact release.
 
 On Windows, pipe in WSL, Git Bash or `cmd`, which pass Laravel's output
 through as it is. PowerShell before 7.4 re-encodes text in a pipe and with `>`:
@@ -400,8 +424,10 @@ one. Nothing on it is read as a migration or a statement. kilit says one of:
 The migration it stopped in is named and not listed. Statements printed before
 the error keep their answers. A syntax error in a migration's PHP stops Laravel
 before it prints anything else, so the error screen is all there is. The exit
-status is 2, also without `--strict`. In JSON the message is an entry of
-`warnings` with the id `laravel-error` and no tables, before the
+status is 2, also without `--strict`. With several input files, the line starts
+with the file's name, as in `migrations/b.txt: Laravel stopped with an error in
+<migration>; ...`. In JSON the message is an entry of `warnings` with the id
+`laravel-error`, the input's name in `file` and no tables, before the
 `metadata-lock` warning.
 
 Under `--pretend` every read returns nothing. A migration such as
@@ -432,15 +458,86 @@ docker compose down                  # remove the servers
 
 | Status | When |
 | --- | --- |
-| 0 | no statement fails and none makes writes wait |
-| 1 | a statement fails or makes writes wait; with `--strict`, also when kilit cannot tell what a statement does |
-| 2 | kilit could not check everything: a bad option, a file it cannot read, an unknown server, lines of the input it does not understand, or Laravel stopping with an error |
+| 0 | nothing that --fail-on counts was found |
+| 1 | a statement fails or makes writes wait, and --fail-on counts it |
+| 2 | kilit could not check everything: a bad option, a file it cannot read, an unknown server, a MariaDB schema without --server, lines of the input it does not understand, or Laravel stopping with an error |
+| 3 | the only statements --fail-on counts are unknown: kilit cannot tell what they do |
 
-`--format json` prints the same answers as one JSON document: the migrations
-with their statements, each with its `impact` (`fails`, `writes_wait`,
-`writes_continue`, `new_table`, `unknown` or `not_checked`), the measured
-algorithm and the lab scenarios behind it, the warnings, a summary and the exit
-status.
+When several apply, 2 wins over 1, and 1 over 3.
+
+`--fail-on` says what counts. It takes a comma-separated list of `fails`,
+`waits` and `unknown`; the default is `fails,waits`. `--strict` is short for
+`--fail-on fails,waits,unknown`, and cannot be combined with `--fail-on`. An
+empty list or any other word is a usage error, exit status 2.
+
+An unknown statement is usually a change the lab has not measured, not a
+mistake in the migration, so by default it does not stop a build. When a run
+passes with unknown statements that are not counted, the text ends with one
+line saying so:
+
+```text
+1 statement: 1 unknown
+1 unknown statement is not counted in the exit status; --fail-on fails,waits,unknown counts it
+```
+
+Three ways to use it in a pipeline:
+
+```sh
+kilit check --schema schema.sql migrations.sql                  # stop on failures and waits
+kilit check --strict --schema schema.sql migrations.sql         # also stop on unknown
+kilit check --fail-on fails --schema schema.sql migrations.sql  # accept waits, for small tables
+```
+
+The exit status follows the server you check against. When another measured
+server answers a statement differently, a note says so, for example `on
+mysql-8.0.46: fails with error 1822`, and the JSON has it in `other_servers`.
+That note never changes the exit status.
+
+### JSON output
+
+`--format json` prints the same answers as one JSON document, with the keys in
+this order. The text output is for people and may change in any release; the
+JSON is the one to parse.
+
+`format_version` is `"1.0"`. A minor increase (`"1.1"`) adds fields. A major
+increase (`"2.0"`) removes, renames or changes one. Ignore fields you do not
+know, and reject a major version you do not support.
+
+| Key | Holds |
+| --- | --- |
+| `format_version` | the version of this format |
+| `kilit` | kilit's version |
+| `server` | the exact release checked against, such as `mysql-8.4.13` |
+| `schema` | `null` without `--schema`; else `file`, `tables` (names) and `lost` (`table` and `reason` of each table kilit stopped trusting) |
+| `sources` | one entry per migration, or per SQL file: `name`, `kind` (`laravel_migration` or `sql`) and `statements` |
+| `unreadable` | lines of the input kilit does not understand: `input`, `line`, `text` |
+| `warnings` | `id`, `tables`, `message`, and `file` on a `laravel-error` |
+| `summary` | counts: `statements`, `fails`, `writes_wait`, `writes_continue`, `new_table`, `unknown`, `not_checked` |
+| `fail_on` | what counted for the exit status, from `fails`, `waits`, `unknown` |
+| `exit_code` | the exit status |
+
+Each statement has `line`, `sql` and `impact` (`fails`, `writes_wait`,
+`writes_continue`, `new_table`, `unknown` or `not_checked`). These keys come
+only when there is something to say, and are left out otherwise:
+
+| Key | Holds |
+| --- | --- |
+| `case` | the kind of change the lab measured |
+| `algorithm` | `INSTANT`, `INPLACE` or `COPY` |
+| `rebuilds_table` | `true` or `false` |
+| `copies_rows` | `true` or `false` |
+| `writes` | `allowed`, `blocked` or `unknown` |
+| `error` | the MySQL error number, when the statement fails |
+| `evidence` | the lab scenarios behind the answer |
+| `notes` | what kilit worked out, and situations that change the answer |
+| `reason` | why the statement is unknown or not checked |
+| `other_servers` | where another measured server answers differently: `server`, `impact` and `answer`, the line the text report would print for that server |
+
+A warning has one of three ids: `server-mismatch` (the schema dump names
+another MySQL series, or MariaDB with `--server`, or a version kilit cannot
+read), `laravel-error` (Laravel
+stopped with an error; `file` names the input) and `metadata-lock` (`tables`
+names the tables).
 
 ## How it works
 
@@ -500,7 +597,7 @@ the new definition with the column's current one, character set and collation
 included, and the one thing that changes decides the case. The scenarios of a
 case must agree on each server, or kilit refuses to answer. The two servers
 may give different answers; kilit answers for the server you pick with
-`--server`. A case can also
+`--server`, and adds a note where the other one differs. A case can also
 have *exceptions*: the same change measured in a situation where the answer
 differs. When the situation shows in the schema, such as a FULLTEXT index on the
 table or a foreign key on the column, it decides the answer; when it does not,
@@ -543,7 +640,8 @@ kilit is young, and it says so when it does not know. Today:
   changes only.
 - Type changes other than between integer types, such as `VARCHAR` to `TEXT`,
   are not measured yet.
-- Only MySQL 8.0.46 and 8.4.13 are measured. MariaDB is not supported.
+- Only MySQL 8.0.46 and 8.4.13 are measured. MariaDB is not supported: a
+  MariaDB schema without `--server` stops kilit with exit status 2.
 - kilit has measured InnoDB and, for the changes listed above, MyISAM. A table
   with no `ENGINE` is taken as InnoDB, the server default, and kilit does not
   read `default_storage_engine` from a `--schema` file, so a table created
@@ -563,14 +661,16 @@ kilit is young, and it says so when it does not know. Today:
   over, except temporary tables. A `--pretend` file is one session.
 - "Writes continue" describes the change itself. Every `ALTER TABLE` also
   waits for the metadata lock first; kilit warns about it, but cannot know
-  which transactions will be open when you deploy.
+  which transactions will be open when you deploy. The warning covers `ALTER
+  TABLE`, `CREATE INDEX` and `DROP INDEX ... ON` only. `DROP TABLE`, `RENAME
+  TABLE`, `TRUNCATE TABLE` and `LOCK TABLES` do not get it yet.
 - On Windows, the marks that PowerShell leaves in the double-byte code pages
   (932, 936, 949, 950) and in 869 and 874 are not known.
 - `--pretend` does not print every read: `DB::getPdo()->query()`, Laravel 10's
   Doctrine introspection and the affected-row counts of writes are not seen.
   A `with ... update` gets the read note too. An error raised outside any
   migration, after a migration that printed no statements, is blamed on that
-  migration. With several input files, the error line names no file or line.
+  migration.
 - Laravel's `migrate --pretend` output turns every run of spaces into one,
   even inside quotes, so kilit sees `DEFAULT 'a  b'` as `DEFAULT 'a b'`.
 
@@ -588,7 +688,8 @@ kilit is young, and it says so when it does not know. Today:
 - [x] A warning about the metadata lock, measured on every server
 - [ ] Continuous integration, including a scheduled lab run that catches
   behavior changes in new MySQL releases
-- [ ] A first release on crates.io
+- [ ] Prebuilt binaries for Linux, macOS and Windows on GitHub Releases, and a
+  GitHub Action. No crate is published to crates.io
 
 ## Project layout
 
@@ -600,6 +701,9 @@ scenarios/           one TOML file per measured change, and the lab's tables
 matrix/              the lab's results, one JSON file per server version
 compose.yaml         the MySQL servers the lab runs against
 ```
+
+kilit-core is kilit's engine, not a library: its API may change in any release.
+No crate of this workspace is published to crates.io.
 
 ## Contributing
 

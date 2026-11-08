@@ -15,7 +15,7 @@ pub struct Input {
     /// Some input was the output of `migrate --pretend`.
     pub from_laravel: bool,
     /// Each time Laravel stopped with an error.
-    pub laravel_errors: Vec<LaravelError>,
+    pub laravel_errors: Vec<LaravelStop>,
     /// Some input holds a `/*! ... */` comment, which MySQL runs. kilit does
     /// not see a statement made of one alone.
     pub runs_comments: bool,
@@ -51,6 +51,13 @@ pub struct Unreadable {
     /// The file it is in, or `standard input`.
     pub input: String,
     pub line: UnreadableLine,
+}
+
+/// Laravel's error screen in one input.
+pub struct LaravelStop {
+    /// The file it is in, or `standard input`.
+    pub input: String,
+    pub error: LaravelError,
 }
 
 const STDIN: &str = "standard input";
@@ -108,7 +115,7 @@ impl Input {
                     });
                 }
                 if let Some(error) = pretend.error {
-                    self.laravel_errors.push(error);
+                    self.laravel_errors.push(LaravelStop { input: name, error });
                 }
             }
             None => self.sources.push(Source {
@@ -120,6 +127,35 @@ impl Input {
             }),
         }
     }
+}
+
+impl Input {
+    /// How many inputs were read: files, or standard input.
+    pub fn inputs(&self) -> usize {
+        self.sessions
+    }
+}
+
+/// The server versions a dump names: the text after `-- Server version`
+/// and a tab, as mysqldump and mariadb-dump write it, or spaces, each one
+/// once, in order. A dump made of several has several. The `Distrib` line
+/// names the version of mysqldump itself, not of the server, and is not
+/// read.
+pub fn server_versions(text: &str) -> Vec<&str> {
+    let mut versions: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("-- Server version") else {
+            continue;
+        };
+        if !rest.starts_with([' ', '\t']) {
+            continue;
+        }
+        let version = rest.trim();
+        if !version.is_empty() && !versions.contains(&version) {
+            versions.push(version);
+        }
+    }
+    versions
 }
 
 /// The text of a file.
@@ -171,6 +207,52 @@ mod tests {
             bytes.extend(unit.to_le_bytes());
         }
         assert_eq!(decode(&bytes, "x").unwrap(), "⇂ alter");
+    }
+
+    #[test]
+    fn reads_the_server_version_a_dump_names() {
+        // mysqldump 8.4.13 run against the 8.0.46 server: line 1 names the
+        // client, line 5 the server.
+        let dump = "-- MySQL dump 10.13  Distrib 8.4.13, for Linux (x86_64)\n\
+                    --\n\
+                    -- Host: localhost    Database: app\n\
+                    -- ------------------------------------------------------\n\
+                    -- Server version\t8.0.46\n\
+                    \n\
+                    CREATE TABLE t (id int);\n";
+        assert_eq!(server_versions(dump), ["8.0.46"]);
+        assert_eq!(
+            server_versions("-- Server version   8.4.13  \r\n"),
+            ["8.4.13"]
+        );
+    }
+
+    #[test]
+    fn reads_every_server_version_of_a_joined_dump_once() {
+        let dump = "-- Server version\t8.0.46\nCREATE TABLE a (id int);\n\
+                    -- Server version\t10.11.6-MariaDB-0ubuntu0.23.04.1\n\
+                    -- Server version\t8.0.46\n";
+        assert_eq!(
+            server_versions(dump),
+            ["8.0.46", "10.11.6-MariaDB-0ubuntu0.23.04.1"]
+        );
+    }
+
+    #[test]
+    fn reads_no_server_version_from_other_lines() {
+        for dump in [
+            // What Laravel's schema:dump writes: no comments at all.
+            "/*!40103 SET TIME_ZONE='+00:00' */;\nCREATE TABLE t (id int);\n",
+            "-- MySQL dump 10.13  Distrib 8.0.46, for Linux (x86_64)\n",
+            "-- Server version\n",
+            "-- Server version\t\n",
+            "-- Server versions\t8.0.46\n",
+            " -- Server version\t8.0.46\n",
+            "--  Server version\t8.0.46\n",
+            "CREATE TABLE t (id int) COMMENT '-- Server version 8.0.46';\n",
+        ] {
+            assert_eq!(server_versions(dump), Vec::<&str>::new(), "{dump:?}");
+        }
     }
 
     #[test]

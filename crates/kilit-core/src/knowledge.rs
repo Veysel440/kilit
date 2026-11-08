@@ -19,6 +19,11 @@ const BUILT_IN: [&str; 2] = [
     include_str!("../../../matrix/mysql-8.4.13.json"),
 ];
 
+/// The server kilit checks against when none is named: the newest release
+/// the lab measured in this series, MySQL's 8.4 LTS. Measuring another
+/// series does not move it; moving it is a decision of its own.
+pub const DEFAULT_SERIES: &str = "mysql-8.4";
+
 /// The lab's results for every server it measured.
 #[derive(Debug)]
 pub struct Knowledge {
@@ -34,11 +39,13 @@ impl Knowledge {
     /// so that cannot reach a user.
     pub fn built_in() -> &'static Knowledge {
         static KNOWLEDGE: OnceLock<Knowledge> = OnceLock::new();
-        KNOWLEDGE.get_or_init(|| Knowledge {
-            servers: BUILT_IN
+        KNOWLEDGE.get_or_init(|| {
+            let mut servers: Vec<ServerResults> = BUILT_IN
                 .iter()
                 .map(|json| ServerResults::from_json(json).expect("built-in lab results are valid"))
-                .collect(),
+                .collect();
+            compare(&mut servers);
+            Knowledge { servers }
         })
     }
 
@@ -46,11 +53,62 @@ impl Knowledge {
         &self.servers
     }
 
-    /// The results for a server named like `mysql-8.4.13`.
+    /// The results for a server named like `mysql-8.4.13`, or for the
+    /// newest release the lab measured in a series named like `mysql-8.4`.
     pub fn server(&self, name: &str) -> Option<&ServerResults> {
-        self.servers
+        if let Some(results) = self
+            .servers
             .iter()
             .find(|results| results.server.name() == name)
+        {
+            return Some(results);
+        }
+        self.servers
+            .iter()
+            .filter(|results| results.server.series() == name)
+            .max_by_key(|results| release(&results.server.version))
+    }
+
+    /// The results for [`DEFAULT_SERIES`].
+    pub fn default_server(&self) -> Option<&ServerResults> {
+        self.server(DEFAULT_SERIES)
+    }
+}
+
+/// The numbers of a version like `8.4.13`, to order releases of a series.
+fn release(version: &str) -> Vec<u32> {
+    version
+        .split('.')
+        .map(|number| number.parse().unwrap_or(0))
+        .collect()
+}
+
+/// Marks, on each server, the scenarios whose results differ on another
+/// one: their verdict, or what the lab saw in any variant, which is every
+/// field an answer shows. A scenario that another server lacks differs too.
+fn compare(servers: &mut [ServerResults]) {
+    let varies: Vec<Vec<bool>> = servers
+        .iter()
+        .map(|results| {
+            results
+                .scenarios
+                .iter()
+                .map(|scenario| {
+                    servers
+                        .iter()
+                        .any(|other| match other.scenario(&scenario.id) {
+                            Some(theirs) => {
+                                theirs.verdict != scenario.verdict
+                                    || theirs.observations != scenario.observations
+                            }
+                            None => true,
+                        })
+                })
+                .collect()
+        })
+        .collect();
+    for (results, varies) in servers.iter_mut().zip(varies) {
+        results.varies = varies;
     }
 }
 
@@ -63,6 +121,10 @@ pub struct ServerResults {
     /// Positions in `scenarios`, ordered by id and, for one id, by
     /// position, so that a lookup is a binary search.
     by_id: Vec<usize>,
+    /// For each of `scenarios`, whether another server the lab measured
+    /// gives other results for it. `true` until compared: results read
+    /// alone may differ anywhere.
+    varies: Vec<bool>,
 }
 
 mod file {
@@ -86,6 +148,7 @@ impl From<file::ServerResults> for ServerResults {
         by_id.sort_by(|a, b| file.scenarios[*a].id.cmp(&file.scenarios[*b].id));
         ServerResults {
             server: file.server,
+            varies: vec![true; file.scenarios.len()],
             scenarios: file.scenarios,
             by_id,
         }
@@ -115,11 +178,23 @@ impl ServerResults {
     /// The scenario with this id; the first one in the file if the id is
     /// there twice.
     pub fn scenario(&self, id: &str) -> Option<&ScenarioResult> {
+        self.position(id).map(|at| &self.scenarios[at])
+    }
+
+    /// Whether another server the lab measured gives other results for the
+    /// scenario with this id, in any variant, or lacks it. Also `true` for
+    /// an id this server lacks, and for results not compared with any other
+    /// server's ([`ServerResults::from_json`] alone).
+    pub fn varies(&self, id: &str) -> bool {
+        self.position(id).is_none_or(|at| self.varies[at])
+    }
+
+    fn position(&self, id: &str) -> Option<usize> {
         let first = self
             .by_id
             .partition_point(|at| self.scenarios[*at].id.as_str() < id);
-        let scenario = &self.scenarios[*self.by_id.get(first)?];
-        (scenario.id == id).then_some(scenario)
+        let at = *self.by_id.get(first)?;
+        (self.scenarios[at].id == id).then_some(at)
     }
 }
 
@@ -317,10 +392,105 @@ mod tests {
     }
 
     #[test]
-    fn finds_servers_by_name() {
+    fn finds_servers_by_name_and_by_series() {
         let knowledge = Knowledge::built_in();
-        assert!(knowledge.server("mysql-8.4.13").is_some());
-        assert!(knowledge.server("mysql-8.4").is_none());
+        let name = |name: &str| knowledge.server(name).map(|results| results.server.name());
+        assert_eq!(name("mysql-8.4.13").as_deref(), Some("mysql-8.4.13"));
+        assert_eq!(name("mysql-8.4").as_deref(), Some("mysql-8.4.13"));
+        assert_eq!(name("mysql-8.0").as_deref(), Some("mysql-8.0.46"));
+        for unknown in [
+            "mysql-8",
+            "mysql-8.4.",
+            "8.4",
+            "mysql-8.4.1",
+            "MySQL-8.4",
+            "mariadb-8.4",
+        ] {
+            assert_eq!(name(unknown), None, "{unknown}");
+        }
+    }
+
+    #[test]
+    fn a_series_means_its_newest_measured_release() {
+        let json = |version: &str| {
+            format!(
+                r#"{{"server": {{"product": "mysql", "version": "{version}"}}, "scenarios": []}}"#
+            )
+        };
+        let knowledge = Knowledge {
+            servers: ["8.4.9", "8.4.13", "8.4.10", "8.0.46"]
+                .map(|version| ServerResults::from_json(&json(version)).unwrap())
+                .into(),
+        };
+        let found = knowledge.server("mysql-8.4").unwrap();
+        assert_eq!(found.server.name(), "mysql-8.4.13");
+        assert_eq!(
+            knowledge.default_server().unwrap().server.name(),
+            "mysql-8.4.13"
+        );
+    }
+
+    #[test]
+    fn the_default_server_is_the_newest_measured_8_4() {
+        let knowledge = Knowledge::built_in();
+        assert_eq!(DEFAULT_SERIES, "mysql-8.4");
+        assert_eq!(
+            knowledge.default_server().unwrap().server.name(),
+            "mysql-8.4.13"
+        );
+    }
+
+    #[test]
+    fn the_scenarios_that_differ_between_the_servers_are_marked() {
+        let knowledge = Knowledge::built_in();
+        let [mysql_80, mysql_84] =
+            ["mysql-8.0.46", "mysql-8.4.13"].map(|name| knowledge.server(name).unwrap());
+        fn marked(results: &ServerResults) -> Vec<&str> {
+            results
+                .scenarios()
+                .iter()
+                .map(|scenario| scenario.id.as_str())
+                .filter(|id| results.varies(id))
+                .collect()
+        }
+        let mut expected = vec![
+            "add-foreign-key-no-parent-index",
+            "add-foreign-key-parent-column-prefix-index",
+            "add-foreign-key-parent-longer-index",
+            "add-foreign-key-parent-longer-unique-index",
+            "add-foreign-key-parent-plain-desc-index",
+            "add-foreign-key-parent-plain-index",
+            "add-foreign-key-parent-second-column-index",
+            "add-foreign-key-parent-unique-column-prefix-index",
+        ];
+        expected.sort_unstable();
+        for results in [mysql_80, mysql_84] {
+            let mut marked = marked(results);
+            marked.sort_unstable();
+            assert_eq!(marked, expected, "{}", results.server.name());
+        }
+        // Checked against the files themselves, every variant.
+        for scenario in mysql_84.scenarios() {
+            let theirs = mysql_80.scenario(&scenario.id).unwrap();
+            let same = Variant::ALL
+                .iter()
+                .all(|variant| theirs.verdict_for(*variant) == scenario.verdict_for(*variant));
+            assert_eq!(!same, mysql_84.varies(&scenario.id), "{}", scenario.id);
+        }
+        assert!(mysql_84.varies("no-such-scenario"));
+    }
+
+    #[test]
+    fn results_read_alone_may_differ_anywhere() {
+        let results = ServerResults::from_json(
+            r#"{"server": {"product": "mysql", "version": "8.4.13"},
+                "scenarios": [{"id": "a", "title": "a", "statement": "ALTER TABLE orders DROP note",
+                    "verdict": {"result": "runs", "algorithm": "COPY", "rebuilds_table": true,
+                                "copied_rows": 0, "writes": "blocked", "consistent": true},
+                    "observations": []}]}"#,
+        )
+        .unwrap();
+        assert!(results.varies("a"));
     }
 
     fn results(id: &str) -> ScenarioResult {

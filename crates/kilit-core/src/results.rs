@@ -39,6 +39,15 @@ impl Server {
     pub fn name(&self) -> String {
         format!("{}-{}", self.product, self.version)
     }
+
+    /// The release series, e.g. `mysql-8.4` for `mysql-8.4.13`.
+    pub fn series(&self) -> String {
+        let mut numbers = self.version.splitn(3, '.');
+        match (numbers.next(), numbers.next()) {
+            (Some(major), Some(minor)) => format!("{}-{major}.{minor}", self.product),
+            _ => self.name(),
+        }
+    }
 }
 
 /// One way of running an ALTER statement: with the server's own choice, or

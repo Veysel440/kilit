@@ -2,6 +2,7 @@
 
 use std::fmt::Write as _;
 
+use clap::ValueEnum;
 use kilit_core::{
     Algorithm, Impact, PRETEND_READ_NOTE, Prediction, Schema, ServerResults, Statement,
     StatementKind, Verdict, Writes, check_sessions, depends_on_rows, impacts,
@@ -11,15 +12,49 @@ use serde::Serialize;
 
 use crate::input::{Input, SourceKind, Unreadable};
 
+/// Nothing that the exit status counts was found.
+pub const EXIT_PASSED: u8 = 0;
+/// A statement fails or makes writes wait, and that is counted.
+pub const EXIT_FOUND: u8 = 1;
+/// kilit could not check everything.
+pub const EXIT_INCOMPLETE: u8 = 2;
+/// The only counted statements are ones kilit cannot tell what they do.
+pub const EXIT_UNKNOWN: u8 = 3;
+
+/// What the exit status counts, as `--fail-on` names it.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Count {
+    /// Statements that fail
+    Fails,
+    /// Statements that make writes wait
+    Waits,
+    /// Statements kilit cannot tell what they do
+    Unknown,
+}
+
+/// `counted` in a fixed order, each once.
+fn in_order(counted: &[Count]) -> Vec<Count> {
+    let mut counted = counted.to_vec();
+    counted.sort_unstable();
+    counted.dedup();
+    counted
+}
+
 /// What kilit says about the input.
 pub struct Report<'a> {
     server: String,
     schema: Option<SchemaSummary>,
+    /// Why the schema's server may not be the one checked against.
+    server_warnings: Vec<String>,
     sources: Vec<SourceReport<'a>>,
     unreadable: &'a [Unreadable],
     from_laravel: bool,
-    /// What kilit says about each error screen of Laravel in the input.
-    laravel_errors: Vec<&'a str>,
+    /// Each error screen of Laravel in the input: the input it is in, and
+    /// what kilit says about it.
+    laravel_errors: Vec<(&'a str, &'a str)>,
+    /// More than one input was read: messages name theirs.
+    several_inputs: bool,
     /// Tables that exist before the migration and that an ALTER changes.
     locked_tables: Vec<String>,
 }
@@ -50,16 +85,31 @@ struct Checked<'a> {
     /// A statement that only reads, after the first read of its Laravel
     /// migration: the text gives it one line.
     later_read: bool,
+    /// What other measured servers do with the statement, where it is not
+    /// what the checked server does.
+    others: Vec<OtherServer>,
+}
+
+/// Another measured server's answer to a statement.
+#[derive(Clone)]
+struct OtherServer {
+    server: String,
+    impact: Impact,
+    /// As the report would say it with `--server` naming that server.
+    answer: String,
 }
 
 impl<'a> Report<'a> {
     /// Checks every statement of `input` as one migration, in order,
     /// starting from the tables in `schema`. Each input runs in a session
-    /// of its own.
+    /// of its own. Where an answer may depend on the server, `others` are
+    /// checked too, and each statement they answer differently says so.
     pub fn new(
         results: &ServerResults,
+        others: &[&ServerResults],
         schema: Option<&(String, Schema)>,
         input: &'a Input,
+        server_warnings: Vec<String>,
     ) -> Report<'a> {
         let statements: Vec<Statement> = input
             .sources
@@ -89,6 +139,36 @@ impl<'a> Report<'a> {
             .collect();
         let findings = check_sessions(&sessions, tables, results);
         let impacts = impacts(&statements, &findings);
+        let mut others_said: Vec<Vec<OtherServer>> = vec![Vec::new(); statements.len()];
+        // When no answer used a result or a rule that differs between the
+        // servers, every server answers every statement the same way.
+        let server_dependent = findings.iter().any(|finding| finding.server_dependent);
+        if server_dependent {
+            for other in others {
+                let theirs = check_sessions(&sessions, tables, other);
+                let their_impacts = kilit_core::impacts(&statements, &theirs);
+                for (at, (finding, impact)) in theirs.iter().zip(their_impacts).enumerate() {
+                    if (impact, Shown::of(&finding.prediction))
+                        != (impacts[at], Shown::of(&findings[at].prediction))
+                    {
+                        others_said[at].push(OtherServer {
+                            server: other.server.name(),
+                            impact,
+                            answer: other_answer(&finding.prediction, impact, &statements[at]),
+                        });
+                    }
+                }
+            }
+        }
+        #[cfg(debug_assertions)]
+        same_everywhere(
+            &sessions,
+            &statements,
+            tables,
+            results,
+            others,
+            server_dependent,
+        );
         let on_new_tables = on_new_tables(&statements);
         // Rows may come from lines kilit could not read, or from a statement
         // inside a `/*! */` comment, which kilit does not see.
@@ -101,7 +181,8 @@ impl<'a> Report<'a> {
             .into_iter()
             .zip(impacts)
             .zip(on_new_tables)
-            .zip(on_empty_tables);
+            .zip(on_empty_tables)
+            .zip(others_said);
         let sources: Vec<SourceReport> = input
             .sources
             .iter()
@@ -113,7 +194,7 @@ impl<'a> Report<'a> {
                     .iter()
                     .enumerate()
                     .map(|(i, statement)| {
-                        let (((finding, impact), on_new_table), on_empty_table) = checked
+                        let ((((finding, impact), on_new_table), on_empty_table), others) = checked
                             .next()
                             .expect("check gives one finding per statement");
                         Checked {
@@ -127,6 +208,7 @@ impl<'a> Report<'a> {
                                 && impact == Impact::NotChecked
                                 && matches!(statement.kind, StatementKind::Other)
                                 && only_reads(&statement.sql),
+                            others,
                         }
                     })
                     .collect(),
@@ -159,14 +241,16 @@ impl<'a> Report<'a> {
                     .map(|(table, reason)| (table.to_owned(), reason.to_owned()))
                     .collect(),
             }),
+            server_warnings,
             sources,
             unreadable: &input.unreadable,
             from_laravel: input.from_laravel,
             laravel_errors: input
                 .laravel_errors
                 .iter()
-                .map(|error| error.message.as_str())
+                .map(|stop| (stop.input.as_str(), stop.error.message.as_str()))
                 .collect(),
+            several_inputs: input.inputs() > 1,
             locked_tables,
         }
     }
@@ -191,28 +275,35 @@ impl<'a> Report<'a> {
         summary
     }
 
-    /// 0 if nothing fails or makes writes wait, 1 if something does, 2 if
-    /// kilit could not read all of the input or Laravel stopped with an error.
-    pub fn exit_code(&self, strict: bool) -> u8 {
+    /// [`EXIT_INCOMPLETE`] if kilit could not read all of the input or
+    /// Laravel stopped with an error; else [`EXIT_FOUND`] if a statement
+    /// fails or makes writes wait and `counted` counts it; else
+    /// [`EXIT_UNKNOWN`] if `counted` counts unknown statements and there
+    /// are some; else [`EXIT_PASSED`].
+    pub fn exit_code(&self, counted: &[Count]) -> u8 {
         if !self.unreadable.is_empty() || !self.laravel_errors.is_empty() {
-            return 2;
+            return EXIT_INCOMPLETE;
         }
         let summary = self.summary();
-        if summary.fails > 0 || summary.writes_wait > 0 || (strict && summary.unknown > 0) {
-            1
+        if (counted.contains(&Count::Fails) && summary.fails > 0)
+            || (counted.contains(&Count::Waits) && summary.writes_wait > 0)
+        {
+            EXIT_FOUND
+        } else if counted.contains(&Count::Unknown) && summary.unknown > 0 {
+            EXIT_UNKNOWN
         } else {
-            0
+            EXIT_PASSED
         }
     }
 
-    /// The report for people.
-    pub fn text(&self) -> String {
+    /// The report for people. `counted` is what the exit status counts.
+    pub fn text(&self, counted: &[Count]) -> String {
         let mut out = String::new();
-        let _ = self.write_text(&mut out);
+        let _ = self.write_text(&mut out, counted);
         out
     }
 
-    fn write_text(&self, out: &mut String) -> std::fmt::Result {
+    fn write_text(&self, out: &mut String, counted: &[Count]) -> std::fmt::Result {
         writeln!(
             out,
             "checked against {}, as measured by kilit-lab",
@@ -233,6 +324,9 @@ impl<'a> Report<'a> {
                 }
                 for (table, reason) in &schema.lost {
                     writeln!(out, "  could not follow {table}: {reason}")?;
+                }
+                for warning in &self.server_warnings {
+                    writeln!(out, "  {warning}")?;
                 }
             }
             None => writeln!(
@@ -263,9 +357,13 @@ impl<'a> Report<'a> {
             }
         }
 
-        for error in &self.laravel_errors {
+        for (input, error) in &self.laravel_errors {
             writeln!(out)?;
-            writeln!(out, "{error}")?;
+            if self.several_inputs {
+                writeln!(out, "{input}: {error}")?;
+            } else {
+                writeln!(out, "{error}")?;
+            }
         }
 
         if !self.unreadable.is_empty() {
@@ -296,6 +394,25 @@ impl<'a> Report<'a> {
         let summary = self.summary();
         if summary.statements > 0 {
             writeln!(out, "{}", summary.sentence())?;
+            if summary.unknown > 0
+                && !counted.contains(&Count::Unknown)
+                && self.exit_code(counted) == EXIT_PASSED
+            {
+                let (statements, them) = if summary.unknown == 1 {
+                    ("statement is", "it")
+                } else {
+                    ("statements are", "them")
+                };
+                let mut with_unknown = in_order(counted);
+                with_unknown.push(Count::Unknown);
+                writeln!(
+                    out,
+                    "{} unknown {statements} not counted in the exit status; \
+                     --fail-on {} counts {them}",
+                    summary.unknown,
+                    names(&with_unknown)
+                )?;
+            }
         } else if !self.laravel_errors.is_empty() {
             writeln!(
                 out,
@@ -309,9 +426,11 @@ impl<'a> Report<'a> {
         Ok(())
     }
 
-    /// The report for other programs, as one JSON document.
-    pub fn json(&self, strict: bool) -> String {
+    /// The report for other programs, as one JSON document. `counted` is
+    /// what the exit status counts.
+    pub fn json(&self, counted: &[Count]) -> String {
         let report = JsonReport {
+            format_version: FORMAT_VERSION,
             kilit: env!("CARGO_PKG_VERSION"),
             server: &self.server,
             schema: self.schema.as_ref().map(|schema| JsonSchema {
@@ -342,21 +461,34 @@ impl<'a> Report<'a> {
                 })
                 .collect(),
             warnings: self
-                .laravel_errors
+                .server_warnings
                 .iter()
-                .map(|error| JsonWarning {
-                    id: "laravel-error",
+                .map(|warning| JsonWarning {
+                    id: "server-mismatch",
                     tables: &[],
-                    message: (*error).to_owned(),
+                    file: None,
+                    message: warning.clone(),
                 })
+                .chain(
+                    self.laravel_errors
+                        .iter()
+                        .map(|(input, error)| JsonWarning {
+                            id: "laravel-error",
+                            tables: &[],
+                            file: Some(input),
+                            message: (*error).to_owned(),
+                        }),
+                )
                 .chain((!self.locked_tables.is_empty()).then(|| JsonWarning {
                     id: "metadata-lock",
                     tables: &self.locked_tables,
+                    file: None,
                     message: metadata_lock_warning(),
                 }))
                 .collect(),
             summary: self.summary(),
-            exit_code: self.exit_code(strict),
+            fail_on: in_order(counted),
+            exit_code: self.exit_code(counted),
         };
         let mut json = serde_json::to_string_pretty(&report).expect("the report is plain data");
         json.push('\n');
@@ -394,20 +526,140 @@ fn shown_sql(checked: &Checked) -> String {
     }
 }
 
+/// The first line of what the report says about a statement: what it does,
+/// or why kilit cannot say.
+struct AnswerLine<'p>(&'p Prediction);
+
+impl std::fmt::Display for AnswerLine<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            // The lab's error message names the lab's own tables and keys;
+            // the notes say why this statement fails.
+            Prediction::Measured {
+                verdict: Verdict::Fails { code, .. },
+                ..
+            } => write!(f, "fails with error {code}"),
+            Prediction::Measured { verdict, .. } => write!(f, "{verdict}"),
+            Prediction::Unknown { reason } => {
+                write!(f, "UNKNOWN: {}", reason.lines().next().unwrap_or_default())
+            }
+            Prediction::NotChecked { reason } => write!(f, "not checked: {reason}"),
+        }
+    }
+}
+
+/// What another server's report says first about a statement: its answer
+/// line, and for a table the input created earlier, that nothing waits.
+fn other_answer(prediction: &Prediction, impact: Impact, statement: &Statement) -> String {
+    let answer = AnswerLine(prediction).to_string();
+    if impact == Impact::NewTable {
+        let table = changed_table(statement).unwrap_or("the table");
+        format!("{answer}; {table} is created earlier in these migrations, so nothing waits for it")
+    } else {
+        answer
+    }
+}
+
+/// What an answer shows, to compare two servers' answers: notes and reasons
+/// left out.
+#[derive(PartialEq, Eq)]
+enum Shown {
+    Fails(u16),
+    Runs {
+        algorithm: Option<Algorithm>,
+        rebuilds_table: bool,
+        copies_rows: bool,
+        writes: Writes,
+    },
+    Unknown,
+    NotChecked,
+}
+
+impl Shown {
+    fn of(prediction: &Prediction) -> Shown {
+        match prediction {
+            Prediction::Measured {
+                verdict: Verdict::Fails { code, .. },
+                ..
+            } => Shown::Fails(*code),
+            Prediction::Measured {
+                verdict:
+                    Verdict::Runs {
+                        algorithm,
+                        rebuilds_table,
+                        copied_rows,
+                        writes,
+                        ..
+                    },
+                ..
+            } => Shown::Runs {
+                algorithm: *algorithm,
+                rebuilds_table: *rebuilds_table,
+                copies_rows: copied_rows.is_some_and(|rows| rows > 0),
+                writes: *writes,
+            },
+            Prediction::Unknown { .. } => Shown::Unknown,
+            Prediction::NotChecked { .. } => Shown::NotChecked,
+        }
+    }
+}
+
+/// In debug builds, which the tests run: checks that every server whose
+/// answers depend on no server-specific result answers each statement as
+/// every other server does, so skipping the other servers hides nothing.
+#[cfg(debug_assertions)]
+fn same_everywhere(
+    sessions: &[&[Statement]],
+    statements: &[Statement],
+    tables: &Schema,
+    results: &ServerResults,
+    others: &[&ServerResults],
+    server_dependent: bool,
+) {
+    let all: Vec<&ServerResults> = std::iter::once(results)
+        .chain(others.iter().copied())
+        .collect();
+    let said: Vec<(Vec<kilit_core::Finding>, Vec<Impact>)> = all
+        .iter()
+        .map(|server| {
+            let findings = check_sessions(sessions, tables, server);
+            let impacts = impacts(statements, &findings);
+            (findings, impacts)
+        })
+        .collect();
+    for (at, (findings, impacts)) in said.iter().enumerate() {
+        let skips = if at == 0 {
+            !server_dependent
+        } else {
+            !findings.iter().any(|finding| finding.server_dependent)
+        };
+        if !skips {
+            continue;
+        }
+        for (other, (their_findings, their_impacts)) in said.iter().enumerate() {
+            for i in 0..statements.len() {
+                assert!(
+                    (impacts[i], Shown::of(&findings[i].prediction))
+                        == (their_impacts[i], Shown::of(&their_findings[i].prediction)),
+                    "{} skips the other servers, but {} answers line {} otherwise",
+                    all[at].server.name(),
+                    all[other].server.name(),
+                    statements[i].line
+                );
+            }
+        }
+    }
+}
+
 fn write_prediction(out: &mut String, checked: &Checked) -> std::fmt::Result {
     match &checked.prediction {
         Prediction::Measured {
             case,
-            verdict,
             evidence,
             notes,
+            ..
         } => {
-            match verdict {
-                // The lab's error message names the lab's own tables and
-                // keys; the notes say why this statement fails.
-                Verdict::Fails { code, .. } => writeln!(out, "    fails with error {code}")?,
-                runs => writeln!(out, "    {runs}")?,
-            }
+            writeln!(out, "    {}", AnswerLine(&checked.prediction))?;
             let plural = if evidence.len() == 1 { "" } else { "s" };
             writeln!(
                 out,
@@ -423,12 +675,14 @@ fn write_prediction(out: &mut String, checked: &Checked) -> std::fmt::Result {
             }
         }
         Prediction::Unknown { reason } => {
-            for (i, line) in reason.lines().enumerate() {
-                let label = if i == 0 { "UNKNOWN: " } else { "  " };
-                writeln!(out, "    {label}{line}")?;
+            writeln!(out, "    {}", AnswerLine(&checked.prediction))?;
+            for line in reason.lines().skip(1) {
+                writeln!(out, "      {line}")?;
             }
         }
-        Prediction::NotChecked { reason } => writeln!(out, "    not checked: {reason}")?,
+        Prediction::NotChecked { .. } => {
+            writeln!(out, "    {}", AnswerLine(&checked.prediction))?;
+        }
     }
     if checked.impact == Impact::NewTable {
         let table = changed_table(checked.statement).unwrap_or("the table");
@@ -440,6 +694,9 @@ fn write_prediction(out: &mut String, checked: &Checked) -> std::fmt::Result {
     }
     if checked.first_read {
         writeln!(out, "    - {PRETEND_READ_NOTE}")?;
+    }
+    for other in &checked.others {
+        writeln!(out, "    - on {}: {}", other.server, other.answer)?;
     }
     Ok(())
 }
@@ -457,7 +714,7 @@ fn changed_table(statement: &Statement) -> Option<&str> {
 }
 
 /// `text` in lines of at most `width` characters, broken at spaces.
-fn wrap(text: &str, width: usize) -> Vec<String> {
+pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {
@@ -519,8 +776,23 @@ impl Summary {
     }
 }
 
+/// The version of the JSON format: a new minor version adds fields, a new
+/// major version removes, renames or changes one.
+const FORMAT_VERSION: &str = "1.0";
+
+/// The names of `counted` as `--fail-on` takes them.
+fn names(counted: &[Count]) -> String {
+    counted
+        .iter()
+        .filter_map(|count| count.to_possible_value())
+        .map(|value| value.get_name().to_owned())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 #[derive(Serialize)]
 struct JsonReport<'a> {
+    format_version: &'static str,
     kilit: &'static str,
     server: &'a str,
     schema: Option<JsonSchema<'a>>,
@@ -528,6 +800,7 @@ struct JsonReport<'a> {
     unreadable: Vec<JsonUnreadable<'a>>,
     warnings: Vec<JsonWarning<'a>>,
     summary: Summary,
+    fail_on: Vec<Count>,
     exit_code: u8,
 }
 
@@ -575,6 +848,15 @@ struct JsonStatement<'a> {
     notes: Vec<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    other_servers: Vec<JsonOtherServer<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonOtherServer<'a> {
+    server: &'a str,
+    impact: Impact,
+    answer: &'a str,
 }
 
 impl<'a> From<&'a Checked<'a>> for JsonStatement<'a> {
@@ -592,6 +874,15 @@ impl<'a> From<&'a Checked<'a>> for JsonStatement<'a> {
             evidence: &[],
             notes: Vec::new(),
             reason: None,
+            other_servers: checked
+                .others
+                .iter()
+                .map(|other| JsonOtherServer {
+                    server: &other.server,
+                    impact: other.impact,
+                    answer: &other.answer,
+                })
+                .collect(),
         };
         match &checked.prediction {
             Prediction::Measured {
@@ -641,12 +932,22 @@ struct JsonUnreadable<'a> {
 struct JsonWarning<'a> {
     id: &'static str,
     tables: &'a [String],
+    /// The input a Laravel error screen is in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file: Option<&'a str>,
     message: String,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_what_is_counted_in_a_fixed_order_once() {
+        let counted = in_order(&[Count::Unknown, Count::Waits, Count::Fails, Count::Waits]);
+        assert_eq!(names(&counted), "fails,waits,unknown");
+        assert_eq!(names(&in_order(&[Count::Waits])), "waits");
+    }
 
     #[test]
     fn wraps_at_spaces() {

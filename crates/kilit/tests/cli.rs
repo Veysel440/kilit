@@ -114,10 +114,10 @@ fn writes_that_continue_exit_with_0() {
 }
 
 #[test]
-fn strict_also_fails_on_what_kilit_cannot_tell() {
+fn strict_also_counts_what_kilit_cannot_tell_and_exits_with_3() {
     let sql = "alter table `orders` drop `legacy_code`, drop `legacy_flag`;";
     assert_eq!(kilit(&["check"], sql).status.code(), Some(0));
-    assert_eq!(kilit(&["check", "--strict"], sql).status.code(), Some(1));
+    assert_eq!(kilit(&["check", "--strict"], sql).status.code(), Some(3));
 }
 
 #[test]
@@ -131,7 +131,11 @@ fn what_kilit_cannot_tell_on_a_new_table_is_unknown() {
     let output = kilit(&["check"], sql);
     let text = stdout(&output);
     assert!(
-        text.ends_with("\n2 statements: 1 unknown, 1 not checked\n"),
+        text.ends_with(
+            "\n2 statements: 1 unknown, 1 not checked\n\
+             1 unknown statement is not counted in the exit status; \
+             --fail-on fails,waits,unknown counts it\n"
+        ),
         "{text}"
     );
     assert!(
@@ -140,7 +144,7 @@ fn what_kilit_cannot_tell_on_a_new_table_is_unknown() {
     );
     assert!(!text.contains("metadata lock on"), "{text}");
     assert_eq!(output.status.code(), Some(0), "{text}");
-    assert_eq!(kilit(&["check", "--strict"], sql).status.code(), Some(1));
+    assert_eq!(kilit(&["check", "--strict"], sql).status.code(), Some(3));
 }
 
 #[test]
@@ -160,7 +164,14 @@ fn a_postgresql_style_migration_gets_no_measured_answer() {
     ] {
         assert!(text.contains(reason), "{text}");
     }
-    assert!(text.ends_with("\n2 statements: 2 unknown\n"), "{text}");
+    assert!(
+        text.ends_with(
+            "\n2 statements: 2 unknown\n\
+             2 unknown statements are not counted in the exit status; \
+             --fail-on fails,waits,unknown counts them\n"
+        ),
+        "{text}"
+    );
     // MySQL rejects them before it locks anything.
     assert!(!text.contains("metadata lock on"), "{text}");
     assert_eq!(output.status.code(), Some(0), "{text}");
@@ -168,7 +179,7 @@ fn a_postgresql_style_migration_gets_no_measured_answer() {
         &["check", "--strict", "--schema", schema.to_str().unwrap()],
         sql,
     );
-    assert_eq!(strict.status.code(), Some(1));
+    assert_eq!(strict.status.code(), Some(3));
 }
 
 #[test]
@@ -591,10 +602,10 @@ fn a_foreign_key_to_a_column_without_an_index_fails_with_the_error_of_each_serve
     // $table->foreign('user_name')->references('name')->on('users');
     let schema = example("mysql-schema.sql");
     let schema = schema.to_str().unwrap();
-    for (server, code, other) in [
-        (Some("mysql-8.0.46"), 1822, 6125),
-        (None, 6125, 1822),
-        (Some("mysql-8.4.13"), 6125, 1822),
+    for (server, code, other_server, other) in [
+        (Some("mysql-8.0.46"), 1822, "mysql-8.4.13", 6125),
+        (None, 6125, "mysql-8.0.46", 1822),
+        (Some("mysql-8.4.13"), 6125, "mysql-8.0.46", 1822),
     ] {
         let mut args = vec!["check", "--schema", schema];
         if let Some(server) = server {
@@ -611,7 +622,14 @@ fn a_foreign_key_to_a_column_without_an_index_fails_with_the_error_of_each_serve
             text.contains(&format!("    fails with error {code}\n")),
             "{text}"
         );
-        assert!(!text.contains(&format!("error {other}")), "{text}");
+        // The other measured server answers the same statement with its own
+        // error, and the note is the last line of the statement.
+        assert!(
+            text.contains(&format!(
+                "    - on {other_server}: fails with error {other}\n\nmetadata lock on"
+            )),
+            "{text}"
+        );
         assert!(
             text.ends_with("\n2 statements: 1 fails, 1 runs while writes continue\n"),
             "{text}"
@@ -627,6 +645,15 @@ fn a_foreign_key_to_a_column_without_an_index_fails_with_the_error_of_each_serve
         assert_eq!(statements[0]["impact"], "writes_continue");
         assert_eq!(statements[1]["impact"], "fails");
         assert_eq!(statements[1]["error"], code);
+        assert_eq!(
+            statements[1]["other_servers"],
+            serde_json::json!([{
+                "server": other_server,
+                "impact": "fails",
+                "answer": format!("fails with error {other}"),
+            }])
+        );
+        assert!(statements[0].get("other_servers").is_none());
         assert_eq!(json["summary"]["fails"], 1);
         assert_eq!(json["summary"]["writes_continue"], 1);
         assert_eq!(json["exit_code"], 1);
@@ -682,7 +709,7 @@ fn an_integer_foreign_key_column_fails_with_3780_on_both_servers() {
 }
 
 #[test]
-fn restrict_fk_on_non_standard_key_makes_the_index_answer_unknown_and_strict_exits_with_1() {
+fn restrict_fk_on_non_standard_key_makes_the_index_answer_unknown_and_strict_exits_with_3() {
     let sql = format!("SET restrict_fk_on_non_standard_key = OFF;\n{FOREIGN_KEY_TO_NAME}");
     for server in [Some("mysql-8.0.46"), None] {
         let (json, status) = json_check(server, false, &sql);
@@ -694,8 +721,8 @@ fn restrict_fk_on_non_standard_key_makes_the_index_answer_unknown_and_strict_exi
         assert_eq!(json["exit_code"], 0);
         assert_eq!(status, Some(0));
         let (json, status) = json_check(server, true, &sql);
-        assert_eq!(json["exit_code"], 1);
-        assert_eq!(status, Some(1));
+        assert_eq!(json["exit_code"], 3);
+        assert_eq!(status, Some(3));
     }
 }
 
@@ -719,13 +746,13 @@ fn every_way_of_setting_restrict_fk_on_non_standard_key_is_unknown_for_a_foreign
             let statements = json["sources"][0]["statements"].as_array().unwrap();
             assert_eq!(statements[3]["impact"], "unknown", "{set}");
             assert_eq!(status, Some(0), "{set}");
-            assert_eq!(json_check(server, true, &sql(set)).1, Some(1), "{set}");
+            assert_eq!(json_check(server, true, &sql(set)).1, Some(3), "{set}");
         }
     }
 }
 
 #[test]
-fn null_on_delete_on_a_not_null_column_is_unknown_and_strict_exits_with_1() {
+fn null_on_delete_on_a_not_null_column_is_unknown_and_strict_exits_with_3() {
     // $table->foreignId('user_id')->constrained()->nullOnDelete(); on a column
     // that is not nullable.
     let sql = "alter table `orders` add `store_id` bigint unsigned not null;
@@ -735,7 +762,7 @@ fn null_on_delete_on_a_not_null_column_is_unknown_and_strict_exits_with_1() {
         let (json, status) = json_check(server, false, sql);
         assert_eq!(json["sources"][0]["statements"][1]["impact"], "unknown");
         assert_eq!(status, Some(0));
-        assert_eq!(json_check(server, true, sql).1, Some(1));
+        assert_eq!(json_check(server, true, sql).1, Some(3));
     }
 }
 
@@ -895,8 +922,8 @@ fn the_exit_code_for_a_myisam_table_follows_the_impact_with_and_without_strict()
         (MYISAM_FAILS_SQL, 1, 1),
         // Metadata only: nothing waits.
         (MYISAM_INSTANT_SQL, 0, 0),
-        // Not measured on MyISAM: only --strict fails the run.
-        (MYISAM_UNKNOWN_SQL, 0, 1),
+        // Not measured on MyISAM: only --strict counts it, with exit status 3.
+        (MYISAM_UNKNOWN_SQL, 0, 3),
     ] {
         assert_eq!(json_against(&schema, false, sql).1, Some(plain), "{sql}");
         let (json, status) = json_against(&schema, true, sql);
@@ -924,7 +951,7 @@ fn the_same_schema_with_an_innodb_orders_keeps_the_innodb_answers() {
 }
 
 #[test]
-fn a_table_of_another_engine_is_unknown_and_strict_exits_with_1() {
+fn a_table_of_another_engine_is_unknown_and_strict_exits_with_3() {
     for engine in ["MEMORY", "ARCHIVE"] {
         let schema = write_schema_with_engine("schema-with-another-engine.sql", engine);
         let (json, status) = json_against(&schema, false, MYISAM_COPY_SQL);
@@ -937,7 +964,7 @@ fn a_table_of_another_engine_is_unknown_and_strict_exits_with_1() {
         assert_eq!(status, Some(0), "{engine}");
         assert_eq!(
             json_against(&schema, true, MYISAM_COPY_SQL).1,
-            Some(1),
+            Some(3),
             "{engine}"
         );
         let output = kilit(
@@ -971,13 +998,13 @@ fn a_myisam_table_created_in_the_input_is_never_waited_for_unless_it_fails() {
     assert_eq!(json["exit_code"], 1);
     assert_eq!(output.status.code(), Some(1));
 
-    // Only the measured success and the unknown: exit 0, and 1 with --strict.
+    // Only the measured success and the unknown: exit 0, and 3 with --strict.
     let sql = "create table `order_tags` (`id` bigint unsigned not null primary key, \
                `amount` int not null) engine = MyISAM;
                alter table `order_tags` add `weight` int null;
                alter table `order_tags` modify `amount` smallint not null;";
     assert_eq!(kilit(&["check"], sql).status.code(), Some(0));
-    assert_eq!(kilit(&["check", "--strict"], sql).status.code(), Some(1));
+    assert_eq!(kilit(&["check", "--strict"], sql).status.code(), Some(3));
 }
 
 // Regression test for what the step 9a review found: a key over 1000 bytes
@@ -1017,13 +1044,13 @@ fn a_myisam_key_over_1000_bytes_is_unknown_after_a_sql_mode_and_says_it_assumes_
     );
     assert_eq!(status, Some(1));
 
-    // After a SET of sql_mode: unknown, which fails the run only with
-    // --strict.
+    // After a SET of sql_mode: unknown, which stops the run (exit 3) only
+    // with --strict.
     let sql = format!("SET SESSION sql_mode = '';\n{index}");
     let (json, status) = json_against(&schema, false, &sql);
     assert_eq!(json["sources"][0]["statements"][1]["impact"], "unknown");
     assert_eq!(status, Some(0));
-    assert_eq!(json_against(&schema, true, &sql).1, Some(1));
+    assert_eq!(json_against(&schema, true, &sql).1, Some(3));
 }
 
 #[test]
@@ -1093,7 +1120,7 @@ fn uuid_short_sysdate_and_user_defaults_fail_with_1674_and_the_exit_code_says_so
 }
 
 #[test]
-fn a_uuid_short_default_after_sql_log_bin_is_off_is_unknown_and_only_strict_exits_with_1() {
+fn a_uuid_short_default_after_sql_log_bin_is_off_is_unknown_and_only_strict_exits_with_3() {
     let schema = example("mysql-schema.sql");
     let schema = schema.to_str().unwrap();
     let sql = "SET sql_log_bin = 0;
@@ -1109,7 +1136,7 @@ fn a_uuid_short_default_after_sql_log_bin_is_off_is_unknown_and_only_strict_exit
     );
     assert_eq!(output.status.code(), Some(0));
     let output = kilit(&["check", "--schema", schema, "--strict"], sql);
-    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert_eq!(output.status.code(), Some(3), "{}", stdout(&output));
 }
 
 // Step 9b: a table's ROW_FORMAT and the old_alter_table setting.
@@ -1147,7 +1174,8 @@ CREATE TABLE `logs` (
     file
 }
 
-// (statement, exit status without --strict, exit status with --strict)
+// (statement, exit status without --strict, exit status with --strict; 3 is
+// an unknown statement counted by --strict)
 const ROW_FORMAT_STATEMENTS: [(&str, i32, i32); 6] = [
     // COMPRESSED: INPLACE with a rebuild, writes continue (INSTANT on DYNAMIC).
     ("alter table orders add coupon varchar(255) null;", 0, 0),
@@ -1168,7 +1196,7 @@ const ROW_FORMAT_STATEMENTS: [(&str, i32, i32); 6] = [
         "alter table orders add constraint fk_orders_user foreign key (user_id) \
          references users (id);",
         0,
-        1,
+        3,
     ),
 ];
 
@@ -1372,7 +1400,7 @@ fn a_written_algorithm_wins_over_old_alter_table_in_the_command_too() {
 }
 
 #[test]
-fn old_alter_table_set_globally_is_unknown_and_only_strict_exits_with_1() {
+fn old_alter_table_set_globally_is_unknown_and_only_strict_exits_with_3() {
     let schema = write_schema_with_engine("schema-for-old-alter-table-global.sql", "InnoDB");
     let sql = "SET GLOBAL old_alter_table = ON;
                alter table orders add coupon varchar(255) null;";
@@ -1389,8 +1417,8 @@ fn old_alter_table_set_globally_is_unknown_and_only_strict_exits_with_1() {
     assert_eq!(json["exit_code"], 0);
     assert_eq!(status, Some(0));
     let (json, status) = json_against(&schema, true, sql);
-    assert_eq!(json["exit_code"], 1);
-    assert_eq!(status, Some(1));
+    assert_eq!(json["exit_code"], 3);
+    assert_eq!(status, Some(3));
 }
 
 // ---------------------------------------------------------------------------
@@ -1689,6 +1717,7 @@ fn the_error_is_a_laravel_error_warning_in_the_json_and_the_exit_code_is_2() {
             serde_json::json!([{
                 "id": "laravel-error",
                 "tables": [],
+                "file": "standard input",
                 "message": stopped_in(THROW_NAME),
             }]),
             "{args:?}"
@@ -3284,9 +3313,9 @@ fn a_forced_algorithm_on_a_table_comment_changes_the_impact_and_the_exit_code() 
             if impact == "fails" {
                 assert_eq!(statement["error"], 1845, "{clause}");
             }
-            // Unknown makes only --strict exit with 1.
+            // Unknown makes only --strict exit, with 3.
             let code = if strict && impact == "unknown" {
-                1
+                3
             } else {
                 code
             };
@@ -3297,7 +3326,7 @@ fn a_forced_algorithm_on_a_table_comment_changes_the_impact_and_the_exit_code() 
 }
 
 #[test]
-fn an_engine_or_row_format_change_is_unknown_with_its_reason_and_only_strict_exits_with_1() {
+fn an_engine_or_row_format_change_is_unknown_with_its_reason_and_only_strict_exits_with_3() {
     for (sql, reason) in [
         (
             "alter table `orders` engine = InnoDB;",
@@ -3318,8 +3347,8 @@ fn an_engine_or_row_format_change_is_unknown_with_its_reason_and_only_strict_exi
         assert_eq!(statement["reason"], reason, "{sql}");
         assert_eq!(code, Some(0), "{sql}");
         let (json, code) = option_check("mysql-8.4.13", true, sql);
-        assert_eq!(json["exit_code"], 1, "{sql}");
-        assert_eq!(code, Some(1), "{sql}");
+        assert_eq!(json["exit_code"], 3, "{sql}");
+        assert_eq!(code, Some(3), "{sql}");
     }
 }
 
@@ -3597,7 +3626,7 @@ fn a_global_foreign_key_checks_in_one_file_makes_the_checks_unknown_in_every_lat
             assert_eq!(code, Some(1), "{set}");
         }
     }
-    // Nothing fails: only unknown, and only strict exits with 1.
+    // Nothing fails: only unknown, and only strict exits, with 3.
     let files = session_files(
         "session_checks_global_only_unknown",
         &[
@@ -3616,7 +3645,7 @@ fn a_global_foreign_key_checks_in_one_file_makes_the_checks_unknown_in_every_lat
     assert_eq!(last_of(&json, 1)["impact"], "unknown");
     assert_eq!(code, Some(0));
     let (_, code) = files_json(&files, &["--strict"], "");
-    assert_eq!(code, Some(1));
+    assert_eq!(code, Some(3));
 }
 
 #[test]
@@ -3677,7 +3706,7 @@ fn old_alter_table_set_globally_or_unreadably_in_one_file_is_unknown_in_the_next
         assert_eq!(statement["reason"], FILE_OLD_ALTER_REASON, "{set}");
         assert_eq!(code, Some(0), "{set}");
         let (_, code) = files_json(&files, &["--strict"], "");
-        assert_eq!(code, Some(1), "{set}");
+        assert_eq!(code, Some(3), "{set}");
     }
 }
 
@@ -3977,4 +4006,1482 @@ CREATE TABLE orders (
     );
     let statement = last_of(&one, 0);
     assert_ne!(statement["error"], 1828, "{statement}");
+}
+
+// ---------------------------------------------------------------------------
+// Step 12: what kilit promises to the programs that use it. Exit statuses 0
+// to 3 and --fail-on, which server an answer is for and what the other
+// measured server says, the server version a schema dump names, the JSON's
+// format version, and the file a Laravel error belongs to.
+// ---------------------------------------------------------------------------
+
+/// Runs on every server: writes continue.
+const RUNS: &str = "alter table `orders` add `coupon` varchar(255) null;";
+/// Fails with error 1674 on every server.
+const FAILS: &str =
+    "alter table `orders` add `ref` bigint unsigned not null default (UUID_SHORT());";
+/// COPY: writes wait.
+const WAITS: &str = "alter table `orders` modify `amount` bigint not null;";
+/// MySQL rejects NOT VALID with error 1064: kilit cannot tell.
+const UNKNOWN: &str =
+    "alter table `orders` add constraint `orders_amount_check` check (`amount` > 0) not valid;";
+/// Lines of `migrate --pretend` output that kilit cannot read.
+const UNREADABLE: &str = "   INFO  Running migrations.
+
+  2026_11_02_090100_widen_amount_on_orders_table .............................
+
+   ERROR  [2026_11_02_090100_widen_amount_on_orders_table] failed to dump queries.
+";
+
+/// kilit against the example's tables.
+fn on_example_tables(args: &[&str], input: &str) -> Output {
+    let schema = example("mysql-schema.sql");
+    let mut all = vec!["check", "--schema", schema.to_str().unwrap()];
+    all.extend(args);
+    kilit(&all, input)
+}
+
+/// The exit status of kilit against the example's tables.
+fn status_on_example_tables(args: &[&str], input: &str) -> Option<i32> {
+    on_example_tables(args, input).status.code()
+}
+
+/// kilit against the example's tables, over `files`.
+fn files_on_example_tables(files: &[PathBuf], args: &[&str]) -> Output {
+    let schema = example("mysql-schema.sql");
+    let mut all = vec!["check", "--schema", schema.to_str().unwrap()];
+    all.extend(args);
+    all.extend(files.iter().map(|path| path.to_str().unwrap()));
+    kilit(&all, "")
+}
+
+#[test]
+fn every_exit_status_means_what_the_help_says() {
+    // 0: nothing that --fail-on counts was found.
+    assert_eq!(status_on_example_tables(&[], RUNS), Some(0));
+    // 1: a statement fails, or makes writes wait.
+    assert_eq!(status_on_example_tables(&[], FAILS), Some(1));
+    assert_eq!(status_on_example_tables(&[], WAITS), Some(1));
+    // 2: kilit could not check everything.
+    assert_eq!(status_on_example_tables(&[], UNREADABLE), Some(2));
+    assert_eq!(status_on_example_tables(&[], C1_THROW_L12), Some(2));
+    assert_eq!(status_on_example_tables(&["--nope"], RUNS), Some(2));
+    // 3: the only statements --fail-on counts are unknown.
+    assert_eq!(status_on_example_tables(&["--strict"], UNKNOWN), Some(3));
+    assert_eq!(
+        status_on_example_tables(&["--fail-on", "unknown"], UNKNOWN),
+        Some(3)
+    );
+}
+
+#[test]
+fn the_json_exit_code_is_the_exit_status_for_each_of_them() {
+    for (args, input, code) in [
+        (&[][..], RUNS, 0),
+        (&[][..], FAILS, 1),
+        (&[][..], WAITS, 1),
+        (&[][..], UNKNOWN, 0),
+        (&["--strict"][..], UNKNOWN, 3),
+        (&[][..], UNREADABLE, 2),
+        (&["--strict"][..], C1_THROW_L12, 2),
+    ] {
+        let mut all = vec!["--format", "json"];
+        all.extend(args);
+        let output = on_example_tables(&all, input);
+        assert_eq!(json_of(&output)["exit_code"], code, "{args:?}: {input}");
+        assert_eq!(output.status.code(), Some(code), "{args:?}: {input}");
+    }
+}
+
+#[test]
+fn when_several_things_apply_2_wins_over_1_and_1_over_3() {
+    let files = session_files(
+        "step12_precedence",
+        &[
+            ("fails.sql", FAILS),
+            ("unknown.sql", UNKNOWN),
+            ("both.sql", &format!("{FAILS}\n{UNKNOWN}")),
+            ("waits_and_unknown.sql", &format!("{WAITS}\n{UNKNOWN}")),
+            ("error.txt", C1_THROW_L12),
+            ("unreadable.txt", UNREADABLE),
+        ],
+    );
+    let [fails, unknown, both, waits_and_unknown, error, unreadable] = files.as_slice() else {
+        unreachable!()
+    };
+    for (inputs, args, code) in [
+        // 2 and 1: an error screen, or lines kilit cannot read, after a
+        // failure.
+        (vec![fails, error], vec![], 2),
+        (vec![fails, unreadable], vec![], 2),
+        // 2 and 3.
+        (vec![unknown, error], vec!["--strict"], 2),
+        (vec![unknown, unreadable], vec!["--strict"], 2),
+        // 1 and 3: the failure wins, with --strict as well.
+        (vec![both], vec!["--strict"], 1),
+        (vec![fails, unknown], vec!["--strict"], 1),
+        (vec![waits_and_unknown], vec!["--strict"], 1),
+        // 2, 1 and 3 together.
+        (vec![both, error], vec!["--strict"], 2),
+        (
+            vec![both, unreadable],
+            vec!["--fail-on", "fails,waits,unknown"],
+            2,
+        ),
+        // 3 alone, and 1 when the failure is counted too.
+        (vec![unknown], vec!["--strict"], 3),
+        (vec![unknown], vec!["--fail-on", "unknown"], 3),
+        (vec![both], vec!["--fail-on", "unknown"], 3),
+        (vec![both], vec!["--fail-on", "fails,unknown"], 1),
+        // 2 also when --fail-on counts nothing that was found.
+        (vec![unknown, error], vec!["--fail-on", "fails"], 2),
+        (vec![unknown, error], vec![], 2),
+    ] {
+        let inputs: Vec<PathBuf> = inputs.into_iter().cloned().collect();
+        let output = files_on_example_tables(&inputs, &args);
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{inputs:?} {args:?}: {}",
+            stdout(&output)
+        );
+        let mut json_args = vec!["--format", "json"];
+        json_args.extend(&args);
+        let output = files_on_example_tables(&inputs, &json_args);
+        assert_eq!(json_of(&output)["exit_code"], code, "{inputs:?} {args:?}");
+    }
+}
+
+#[test]
+fn each_fail_on_list_counts_what_it_names_and_nothing_else() {
+    // (--fail-on arguments, exit status for a run that only fails, only makes
+    // writes wait, only has an unknown statement)
+    let table: [(&[&str], i32, i32, i32); 13] = [
+        (&[], 1, 1, 0),
+        (&["--fail-on", "fails"], 1, 0, 0),
+        (&["--fail-on", "waits"], 0, 1, 0),
+        (&["--fail-on", "unknown"], 0, 0, 3),
+        (&["--fail-on", "fails,waits"], 1, 1, 0),
+        (&["--fail-on", "fails,unknown"], 1, 0, 3),
+        (&["--fail-on", "waits,unknown"], 0, 1, 3),
+        (&["--fail-on", "unknown,waits,fails"], 1, 1, 3),
+        (&["--fail-on", "fails,waits,unknown"], 1, 1, 3),
+        // A repeated flag adds to the list.
+        (&["--fail-on", "fails", "--fail-on", "unknown"], 1, 0, 3),
+        (&["--fail-on", "waits", "--fail-on", "waits"], 0, 1, 0),
+        // The same word twice counts once.
+        (&["--fail-on", "fails,fails"], 1, 0, 0),
+        (&["--strict"], 1, 1, 3),
+    ];
+    for (args, fails, waits, unknown) in table {
+        for (input, code) in [(FAILS, fails), (WAITS, waits), (UNKNOWN, unknown)] {
+            assert_eq!(
+                status_on_example_tables(args, input),
+                Some(code),
+                "{args:?}: {input}"
+            );
+        }
+        // A run that is clean passes whatever is counted.
+        assert_eq!(status_on_example_tables(args, RUNS), Some(0), "{args:?}");
+    }
+}
+
+#[test]
+fn an_unknown_statement_next_to_a_wait_exits_with_1_and_with_3_only_when_the_wait_is_not_counted() {
+    let both = format!("{WAITS}\n{UNKNOWN}");
+    for (args, code) in [
+        (vec![], 1),
+        (vec!["--strict"], 1),
+        (vec!["--fail-on", "waits"], 1),
+        (vec!["--fail-on", "fails,unknown"], 3),
+        (vec!["--fail-on", "unknown"], 3),
+        (vec!["--fail-on", "fails"], 0),
+    ] {
+        assert_eq!(
+            status_on_example_tables(&args, &both),
+            Some(code),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn a_bad_fail_on_exits_with_2_and_says_which_words_are_valid() {
+    for (value, word) in [
+        ("fail", Some("fail")),
+        ("foo", Some("foo")),
+        ("fails,foo", Some("foo")),
+        ("fails,waits,everything", Some("everything")),
+        // Words are lower case.
+        ("Fails", Some("Fails")),
+        ("FAILS,waits", Some("FAILS")),
+        // An empty list, and an empty word at the end of one.
+        ("", None),
+        ("fails,", None),
+        ("waits,unknown,", None),
+    ] {
+        let output = on_example_tables(&["--fail-on", value], RUNS);
+        assert_eq!(output.status.code(), Some(2), "{value:?}");
+        assert_eq!(stdout(&output), "", "{value:?}");
+        let message = stderr(&output);
+        assert!(!message.is_empty(), "{value:?}");
+        if let Some(word) = word {
+            assert!(message.contains(word), "{value:?}: {message}");
+            for valid in ["fails", "waits", "unknown"] {
+                assert!(message.contains(valid), "{value:?}: {message}");
+            }
+        }
+        // The same with the other spelling of the option.
+        let output = on_example_tables(&[&format!("--fail-on={value}")], RUNS);
+        assert_eq!(output.status.code(), Some(2), "{value:?}");
+        assert_eq!(stdout(&output), "", "{value:?}");
+    }
+    // A missing value.
+    let output = on_example_tables(&["--fail-on"], RUNS);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stdout(&output), "");
+}
+
+#[test]
+fn strict_and_fail_on_together_exit_with_2_in_either_order() {
+    for args in [
+        &["--strict", "--fail-on", "fails"][..],
+        &["--fail-on", "fails", "--strict"][..],
+        &["--fail-on", "fails,waits,unknown", "--strict"][..],
+        &["--strict", "--fail-on=unknown"][..],
+    ] {
+        for input in [RUNS, FAILS, UNKNOWN] {
+            let output = on_example_tables(args, input);
+            assert_eq!(output.status.code(), Some(2), "{args:?}");
+            assert_eq!(stdout(&output), "", "{args:?}");
+            assert!(stderr(&output).contains("--strict"), "{args:?}");
+            assert!(stderr(&output).contains("--fail-on"), "{args:?}");
+        }
+    }
+}
+
+#[test]
+fn the_json_names_what_was_counted_in_fail_on() {
+    let counted = |args: &[&str]| {
+        let mut all = vec!["--format", "json"];
+        all.extend(args);
+        let json = json_of(&on_example_tables(&all, RUNS));
+        let mut words: Vec<String> = json["fail_on"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|word| word.as_str().unwrap().to_owned())
+            .collect();
+        words.sort();
+        words
+    };
+    assert_eq!(counted(&[]), ["fails", "waits"]);
+    assert_eq!(counted(&["--strict"]), ["fails", "unknown", "waits"]);
+    assert_eq!(counted(&["--fail-on", "fails"]), ["fails"]);
+    assert_eq!(counted(&["--fail-on", "waits"]), ["waits"]);
+    assert_eq!(counted(&["--fail-on", "unknown"]), ["unknown"]);
+    assert_eq!(
+        counted(&["--fail-on", "unknown,fails"]),
+        ["fails", "unknown"]
+    );
+    // A word given twice is listed once.
+    assert_eq!(counted(&["--fail-on", "waits,waits"]), ["waits"]);
+    assert_eq!(
+        counted(&["--fail-on", "fails", "--fail-on", "waits"]),
+        ["fails", "waits"]
+    );
+    // The list is printed even when the run is an error screen.
+    let json = json_of(&on_example_tables(&["--format", "json"], C1_THROW_L12));
+    assert_eq!(json["fail_on"], serde_json::json!(["fails", "waits"]));
+    assert_eq!(json["exit_code"], 2);
+}
+
+#[test]
+fn the_json_has_a_format_version_first_and_the_counted_list_just_before_the_exit_code() {
+    for (args, input) in [
+        (vec![], RUNS),
+        (vec![], FAILS),
+        (vec!["--strict"], UNKNOWN),
+        (vec![], C1_THROW_L12),
+    ] {
+        let mut all = vec!["--format", "json"];
+        all.extend(&args);
+        let output = on_example_tables(&all, input);
+        let text = stdout(&output);
+        assert!(
+            text.starts_with("{\n  \"format_version\": \"1.0\",\n"),
+            "{text}"
+        );
+        let fail_on = text.find("\n  \"fail_on\": [").expect(&text);
+        let exit_code = text.find("\n  \"exit_code\": ").expect(&text);
+        assert!(text[fail_on..exit_code].ends_with("],"), "{text}");
+        assert!(
+            !text[fail_on + 1..exit_code].contains("\n  \""),
+            "something sits between fail_on and exit_code: {text}"
+        );
+        assert!(text.trim_end().ends_with("}"), "{text}");
+        assert_eq!(json_of(&output)["format_version"], "1.0");
+    }
+}
+
+#[test]
+fn a_passing_run_with_unknown_statements_ends_with_a_line_that_says_how_to_count_them() {
+    let one = stdout(&on_example_tables(&[], UNKNOWN));
+    assert!(
+        one.ends_with(
+            "\n1 statement: 1 unknown\n\
+             1 unknown statement is not counted in the exit status; \
+             --fail-on fails,waits,unknown counts it\n"
+        ),
+        "{one}"
+    );
+    let two = stdout(&on_example_tables(&[], &format!("{UNKNOWN}\n{UNKNOWN}")));
+    assert!(
+        two.ends_with(
+            "\n2 statements: 2 unknown\n\
+             2 unknown statements are not counted in the exit status; \
+             --fail-on fails,waits,unknown counts them\n"
+        ),
+        "{two}"
+    );
+    // Unknown statements next to ones that pass.
+    let mixed = stdout(&on_example_tables(&[], &format!("{RUNS}\n{UNKNOWN}")));
+    assert!(
+        mixed.ends_with(
+            "1 unknown statement is not counted in the exit status; \
+             --fail-on fails,waits,unknown counts it\n"
+        ),
+        "{mixed}"
+    );
+}
+
+#[test]
+fn the_closing_line_lists_the_counted_words_once_in_the_order_fails_waits() {
+    for (args, list) in [
+        (vec!["--fail-on", "fails"], "fails,unknown"),
+        (vec!["--fail-on", "waits"], "waits,unknown"),
+        (vec!["--fail-on", "waits,fails"], "fails,waits,unknown"),
+        (
+            vec!["--fail-on", "waits,fails,waits,fails"],
+            "fails,waits,unknown",
+        ),
+        (
+            vec!["--fail-on", "waits", "--fail-on", "fails"],
+            "fails,waits,unknown",
+        ),
+    ] {
+        let text = stdout(&on_example_tables(&args, UNKNOWN));
+        assert!(
+            text.ends_with(&format!(
+                "1 unknown statement is not counted in the exit status; \
+                 --fail-on {list} counts it\n"
+            )),
+            "{args:?}: {text}"
+        );
+    }
+}
+
+#[test]
+fn the_closing_line_is_absent_when_the_run_does_not_exit_with_0_or_nothing_is_unknown() {
+    let line = "not counted in the exit status";
+    let mixed = |sql: &str| format!("{sql}\n{UNKNOWN}");
+    for (args, input, why) in [
+        // Unknown statements are counted: exit 3.
+        (vec!["--strict"], UNKNOWN.to_owned(), "strict"),
+        (
+            vec!["--fail-on", "unknown"],
+            UNKNOWN.to_owned(),
+            "unknown listed",
+        ),
+        (
+            vec!["--fail-on", "fails,unknown"],
+            UNKNOWN.to_owned(),
+            "unknown listed",
+        ),
+        // A failure or a wait: exit 1.
+        (vec![], mixed(FAILS), "a failure"),
+        (vec![], mixed(WAITS), "a wait"),
+        // Nothing unknown.
+        (vec![], RUNS.to_owned(), "clean"),
+        (vec![], FAILS.to_owned(), "only a failure"),
+        // Exit 2.
+        (vec![], mixed(UNREADABLE), "unreadable lines"),
+        (vec![], C1_THROW_L12.to_owned(), "an error screen"),
+    ] {
+        let output = on_example_tables(&args, &input);
+        let text = stdout(&output);
+        assert!(!text.contains(line), "{why}: {text}");
+    }
+    // Not even when the unknown statements come before an error screen.
+    let files = session_files(
+        "step12_closing_line_error",
+        &[("unknown.sql", UNKNOWN), ("error.txt", C1_THROW_L12)],
+    );
+    let text = stdout(&files_on_example_tables(&files, &[]));
+    assert!(!text.contains(line), "{text}");
+    // And not in the JSON, which has the counts and the exit code.
+    let json = stdout(&on_example_tables(&["--format", "json"], UNKNOWN));
+    assert!(!json.contains(line), "{json}");
+}
+
+// The servers.
+
+#[test]
+fn without_server_kilit_checks_against_the_mysql_84_series() {
+    let text = stdout(&kilit(&["check"], RUNS));
+    assert!(
+        text.starts_with("checked against mysql-8.4.13, as measured by kilit-lab\n"),
+        "{text}"
+    );
+    let json = json_of(&kilit(&["check", "--format", "json"], RUNS));
+    assert_eq!(json["server"], "mysql-8.4.13");
+}
+
+#[test]
+fn a_series_names_the_newest_release_the_lab_measured_in_it() {
+    for (name, release) in [
+        ("mysql-8.4", "mysql-8.4.13"),
+        ("mysql-8.0", "mysql-8.0.46"),
+        ("mysql-8.4.13", "mysql-8.4.13"),
+        ("mysql-8.0.46", "mysql-8.0.46"),
+    ] {
+        let output = kilit(&["check", "--server", name], RUNS);
+        let text = stdout(&output);
+        assert!(
+            text.starts_with(&format!(
+                "checked against {release}, as measured by kilit-lab\n"
+            )),
+            "{name}: {text}"
+        );
+        assert_eq!(output.status.code(), Some(0), "{name}");
+        let json = json_of(&kilit(
+            &["check", "--server", name, "--format", "json"],
+            RUNS,
+        ));
+        assert_eq!(json["server"], release, "{name}");
+        // The equals form too.
+        let text = stdout(&kilit(&["check", &format!("--server={name}")], RUNS));
+        assert!(
+            text.starts_with(&format!("checked against {release}, ")),
+            "{name}: {text}"
+        );
+    }
+}
+
+#[test]
+fn a_series_gives_the_answers_of_its_release() {
+    // A foreign key to a parent column without an index: 1822 on 8.0, 6125
+    // on 8.4.
+    let schema = example("mysql-schema.sql");
+    let schema = schema.to_str().unwrap();
+    for (server, code) in [
+        ("mysql-8.0", 1822),
+        ("mysql-8.0.46", 1822),
+        ("mysql-8.4", 6125),
+        ("mysql-8.4.13", 6125),
+    ] {
+        let output = kilit(
+            &["check", "--schema", schema, "--server", server],
+            FOREIGN_KEY_TO_NAME,
+        );
+        let text = stdout(&output);
+        assert!(
+            text.contains(&format!("\n    fails with error {code}\n")),
+            "{server}: {text}"
+        );
+    }
+}
+
+#[test]
+fn a_server_name_that_is_neither_a_release_nor_a_series_exits_with_2() {
+    for name in [
+        "mysql-8",
+        "mysql-8.",
+        "mysql-8.4.",
+        "mysql-8.4.12",
+        "mysql-8.4.130",
+        "8.4",
+        "8.4.13",
+        "mysql",
+        "mysql-5.7.44",
+        "mysql-9.7",
+        "mariadb-10.11",
+        "MySQL-8.4",
+        "",
+    ] {
+        let output = kilit(&["check", "--server", name], "select 1;");
+        assert_eq!(
+            stderr(&output),
+            format!(
+                "kilit: no lab results for {name}; kilit has results for mysql-8.0.46, \
+                 mysql-8.4.13\n"
+            ),
+            "{name:?}"
+        );
+        assert_eq!(stdout(&output), "", "{name:?}");
+        assert_eq!(output.status.code(), Some(2), "{name:?}");
+    }
+}
+
+#[test]
+fn servers_marks_the_default_series() {
+    let output = kilit(&["servers"], "");
+    let text = stdout(&output);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines[0].starts_with("mysql-8.0.46  "), "{text}");
+    assert!(lines[0].ends_with(" scenarios"), "{text}");
+    assert!(!lines[0].contains("default"), "{text}");
+    assert!(lines[1].starts_with("mysql-8.4.13  "), "{text}");
+    assert!(
+        lines[1].ends_with(" scenarios (default: mysql-8.4)"),
+        "{text}"
+    );
+    assert_eq!(output.status.code(), Some(0));
+}
+
+// The other measured server.
+
+/// The tables of the other-server example: `users` has a plain index on
+/// `name`, and `orders` a column of the same type and collation.
+const PLAIN_INDEX_TABLES: &str = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(50) NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `users_name_index` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_name` varchar(50) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+";
+
+/// A foreign key to a column with a plain index: 8.4.13 refuses it with
+/// 6125, 8.0.46 takes it and copies the table. Then the column goes.
+const FOREIGN_KEY_THEN_DROP: &str = "ALTER TABLE orders ADD CONSTRAINT orders_user_name_foreign \
+FOREIGN KEY (user_name) REFERENCES users (name);
+ALTER TABLE orders DROP COLUMN user_name;";
+
+/// Writes `text` to a file of its own for the running test: tests run in
+/// parallel, and each reads its schema while the others write theirs.
+fn write_schema(name: &str, text: &str) -> PathBuf {
+    let thread = format!("{:?}", std::thread::current().id()).replace(['(', ')'], "");
+    let file = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{thread}-{name}"));
+    std::fs::write(&file, text).unwrap();
+    file
+}
+
+fn on_plain_index_tables(args: &[&str], input: &str) -> Output {
+    let schema = write_schema("step12_plain_index_tables.sql", PLAIN_INDEX_TABLES);
+    let mut all = vec!["check", "--schema", schema.to_str().unwrap()];
+    all.extend(args);
+    kilit(&all, input)
+}
+
+#[test]
+fn the_other_server_is_named_in_a_last_note_when_it_answers_differently() {
+    // $table->foreign('user_name')->references('name')->on('users'), then
+    // $table->dropColumn('user_name'), after $table->index('name') on users.
+    let text = stdout(&on_plain_index_tables(&[], FOREIGN_KEY_THEN_DROP));
+    assert!(
+        text.starts_with("checked against mysql-8.4.13, as measured by kilit-lab\n"),
+        "{text}"
+    );
+    // 8.4.13 refuses the key; 8.0.46 copies the table.
+    assert!(
+        text.contains(
+            "    fails with error 6125\n\
+             \x20   measured as add-foreign-key ("
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "    - on mysql-8.0.46: COPY, copies every row, writes wait\n  line 2: ALTER TABLE orders DROP COLUMN user_name\n"
+        ),
+        "{text}"
+    );
+    // Because the key does not exist on 8.4.13, the column goes at once; on
+    // 8.0.46 a foreign key uses it.
+    assert!(
+        text.contains(
+            "  line 2: ALTER TABLE orders DROP COLUMN user_name\n\
+             \x20   INSTANT, no rebuild, writes continue\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("    - on mysql-8.0.46: fails with error 1828\n\nmetadata lock on orders:"),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("\n2 statements: 1 fails, 1 runs while writes continue\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_same_input_for_the_other_server_shows_the_other_answers_and_names_the_first() {
+    let text = stdout(&on_plain_index_tables(
+        &["--server", "mysql-8.0"],
+        FOREIGN_KEY_THEN_DROP,
+    ));
+    assert!(
+        text.starts_with("checked against mysql-8.0.46, as measured by kilit-lab\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "  line 1: ALTER TABLE orders ADD CONSTRAINT orders_user_name_foreign FOREIGN KEY \
+             (user_name) REFERENCES users (name)\n    COPY, copies every row, writes wait\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "    - on mysql-8.4.13: fails with error 6125\n  line 2: ALTER TABLE orders DROP COLUMN user_name\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "  line 2: ALTER TABLE orders DROP COLUMN user_name\n    fails with error 1828\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "    - on mysql-8.4.13: INSTANT, no rebuild, writes continue\n\nmetadata lock on orders:"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("\n2 statements: 1 fails, 1 makes writes wait\n"),
+        "{text}"
+    );
+    // The full name gives the same.
+    let named = stdout(&on_plain_index_tables(
+        &["--server", "mysql-8.0.46"],
+        FOREIGN_KEY_THEN_DROP,
+    ));
+    assert_eq!(named, text);
+}
+
+#[test]
+fn the_json_lists_the_other_server_on_each_statement_that_differs() {
+    let json = json_of(&on_plain_index_tables(
+        &["--format", "json"],
+        FOREIGN_KEY_THEN_DROP,
+    ));
+    assert_eq!(json["server"], "mysql-8.4.13");
+    let statements = statements_of(&json, 0);
+    assert_eq!(statements[0]["impact"], "fails");
+    assert_eq!(statements[0]["error"], 6125);
+    assert_eq!(
+        statements[0]["other_servers"],
+        serde_json::json!([{
+            "server": "mysql-8.0.46",
+            "impact": "writes_wait",
+            "answer": "COPY, copies every row, writes wait",
+        }])
+    );
+    assert_eq!(statements[1]["impact"], "writes_continue");
+    assert_eq!(statements[1]["algorithm"], "INSTANT");
+    assert_eq!(
+        statements[1]["other_servers"],
+        serde_json::json!([{
+            "server": "mysql-8.0.46",
+            "impact": "fails",
+            "answer": "fails with error 1828",
+        }])
+    );
+    assert_eq!(json["summary"]["fails"], 1);
+    assert_eq!(json["summary"]["writes_continue"], 1);
+
+    let json = json_of(&on_plain_index_tables(
+        &["--format", "json", "--server", "mysql-8.0"],
+        FOREIGN_KEY_THEN_DROP,
+    ));
+    assert_eq!(json["server"], "mysql-8.0.46");
+    let statements = statements_of(&json, 0);
+    assert_eq!(statements[0]["impact"], "writes_wait");
+    assert_eq!(statements[0]["algorithm"], "COPY");
+    assert_eq!(statements[0]["copies_rows"], true);
+    assert_eq!(
+        statements[0]["other_servers"],
+        serde_json::json!([{
+            "server": "mysql-8.4.13",
+            "impact": "fails",
+            "answer": "fails with error 6125",
+        }])
+    );
+    assert_eq!(statements[1]["impact"], "fails");
+    assert_eq!(statements[1]["error"], 1828);
+    assert_eq!(
+        statements[1]["other_servers"],
+        serde_json::json!([{
+            "server": "mysql-8.4.13",
+            "impact": "writes_continue",
+            "answer": "INSTANT, no rebuild, writes continue",
+        }])
+    );
+    assert_eq!(json["summary"]["fails"], 1);
+    assert_eq!(json["summary"]["writes_wait"], 1);
+}
+
+#[test]
+fn the_second_statement_differs_only_because_the_two_timelines_diverged() {
+    // Alone, DROP COLUMN user_name is the same on both servers: no key uses
+    // the column, so there is nothing to tell.
+    let alone = "ALTER TABLE orders DROP COLUMN user_name;";
+    for server in ["mysql-8.0", "mysql-8.4"] {
+        let output = on_plain_index_tables(&["--format", "json", "--server", server], alone);
+        let json = json_of(&output);
+        let statement = &statements_of(&json, 0)[0];
+        assert_eq!(statement["impact"], "writes_continue", "{server}");
+        assert_eq!(statement["algorithm"], "INSTANT", "{server}");
+        assert!(
+            statement.get("other_servers").is_none(),
+            "{server}: {statement}"
+        );
+        let text = stdout(&on_plain_index_tables(&["--server", server], alone));
+        assert!(!text.contains("\n    - on mysql-"), "{server}: {text}");
+    }
+    // After the key, 8.0.46 has it and 8.4.13 does not.
+    let json = json_of(&on_plain_index_tables(
+        &["--format", "json", "--server", "mysql-8.0"],
+        FOREIGN_KEY_THEN_DROP,
+    ));
+    assert_eq!(statements_of(&json, 0)[1]["error"], 1828);
+    let json = json_of(&on_plain_index_tables(
+        &["--format", "json", "--server", "mysql-8.4"],
+        FOREIGN_KEY_THEN_DROP,
+    ));
+    assert_eq!(statements_of(&json, 0)[1]["algorithm"], "INSTANT");
+}
+
+#[test]
+fn the_exit_status_follows_the_chosen_server_only() {
+    let status = |args: &[&str]| {
+        on_plain_index_tables(args, FOREIGN_KEY_THEN_DROP)
+            .status
+            .code()
+    };
+    // 8.4.13 fails the key (6125); 8.0.46 fails the DROP COLUMN (1828).
+    assert_eq!(status(&[]), Some(1));
+    assert_eq!(status(&["--server", "mysql-8.0"]), Some(1));
+    // Only waits count: 8.4.13 has none, although 8.0.46 would make writes
+    // wait for the key.
+    assert_eq!(status(&["--fail-on", "waits"]), Some(0));
+    assert_eq!(
+        status(&["--server", "mysql-8.4", "--fail-on", "waits"]),
+        Some(0)
+    );
+    assert_eq!(
+        status(&["--server", "mysql-8.0", "--fail-on", "waits"]),
+        Some(1)
+    );
+    // Only failures count: both servers fail one statement.
+    assert_eq!(status(&["--fail-on", "fails"]), Some(1));
+    assert_eq!(
+        status(&["--server", "mysql-8.0", "--fail-on", "fails"]),
+        Some(1)
+    );
+    // The JSON agrees with the process.
+    let json = json_of(&on_plain_index_tables(
+        &["--format", "json", "--fail-on", "waits"],
+        FOREIGN_KEY_THEN_DROP,
+    ));
+    assert_eq!(json["exit_code"], 0);
+    assert_eq!(json["summary"]["fails"], 1);
+    let json = json_of(&on_plain_index_tables(
+        &[
+            "--format",
+            "json",
+            "--fail-on",
+            "waits",
+            "--server",
+            "mysql-8.0",
+        ],
+        FOREIGN_KEY_THEN_DROP,
+    ));
+    assert_eq!(json["exit_code"], 1);
+}
+
+#[test]
+fn a_run_where_the_servers_agree_has_no_other_servers_and_no_note() {
+    let sample = example("sample.sql");
+    let schema = example("mysql-schema.sql");
+    let pretend = std::fs::read_to_string(example("laravel-pretend.txt")).unwrap();
+    let sample_text = std::fs::read_to_string(&sample).unwrap();
+    for (args, input) in [
+        (vec!["--schema", schema.to_str().unwrap()], pretend.clone()),
+        (vec![], pretend),
+        (
+            vec!["--schema", schema.to_str().unwrap()],
+            sample_text.clone(),
+        ),
+        (vec![], sample_text),
+        (vec![], RUNS.to_owned()),
+        (vec![], FAILS.to_owned()),
+    ] {
+        for server in [None, Some("mysql-8.0")] {
+            let mut all = vec!["check"];
+            all.extend(&args);
+            if let Some(server) = server {
+                all.extend(["--server", server]);
+            }
+            let text = stdout(&kilit(&all, &input));
+            assert!(!text.contains("\n    - on mysql-"), "{args:?} {server:?}");
+
+            all.extend(["--format", "json"]);
+            let output = kilit(&all, &input);
+            let json = json_of(&output);
+            assert!(
+                !stdout(&output).contains("other_servers"),
+                "{args:?} {server:?}"
+            );
+            for source in json["sources"].as_array().unwrap() {
+                for statement in source["statements"].as_array().unwrap() {
+                    assert!(
+                        statement.get("other_servers").is_none(),
+                        "{args:?} {server:?}: {statement}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_statement_that_fails_the_same_way_on_both_servers_has_no_note() {
+    // 3780 and 1674 are the same on both servers.
+    let sql = format!("{FAILS}\nalter table `orders` add `n` int not null;");
+    let output = on_example_tables(&["--format", "json"], &sql);
+    assert!(!stdout(&output).contains("other_servers"));
+    let text = stdout(&on_example_tables(&[], &sql));
+    assert!(!text.contains("\n    - on mysql-"), "{text}");
+}
+
+// The server version a schema dump names (mysqldump writes
+// `-- Server version<TAB>X` near the top; its `Distrib` line is the client's).
+
+/// The first lines of `mysqldump --no-data` 8.0.46 on an 8.0.46 server.
+const DUMP_8_0_ON_8_0: &str = "-- MySQL dump 10.13  Distrib 8.0.46, for Linux (x86_64)
+--
+-- Host: localhost    Database: kilit_dump12
+-- ------------------------------------------------------
+-- Server version\t8.0.46
+
+/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+/*!50503 SET NAMES utf8mb4 */;
+";
+/// The same for 8.4.13.
+const DUMP_8_4_ON_8_4: &str = "-- MySQL dump 10.13  Distrib 8.4.13, for Linux (x86_64)
+--
+-- Host: localhost    Database: kilit_dump12
+-- ------------------------------------------------------
+-- Server version\t8.4.13
+
+/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+/*!50503 SET NAMES utf8mb4 */;
+";
+/// The 8.4.13 client against the 8.0.46 server.
+const DUMP_8_4_CLIENT_ON_8_0_SERVER: &str =
+    "-- MySQL dump 10.13  Distrib 8.4.13, for Linux (x86_64)
+--
+-- Host: mysql80    Database: kilit_dump12
+-- ------------------------------------------------------
+-- Server version\t8.0.46
+
+/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+/*!50503 SET NAMES utf8mb4 */;
+";
+/// The 8.0.46 client against the 8.4.13 server.
+const DUMP_8_0_CLIENT_ON_8_4_SERVER: &str =
+    "-- MySQL dump 10.13  Distrib 8.0.46, for Linux (x86_64)
+--
+-- Host: mysql84    Database: kilit_dump12
+-- ------------------------------------------------------
+-- Server version\t8.4.13
+
+/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+/*!50503 SET NAMES utf8mb4 */;
+";
+/// What Laravel's schema:dump writes (--skip-comments): no header at all.
+const LARAVEL_DUMP_HEADER: &str = "/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */;
+/*!40103 SET TIME_ZONE='+00:00' */;
+/*!40014 SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0 */;
+";
+/// mariadb-dump of a 10.11 server.
+const MARIADB_HEADER: &str =
+    "-- MariaDB dump 10.19  Distrib 10.11.6-MariaDB, for debian-linux-gnu (x86_64)
+--
+-- Host: localhost    Database: app
+-- ------------------------------------------------------
+-- Server version\t10.11.6-MariaDB-0ubuntu0.23.04.1
+
+";
+/// The line newer mariadb-dump versions write before the banner.
+const MARIADB_SANDBOX: &str = "/*M!999999\\- enable the sandbox mode */ \n";
+const MARIADB_NAME: &str = "10.11.6-MariaDB-0ubuntu0.23.04.1";
+
+const DUMP_TABLES: &str = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(50) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `amount` int NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+
+/// kilit over `input`, with a schema made of `header` and two tables.
+fn with_dump_header(header: &str, args: &[&str], input: &str) -> Output {
+    let schema = write_schema("step12_dump_header.sql", &format!("{header}{DUMP_TABLES}"));
+    let mut all = vec!["check", "--schema", schema.to_str().unwrap()];
+    all.extend(args);
+    kilit(&all, input)
+}
+
+/// The warning lines of the text: the lines between "tables from" and the
+/// first blank line.
+fn text_warnings(text: &str) -> Vec<String> {
+    let mut lines = text
+        .lines()
+        .skip_while(|line| !line.starts_with("tables from "));
+    assert!(lines.next().is_some(), "{text}");
+    lines
+        .take_while(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The messages of the `server-mismatch` warnings of the JSON, in order.
+fn mismatch_messages(json: &serde_json::Value) -> Vec<String> {
+    json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|warning| warning["id"] == "server-mismatch")
+        .map(|warning| warning["message"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_dump_from_another_series_than_the_checked_one_gets_a_warning_right_after_the_tables_line() {
+    let output = with_dump_header(DUMP_8_0_ON_8_0, &[], RUNS);
+    let text = stdout(&output);
+    assert_eq!(
+        text_warnings(&text),
+        ["  the schema comes from MySQL 8.0.46; answers are for mysql-8.4.13"],
+        "{text}"
+    );
+    assert_eq!(output.status.code(), Some(0), "{text}");
+
+    let json = json_of(&with_dump_header(
+        DUMP_8_0_ON_8_0,
+        &["--format", "json"],
+        RUNS,
+    ));
+    assert!(
+        json["warnings"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!({
+                "id": "server-mismatch",
+                "tables": [],
+                "message": "the schema comes from MySQL 8.0.46; answers are for mysql-8.4.13",
+            })),
+        "{json}"
+    );
+}
+
+#[test]
+fn a_dump_of_the_checked_series_gets_no_warning() {
+    for (header, args) in [
+        (DUMP_8_4_ON_8_4, vec![]),
+        (DUMP_8_4_ON_8_4, vec!["--server", "mysql-8.4"]),
+        (DUMP_8_4_ON_8_4, vec!["--server", "mysql-8.4.13"]),
+        (DUMP_8_0_ON_8_0, vec!["--server", "mysql-8.0"]),
+        (DUMP_8_0_ON_8_0, vec!["--server", "mysql-8.0.46"]),
+    ] {
+        let output = with_dump_header(header, &args, RUNS);
+        let text = stdout(&output);
+        assert_eq!(
+            text_warnings(&text),
+            Vec::<String>::new(),
+            "{args:?}: {text}"
+        );
+        assert!(!text.contains("the schema comes from"), "{args:?}: {text}");
+        let mut json_args = vec!["--format", "json"];
+        json_args.extend(&args);
+        let json = json_of(&with_dump_header(header, &json_args, RUNS));
+        assert_eq!(mismatch_messages(&json), Vec::<String>::new(), "{args:?}");
+    }
+}
+
+#[test]
+fn a_dump_of_the_other_series_warns_whichever_server_is_chosen() {
+    for (header, server, message) in [
+        (
+            DUMP_8_4_ON_8_4,
+            "mysql-8.0",
+            "the schema comes from MySQL 8.4.13; answers are for mysql-8.0.46",
+        ),
+        (
+            DUMP_8_0_ON_8_0,
+            "mysql-8.4",
+            "the schema comes from MySQL 8.0.46; answers are for mysql-8.4.13",
+        ),
+        (
+            DUMP_8_0_ON_8_0,
+            "mysql-8.4.13",
+            "the schema comes from MySQL 8.0.46; answers are for mysql-8.4.13",
+        ),
+    ] {
+        let text = stdout(&with_dump_header(header, &["--server", server], RUNS));
+        assert_eq!(
+            text_warnings(&text),
+            [format!("  {message}")],
+            "{server}: {text}"
+        );
+        let json = json_of(&with_dump_header(
+            header,
+            &["--server", server, "--format", "json"],
+            RUNS,
+        ));
+        assert_eq!(mismatch_messages(&json), [message], "{server}");
+    }
+}
+
+#[test]
+fn only_the_server_version_line_of_a_dump_is_read_not_the_client_s_distrib_line() {
+    // mysqldump 8.4.13 against an 8.0.46 server: the server is 8.0.
+    let text = stdout(&with_dump_header(DUMP_8_4_CLIENT_ON_8_0_SERVER, &[], RUNS));
+    assert_eq!(
+        text_warnings(&text),
+        ["  the schema comes from MySQL 8.0.46; answers are for mysql-8.4.13"],
+        "{text}"
+    );
+    let text = stdout(&with_dump_header(
+        DUMP_8_4_CLIENT_ON_8_0_SERVER,
+        &["--server", "mysql-8.0"],
+        RUNS,
+    ));
+    assert_eq!(text_warnings(&text), Vec::<String>::new(), "{text}");
+
+    // mysqldump 8.0.46 against an 8.4.13 server: the server is 8.4.
+    let text = stdout(&with_dump_header(DUMP_8_0_CLIENT_ON_8_4_SERVER, &[], RUNS));
+    assert_eq!(text_warnings(&text), Vec::<String>::new(), "{text}");
+    let text = stdout(&with_dump_header(
+        DUMP_8_0_CLIENT_ON_8_4_SERVER,
+        &["--server", "mysql-8.0"],
+        RUNS,
+    ));
+    assert_eq!(
+        text_warnings(&text),
+        ["  the schema comes from MySQL 8.4.13; answers are for mysql-8.0.46"],
+        "{text}"
+    );
+}
+
+#[test]
+fn a_dump_without_a_server_version_line_gets_no_warning() {
+    for (what, header) in [
+        // Only the client's version.
+        (
+            "distrib only",
+            "-- MySQL dump 10.13  Distrib 8.0.46, for Linux (x86_64)\n--\n\n",
+        ),
+        // What Laravel's schema:dump leaves.
+        ("laravel dump", LARAVEL_DUMP_HEADER),
+        ("no header", ""),
+        // Not the line mysqldump writes.
+        ("other text", "-- the server version\t8.0.46\n"),
+    ] {
+        let output = with_dump_header(header, &[], RUNS);
+        let text = stdout(&output);
+        assert_eq!(text_warnings(&text), Vec::<String>::new(), "{what}: {text}");
+        assert_eq!(output.status.code(), Some(0), "{what}: {text}");
+        let json = json_of(&with_dump_header(header, &["--format", "json"], RUNS));
+        assert_eq!(mismatch_messages(&json), Vec::<String>::new(), "{what}");
+    }
+}
+
+#[test]
+fn a_mariadb_dump_without_server_stops_with_2_and_says_what_to_do() {
+    for header in [
+        MARIADB_HEADER.to_owned(),
+        format!("{MARIADB_SANDBOX}{MARIADB_HEADER}"),
+    ] {
+        let output = with_dump_header(&header, &[], RUNS);
+        assert_eq!(
+            stderr(&output),
+            format!(
+                "kilit: the schema comes from MariaDB {MARIADB_NAME}, and kilit has no MariaDB \
+                 measurements; give --server to check it against MySQL anyway\n"
+            ),
+            "{header}"
+        );
+        assert_eq!(stdout(&output), "", "{header}");
+        assert_eq!(output.status.code(), Some(2), "{header}");
+        let output = with_dump_header(&header, &["--format", "json"], RUNS);
+        assert_eq!(stdout(&output), "", "{header}");
+        assert_eq!(output.status.code(), Some(2), "{header}");
+    }
+}
+
+#[test]
+fn a_mariadb_dump_with_server_runs_with_a_warning() {
+    for header in [
+        MARIADB_HEADER.to_owned(),
+        format!("{MARIADB_SANDBOX}{MARIADB_HEADER}"),
+    ] {
+        for (server, release) in [
+            ("mysql-8.4", "mysql-8.4.13"),
+            ("mysql-8.4.13", "mysql-8.4.13"),
+            ("mysql-8.0", "mysql-8.0.46"),
+        ] {
+            let message = format!(
+                "the schema comes from MariaDB {MARIADB_NAME}, and kilit has no MariaDB \
+                 measurements; answers are for {release}"
+            );
+            let output = with_dump_header(&header, &["--server", server], RUNS);
+            let text = stdout(&output);
+            assert_eq!(
+                text_warnings(&text),
+                [format!("  {message}")],
+                "{server}: {text}"
+            );
+            assert_eq!(output.status.code(), Some(0), "{server}: {text}");
+            assert_eq!(stderr(&output), "", "{server}");
+            let json = json_of(&with_dump_header(
+                &header,
+                &["--server", server, "--format", "json"],
+                RUNS,
+            ));
+            assert!(
+                json["warnings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|warning| warning["message"] == message.as_str()),
+                "{server}: {json}"
+            );
+        }
+    }
+}
+
+#[test]
+fn two_server_version_lines_of_two_versions_give_two_warnings_in_order() {
+    let header = "-- Server version\t8.0.46\n\n-- Server version\t5.7.44\n";
+    let text = stdout(&with_dump_header(header, &[], RUNS));
+    assert_eq!(
+        text_warnings(&text),
+        [
+            "  the schema comes from MySQL 8.0.46; answers are for mysql-8.4.13",
+            "  the schema comes from MySQL 5.7.44; answers are for mysql-8.4.13",
+        ],
+        "{text}"
+    );
+    let json = json_of(&with_dump_header(header, &["--format", "json"], RUNS));
+    assert_eq!(
+        mismatch_messages(&json),
+        [
+            "the schema comes from MySQL 8.0.46; answers are for mysql-8.4.13",
+            "the schema comes from MySQL 5.7.44; answers are for mysql-8.4.13",
+        ]
+    );
+    // A joined dump of the checked series and another: one warning.
+    let header = "-- Server version\t8.4.13\n\n-- Server version\t8.0.46\n";
+    let text = stdout(&with_dump_header(header, &[], RUNS));
+    assert_eq!(
+        text_warnings(&text),
+        ["  the schema comes from MySQL 8.0.46; answers are for mysql-8.4.13"],
+        "{text}"
+    );
+}
+
+#[test]
+fn the_same_server_version_named_twice_gives_one_warning() {
+    let header = "-- Server version\t8.0.46\n\n-- Server version\t8.0.46\n";
+    let text = stdout(&with_dump_header(header, &[], RUNS));
+    assert_eq!(
+        text_warnings(&text),
+        ["  the schema comes from MySQL 8.0.46; answers are for mysql-8.4.13"],
+        "{text}"
+    );
+    let json = json_of(&with_dump_header(header, &["--format", "json"], RUNS));
+    assert_eq!(mismatch_messages(&json).len(), 1);
+}
+
+#[test]
+fn a_server_version_kilit_cannot_read_gets_a_warning_that_names_it() {
+    let text = stdout(&with_dump_header("-- Server version\tweird\n", &[], RUNS));
+    assert_eq!(
+        text_warnings(&text),
+        [
+            "  the schema names its server version as \"weird\", which kilit cannot read; \
+             answers are for mysql-8.4.13"
+        ],
+        "{text}"
+    );
+    let json = json_of(&with_dump_header(
+        "-- Server version\tweird\n",
+        &["--format", "json", "--server", "mysql-8.0"],
+        RUNS,
+    ));
+    assert_eq!(
+        mismatch_messages(&json),
+        [
+            "the schema names its server version as \"weird\", which kilit cannot read; \
+             answers are for mysql-8.0.46"
+        ]
+    );
+}
+
+#[test]
+fn a_server_version_line_in_a_migration_file_is_not_read() {
+    let schema = example("mysql-schema.sql");
+    let schema = schema.to_str().unwrap();
+    for line in [
+        "-- Server version\t8.0.46",
+        "-- Server version\t10.11.6-MariaDB-0ubuntu0.23.04.1",
+        "-- Server version\tweird",
+    ] {
+        let sql = format!("{line}\n{RUNS}\n");
+        for args in [vec!["check"], vec!["check", "--schema", schema]] {
+            let output = kilit(&args, &sql);
+            let text = stdout(&output);
+            assert!(!text.contains("the schema comes from"), "{line}: {text}");
+            assert!(!text.contains("the schema names"), "{line}: {text}");
+            assert_eq!(output.status.code(), Some(0), "{line}: {text}");
+            assert_eq!(stderr(&output), "", "{line}");
+        }
+        let mut json_args = vec!["check", "--format", "json"];
+        json_args.extend(["--schema", schema]);
+        let json = json_of(&kilit(&json_args, &sql));
+        assert_eq!(mismatch_messages(&json), Vec::<String>::new(), "{line}");
+    }
+}
+
+#[test]
+fn the_server_warning_does_not_change_the_exit_status() {
+    for (sql, code) in [(RUNS, 0), (FAILS, 1), (WAITS, 1), (UNKNOWN, 0)] {
+        for header in [DUMP_8_0_ON_8_0, DUMP_8_4_ON_8_4] {
+            let output = with_dump_header(header, &[], sql);
+            assert_eq!(output.status.code(), Some(code), "{sql}");
+            let output = with_dump_header(header, &["--strict"], sql);
+            let strict = if sql == UNKNOWN { 3 } else { code };
+            assert_eq!(output.status.code(), Some(strict), "{sql}");
+        }
+    }
+    let json = json_of(&with_dump_header(
+        DUMP_8_0_ON_8_0,
+        &["--format", "json"],
+        FAILS,
+    ));
+    assert_eq!(json["exit_code"], 1);
+}
+
+// The file a Laravel error belongs to.
+
+fn laravel_error_warnings(json: &serde_json::Value) -> Vec<serde_json::Value> {
+    json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|warning| warning["id"] == "laravel-error")
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_laravel_error_read_from_standard_input_names_standard_input_in_the_json_only() {
+    let output = kilit(&["check", "--format", "json"], C1_THROW_L12);
+    let json = json_of(&output);
+    let warnings = laravel_error_warnings(&json);
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0]["file"], "standard input");
+    assert_eq!(warnings[0]["message"], stopped_in(THROW_NAME));
+    assert_eq!(output.status.code(), Some(2));
+
+    // One input: the text line has no file in front of it.
+    let text = stdout(&kilit(&["check"], C1_THROW_L12));
+    assert!(
+        text.contains(&format!("\n\n{}\n\n", stopped_in(THROW_NAME))),
+        "{text}"
+    );
+    assert!(!text.contains("standard input: Laravel"), "{text}");
+}
+
+#[test]
+fn a_laravel_error_read_from_one_file_names_the_file_in_the_json_only() {
+    let files = session_files("step12_error_one_file", &[("error.txt", C1_THROW_L12)]);
+    let path = files[0].to_str().unwrap();
+    let output = kilit(&["check", "--format", "json", path], "");
+    let json = json_of(&output);
+    let warnings = laravel_error_warnings(&json);
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0]["file"], path);
+    assert_eq!(warnings[0]["message"], stopped_in(THROW_NAME));
+    assert_eq!(output.status.code(), Some(2));
+
+    let text = stdout(&kilit(&["check", path], ""));
+    assert!(
+        text.contains(&format!("\n\n{}\n\n", stopped_in(THROW_NAME))),
+        "{text}"
+    );
+    assert!(!text.contains(&format!("{path}: Laravel")), "{text}");
+}
+
+#[test]
+fn a_laravel_error_among_several_files_names_its_file_in_the_text_and_the_json() {
+    let files = session_files(
+        "step12_error_two_files",
+        &[("alter.sql", RUNS), ("error.txt", C1_THROW_L12)],
+    );
+    let alter = files[0].to_str().unwrap();
+    let error = files[1].to_str().unwrap();
+
+    let output = kilit(&["check", alter, error], "");
+    let text = stdout(&output);
+    assert!(
+        text.contains(&format!("\n\n{error}: {}\n\n", stopped_in(THROW_NAME))),
+        "{text}"
+    );
+    assert!(!text.contains(&format!("{alter}: Laravel")), "{text}");
+    assert_eq!(output.status.code(), Some(2), "{text}");
+
+    let output = kilit(&["check", "--format", "json", alter, error], "");
+    let warnings = laravel_error_warnings(&json_of(&output));
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0]["file"], error);
+    assert_eq!(warnings[0]["message"], stopped_in(THROW_NAME));
+    assert_eq!(output.status.code(), Some(2));
+
+    // The error file first: the same file is named.
+    let output = kilit(&["check", "--format", "json", error, alter], "");
+    let warnings = laravel_error_warnings(&json_of(&output));
+    assert_eq!(warnings[0]["file"], error);
+}
+
+#[test]
+fn a_laravel_error_on_standard_input_among_files_is_named_standard_input() {
+    let files = session_files("step12_error_stdin_and_file", &[("alter.sql", RUNS)]);
+    let alter = files[0].to_str().unwrap();
+    let text = stdout(&kilit(&["check", alter, "-"], C1_THROW_L12));
+    assert!(
+        text.contains(&format!(
+            "\n\nstandard input: {}\n\n",
+            stopped_in(THROW_NAME)
+        )),
+        "{text}"
+    );
+    let json = json_of(&kilit(
+        &["check", "--format", "json", alter, "-"],
+        C1_THROW_L12,
+    ));
+    let warnings = laravel_error_warnings(&json);
+    assert_eq!(warnings[0]["file"], "standard input");
+}
+
+// The other server's note on a table the input creates.
+
+/// A child table created here, then a foreign key from it to `users.name`,
+/// which has a plain index. 8.4.13 refuses the key with 6125; 8.0.46 copies
+/// the table, which costs nothing on a table created in the same input.
+const NEW_CHILD_FOREIGN_KEY: &str = "CREATE TABLE child (id bigint unsigned NOT NULL PRIMARY KEY, \
+user_name varchar(50) NOT NULL) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+ALTER TABLE child ADD CONSTRAINT child_user_name_foreign \
+FOREIGN KEY (user_name) REFERENCES users (name);";
+
+/// The lines of the statement that starts with `line {number}:`, up to the
+/// blank line after it.
+fn statement_block(text: &str, number: usize) -> Vec<&str> {
+    let start = format!("  line {number}:");
+    text.lines()
+        .skip_while(|line| !line.starts_with(&start))
+        .take_while(|line| !line.is_empty())
+        .collect()
+}
+
+#[test]
+fn the_other_server_s_answer_on_a_table_created_here_says_that_nothing_waits_for_it() {
+    // Schema::create('child', ...) then
+    // $table->foreign('user_name')->references('name')->on('users').
+    const COPY_NOTE: &str = "COPY, copies every row, writes wait; child is created earlier in \
+these migrations, so nothing waits for it";
+
+    // Default server (8.4.13): the key fails, and 8.0.46 would copy the table,
+    // but the table is new there, so the note says nothing waits.
+    let output = on_plain_index_tables(&[], NEW_CHILD_FOREIGN_KEY);
+    let text = stdout(&output);
+    let block = statement_block(&text, 2);
+    assert_eq!(
+        block.last().copied(),
+        Some(format!("    - on mysql-8.0.46: {COPY_NOTE}").as_str()),
+        "{text}"
+    );
+    assert!(block.contains(&"    fails with error 6125"), "{text}");
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+
+    let json = json_of(&on_plain_index_tables(
+        &["--format", "json"],
+        NEW_CHILD_FOREIGN_KEY,
+    ));
+    let statements = statements_of(&json, 0);
+    assert_eq!(statements[1]["impact"], "fails");
+    assert_eq!(statements[1]["error"], 6125);
+    assert_eq!(
+        statements[1]["other_servers"],
+        serde_json::json!([{
+            "server": "mysql-8.0.46",
+            "impact": "new_table",
+            "answer": COPY_NOTE,
+        }])
+    );
+
+    // --server mysql-8.0: the statement is a new-table one here, with its own
+    // note, and 8.4.13 is the other server that fails.
+    let output = on_plain_index_tables(&["--server", "mysql-8.0"], NEW_CHILD_FOREIGN_KEY);
+    let text = stdout(&output);
+    assert!(
+        text.starts_with("checked against mysql-8.0.46, as measured by kilit-lab\n"),
+        "{text}"
+    );
+    let block = statement_block(&text, 2);
+    assert_eq!(
+        block.last().copied(),
+        Some("    - on mysql-8.4.13: fails with error 6125"),
+        "{text}"
+    );
+    assert!(
+        block.contains(
+            &"    - child is created earlier in these migrations: nothing else uses it yet, \
+so nothing waits for it"
+        ),
+        "{text}"
+    );
+
+    let json = json_of(&on_plain_index_tables(
+        &["--format", "json", "--server", "mysql-8.0"],
+        NEW_CHILD_FOREIGN_KEY,
+    ));
+    let statements = statements_of(&json, 0);
+    assert_eq!(statements[1]["impact"], "new_table");
+    assert_eq!(
+        statements[1]["other_servers"],
+        serde_json::json!([{
+            "server": "mysql-8.4.13",
+            "impact": "fails",
+            "answer": "fails with error 6125",
+        }])
+    );
 }
