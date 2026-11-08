@@ -1,6 +1,7 @@
 //! The kilit command as a user runs it: arguments, standard input, output
 //! and exit status.
 
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -5483,5 +5484,501 @@ so nothing waits for it"
             "impact": "fails",
             "answer": "fails with error 6125",
         }])
+    );
+}
+
+// The documentation is guarded like the README example: what it shows must
+// be what kilit does, and what it links to must exist.
+
+/// The repository's root, where README.md and docs/ live.
+fn repository_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// What docs/json-output.md asks to run, found in the document itself.
+struct ShownCommand {
+    /// The directory of the nearest `$ cd` line before the command, relative
+    /// to the repository root.
+    directory: String,
+    /// The words between `kilit` and `<<'SQL'`, `check` among them.
+    args: Vec<String>,
+    /// The lines of the here-document, up to the line `SQL`.
+    stdin: String,
+    /// The complete output the document shows: the first ```json block
+    /// after the command.
+    output: String,
+}
+
+/// Every `$ kilit check ` command of the document, each with its own
+/// directory and its own output block.
+fn shown_commands(document: &str) -> Vec<ShownCommand> {
+    let lines: Vec<&str> = document.lines().collect();
+    let commands: Vec<usize> = (0..lines.len())
+        .filter(|at| lines[*at].starts_with("$ kilit check "))
+        .collect();
+    assert!(
+        !commands.is_empty(),
+        "docs/json-output.md shows a line beginning `$ kilit check `"
+    );
+
+    let mut shown = Vec::new();
+    for (number, &command) in commands.iter().enumerate() {
+        let line = lines[command];
+        let directory = lines[..command]
+            .iter()
+            .rev()
+            .find_map(|earlier| earlier.strip_prefix("$ cd "))
+            .unwrap_or_else(|| panic!("a `$ cd <directory>` line comes before the command: {line}"))
+            .trim()
+            .to_string();
+
+        assert!(
+            line.contains("<<'SQL'"),
+            "the command feeds its input with <<'SQL': {line}"
+        );
+        let words = line
+            .strip_prefix("$ kilit ")
+            .unwrap()
+            .split("<<'SQL'")
+            .next()
+            .unwrap();
+        let args = words.split_whitespace().map(str::to_string).collect();
+
+        // The command's own block lies before the next command.
+        let limit = commands.get(number + 1).copied().unwrap_or(lines.len());
+        let body = &lines[command + 1..limit];
+        let end = body
+            .iter()
+            .position(|line| *line == "SQL")
+            .unwrap_or_else(|| panic!("the here-document of `{line}` ends with a line SQL"));
+        let mut stdin = body[..end].join("\n");
+        stdin.push('\n');
+
+        let after = &body[end + 1..];
+        let start = after
+            .iter()
+            .position(|line| line.trim_end() == "```json")
+            .unwrap_or_else(|| panic!("a ```json block follows the command `{line}`"));
+        let length = after[start + 1..]
+            .iter()
+            .position(|line| line.trim_end() == "```")
+            .unwrap_or_else(|| panic!("the ```json block of `{line}` is closed"));
+        let output = after[start + 1..start + 1 + length].join("\n");
+
+        shown.push(ShownCommand {
+            directory,
+            args,
+            stdin,
+            output,
+        });
+    }
+    shown
+}
+
+#[test]
+fn the_json_example_is_real_output() {
+    // The document says what to type and what comes out. The test types
+    // every such example: the arguments, the input and the directory are
+    // all read from the document, so a changed example has to be real as
+    // well.
+    let path = repository_root().join("docs/json-output.md");
+    let document = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+    for shown in shown_commands(&document) {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_kilit"))
+            .args(&shown.args)
+            .current_dir(repository_root().join(&shown.directory))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(shown.stdin.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let real = stdout(&output);
+
+        assert_eq!(
+            shown.output.trim_end(),
+            real.trim_end(),
+            "docs/json-output.md shows a different output than kilit prints \
+             for `kilit {}` in {} (stderr: {})",
+            shown.args.join(" "),
+            shown.directory,
+            stderr(&output)
+        );
+    }
+}
+
+/// The lines of a Markdown text outside fenced code blocks. The lines that
+/// open and close a fence are left out too.
+fn prose_lines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let mark = trimmed.chars().next().filter(|c| *c == '`' || *c == '~');
+        if let Some(mark) = mark {
+            let length = trimmed.chars().take_while(|c| *c == mark).count();
+            if length >= 3 {
+                match fence {
+                    None => fence = Some((mark, length)),
+                    Some((open, size))
+                        if open == mark
+                            && length >= size
+                            && trimmed.trim_matches(mark).trim().is_empty() =>
+                    {
+                        fence = None
+                    }
+                    Some(_) => {}
+                }
+                continue;
+            }
+        }
+        if fence.is_none() {
+            lines.push(line);
+        }
+    }
+    lines
+}
+
+/// The line with every inline code span replaced by a space.
+fn without_code_spans(line: &str) -> String {
+    // A run of backticks closes at the next run of the same length.
+    let chars: Vec<char> = line.chars().collect();
+    let mut text = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '`' {
+            text.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && chars[i] == '`' {
+            i += 1;
+        }
+        let run = i - start;
+        let mut j = i;
+        let mut closed = None;
+        while j < chars.len() {
+            if chars[j] != '`' {
+                j += 1;
+                continue;
+            }
+            let from = j;
+            while j < chars.len() && chars[j] == '`' {
+                j += 1;
+            }
+            if j - from == run {
+                closed = Some(j);
+                break;
+            }
+        }
+        match closed {
+            Some(end) => {
+                text.push(' ');
+                i = end;
+            }
+            // No closing run: the backticks are plain text.
+            None => text.extend(std::iter::repeat_n('`', run)),
+        }
+    }
+    text
+}
+
+/// What stands between `<` and `>` on a line, for each HTML tag.
+fn html_tags(line: &str) -> Vec<&str> {
+    let mut tags = Vec::new();
+    let mut rest = line;
+    while let Some(open) = rest.find('<') {
+        let after = &rest[open + 1..];
+        let end = after.find('>').unwrap_or(after.len());
+        tags.push(&after[..end]);
+        rest = &after[end..];
+    }
+    tags
+}
+
+/// The quoted value of an attribute inside a tag, such as `href`.
+fn html_attribute(tag: &str, name: &str) -> Option<String> {
+    for (at, _) in tag.match_indices(name) {
+        let before = tag[..at].chars().next_back();
+        if !before.is_some_and(char::is_whitespace) {
+            continue;
+        }
+        let after = &tag[at + name.len()..];
+        let Some(value) = after.strip_prefix('=') else {
+            continue;
+        };
+        let Some(quote) = value.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+            continue;
+        };
+        let value = &value[1..];
+        if let Some(end) = value.find(quote) {
+            return Some(value[..end].to_string());
+        }
+    }
+    None
+}
+
+/// The targets of the links on one line: inline links, a reference-style
+/// definition (`[label]: target`) and `href` / `src` in HTML. Inline code
+/// spans are left out.
+fn link_targets(line: &str) -> Vec<String> {
+    let text = without_code_spans(line);
+
+    let mut targets = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find("](") {
+        let inside = &rest[at + 2..];
+        // The link ends at the parenthesis that balances the opening one.
+        let mut depth = 1;
+        let mut end = None;
+        for (index, c) in inside.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else { break };
+        targets.push(inside[..end].to_string());
+        rest = &inside[end..];
+    }
+
+    // A definition starts the line, indented by at most three spaces. A
+    // footnote (`[^1]: ...`) is not a link.
+    let trimmed = text.trim_start();
+    if text.len() - trimmed.len() <= 3
+        && let Some(inside) = trimmed.strip_prefix('[')
+        && !inside.starts_with('^')
+        && let Some((_, target)) = inside.split_once("]:")
+        && !target.trim().is_empty()
+    {
+        targets.push(target.trim().to_string());
+    }
+
+    for tag in html_tags(&text) {
+        for name in ["href", "src"] {
+            targets.extend(html_attribute(tag, name));
+        }
+    }
+    targets
+}
+
+/// A link target split into the file it names and the anchor after `#`, or
+/// None when the link leaves the repository. The file is empty when the
+/// link points inside the page.
+fn split_link(target: &str) -> Option<(String, Option<String>)> {
+    let target = target.trim();
+    let target = match target.strip_prefix('<') {
+        Some(inner) => inner.split('>').next().unwrap(),
+        // A title follows the address after a space: [x](a.md "title").
+        None => target.split_whitespace().next().unwrap_or(""),
+    };
+    if target.starts_with("http://")
+        || target.starts_with("https://")
+        || target.starts_with("mailto:")
+    {
+        return None;
+    }
+    let (file, anchor) = match target.split_once('#') {
+        Some((file, anchor)) => (file, Some(anchor)),
+        None => (target, None),
+    };
+    let anchor = anchor.filter(|anchor| !anchor.is_empty());
+    if file.is_empty() && anchor.is_none() {
+        return None;
+    }
+    Some((file.to_string(), anchor.map(str::to_string)))
+}
+
+/// The text of a heading line (`## Title`), or None for any other line.
+fn heading_text(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    if line.len() - trimmed.len() > 3 {
+        return None;
+    }
+    let level = trimmed.chars().take_while(|c| *c == '#').count();
+    let rest = trimmed[level..].strip_prefix(char::is_whitespace)?;
+    if !(1..=6).contains(&level) {
+        return None;
+    }
+    let rest = rest.trim();
+    // A closing run of # counts only after a space.
+    let without_closing = rest.trim_end_matches('#');
+    if without_closing.is_empty() {
+        return Some("");
+    }
+    if without_closing.ends_with(char::is_whitespace) {
+        Some(without_closing.trim_end())
+    } else {
+        Some(rest)
+    }
+}
+
+/// The anchor GitHub gives a heading: link addresses and HTML tags are not
+/// part of the text, letters go lower case, everything but letters, digits,
+/// spaces, `-` and `_` is dropped, and spaces become `-`.
+fn heading_slug(heading: &str) -> String {
+    let chars: Vec<char> = heading.chars().collect();
+    let mut text = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '[' => {
+                // [text](address) keeps the text only.
+                let close = chars[i..].iter().position(|c| *c == ']').map(|at| i + at);
+                let address_end = close
+                    .filter(|close| chars.get(close + 1) == Some(&'('))
+                    .and_then(|close| {
+                        chars[close..]
+                            .iter()
+                            .position(|c| *c == ')')
+                            .map(|at| close + at)
+                    });
+                if let (Some(close), Some(end)) = (close, address_end) {
+                    text.extend(&chars[i + 1..close]);
+                    i = end + 1;
+                } else {
+                    i += 1;
+                }
+            }
+            '<' => match chars[i..].iter().position(|c| *c == '>') {
+                Some(at) => i += at + 1,
+                None => i += 1,
+            },
+            c => {
+                text.push(c);
+                i += 1;
+            }
+        }
+    }
+    text.to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_')
+        .map(|c| if c == ' ' { '-' } else { c })
+        .collect()
+}
+
+/// The anchors of a Markdown text: its headings (a repeated slug gets -1,
+/// -2, ... in order; headings in fenced code do not count) and the
+/// `<a id="...">` / `<a name="...">` anchors.
+fn anchors_of(text: &str) -> HashSet<String> {
+    let mut anchors = HashSet::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for line in prose_lines(text) {
+        if let Some(heading) = heading_text(line) {
+            let slug = heading_slug(heading);
+            let times = seen.entry(slug.clone()).or_insert(0);
+            anchors.insert(if *times == 0 {
+                slug
+            } else {
+                format!("{slug}-{times}")
+            });
+            *times += 1;
+        }
+        for tag in html_tags(line) {
+            let is_link = tag.starts_with('a') && tag[1..].starts_with(char::is_whitespace);
+            if is_link {
+                for name in ["id", "name"] {
+                    anchors.extend(html_attribute(tag, name));
+                }
+            }
+        }
+    }
+    anchors
+}
+
+/// Every link of a Markdown file that does not point at something that
+/// exists, as `file: link`: a missing file, or an anchor that no heading of
+/// a Markdown target has. Fenced code blocks are not read; anchors into
+/// other kinds of files are not checked.
+fn broken_links(
+    root: &Path,
+    file: &Path,
+    anchors: &mut HashMap<PathBuf, HashSet<String>>,
+) -> Vec<String> {
+    let text = std::fs::read_to_string(file)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", file.display()));
+    let name = file
+        .strip_prefix(root)
+        .unwrap_or(file)
+        .display()
+        .to_string();
+    let directory = file.parent().unwrap();
+
+    let mut broken = Vec::new();
+    for line in prose_lines(&text) {
+        for target in link_targets(line) {
+            let Some((path, anchor)) = split_link(&target) else {
+                continue;
+            };
+            let linked = if path.is_empty() {
+                file.to_path_buf()
+            } else {
+                directory.join(&path)
+            };
+            if !linked.exists() {
+                broken.push(format!("{name}: {target}"));
+                continue;
+            }
+            let Some(anchor) = anchor else { continue };
+            if linked.extension().is_none_or(|ext| ext != "md") {
+                continue;
+            }
+            let known = anchors.entry(linked.clone()).or_insert_with(|| {
+                let linked_text = std::fs::read_to_string(&linked)
+                    .unwrap_or_else(|error| panic!("cannot read {}: {error}", linked.display()));
+                anchors_of(&linked_text)
+            });
+            if !known.contains(&anchor) {
+                broken.push(format!(
+                    "{name}: {target} (no heading or anchor `{anchor}`)"
+                ));
+            }
+        }
+    }
+    broken
+}
+
+#[test]
+fn every_relative_link_points_at_a_file() {
+    let root = repository_root();
+    let mut files = vec![
+        root.join("README.md"),
+        root.join("CONTRIBUTING.md"),
+        root.join("scenarios/README.md"),
+    ];
+    let mut docs: Vec<PathBuf> = std::fs::read_dir(root.join("docs"))
+        .unwrap_or_else(|error| panic!("cannot read docs/: {error}"))
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+        .collect();
+    assert!(!docs.is_empty(), "docs/ has no Markdown file");
+    docs.sort();
+    files.extend(docs);
+
+    let mut anchors = HashMap::new();
+    let mut broken = Vec::new();
+    for file in &files {
+        broken.extend(broken_links(&root, file, &mut anchors));
+    }
+    assert!(
+        broken.is_empty(),
+        "links that point at nothing:\n{}",
+        broken.join("\n")
     );
 }

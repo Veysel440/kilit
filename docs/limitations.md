@@ -1,0 +1,99 @@
+# Limitations
+
+What kilit does not do, and what it does instead. When it does not know, it
+says `UNKNOWN` and prints the reason; it never reports an unmeasured change as
+safe.
+
+- [Input](#input)
+- [What is measured](#what-is-measured)
+- [The server kilit cannot see](#the-server-kilit-cannot-see)
+- [Sessions and several files](#sessions-and-several-files)
+- [The metadata lock warning](#the-metadata-lock-warning)
+- [Laravel](#laravel)
+
+## Input
+
+- sqlparser 0.63 cannot read `CONVERT TO CHARACTER SET`, `RENAME INDEX`,
+  `ALGORITHM=NOCOPY`, `OPTIMIZE TABLE`, `CREATE FULLTEXT INDEX`, `DROP CHECK`
+  or `ALTER CHECK`. Each is `UNKNOWN: kilit cannot read it`. A table named in
+  such a statement is lost from then on.
+- kilit reads an `ALTER TABLE` made only of `COMMENT`, `ENGINE`, `ROW_FORMAT`
+  and `KEY_BLOCK_SIZE` itself. Only the comment is measured: changing the
+  engine, the row format or the key block size is `UNKNOWN`, though the table
+  stays known. It becomes lost when MySQL may refuse the change because of
+  the table's keys or foreign keys.
+- A statement that consists only of a `/*! */` comment is not seen, so a
+  `SET` inside one, such as `/*!80000 SET old_alter_table = ON */`, does not
+  change the answers after it.
+- `CREATE TABLE` is not checked: kilit follows the table it creates, but says
+  nothing about the statement itself.
+- Laravel's `migrate --pretend` output turns every run of spaces into one, even
+  inside quotes, so kilit sees `DEFAULT 'a  b'` as `DEFAULT 'a b'`.
+
+## What is measured
+
+- `MODIFY` and `CHANGE` need the table's current definition. Without a schema,
+  kilit lists what the lab measured instead of answering.
+- A statement with several changes, including a `MODIFY` that changes several
+  things about a column, is `UNKNOWN`. The lab has measured single changes
+  only, and MySQL picks one algorithm for the whole statement.
+- Type changes other than between integer types, such as `VARCHAR` to `TEXT`,
+  are `UNKNOWN`.
+- Only MySQL 8.0.46 and 8.4.13 are measured. MariaDB is not supported: a
+  MariaDB schema without `--server` stops kilit with exit status 2.
+- The lab has measured InnoDB and, for the changes in
+  [the findings](findings.md#myisam-tables), MyISAM. Any other engine is
+  `UNKNOWN`.
+- Row formats other than DYNAMIC, and `old_alter_table`, have their own
+  measurements for a short list of changes. Anything else, and the two
+  together, is `UNKNOWN`. `KEY_BLOCK_SIZE` is measured at 8 only.
+- The cases of 64 instant column changes and of duplicate values were measured
+  on DYNAMIC tables only; on other row formats the answer carries a note.
+
+## The server kilit cannot see
+
+- kilit assumes the defaults listed in
+  [the findings](findings.md#server-settings-the-lab-measured-with). It
+  follows `foreign_key_checks` and `old_alter_table` when the input sets them.
+  Other settings the input names make `UNKNOWN` the answers they could change;
+  the findings say which. A server configured otherwise is invisible to it.
+- A table with no `ENGINE` is taken as InnoDB, the server default. kilit does
+  not read `default_storage_engine` from a `--schema` file, so a table created
+  under a different default there is still taken as InnoDB.
+- A trigger or a stored routine already on the server can fill a new table
+  with rows that no migration shows.
+- The rows a table holds, and the history of its instant column changes, are
+  not in a schema. kilit prints the situations that depend on them as notes.
+
+## Sessions and several files
+
+- Several input files are several sessions, as `mysql < a.sql` and
+  `mysql < b.sql` are. `foreign_key_checks`, `sql_log_bin` and
+  `old_alter_table` start from the MySQL defaults in each file, and a note
+  names the earlier file's `SET`.
+- After a `SET GLOBAL` or `SET PERSIST` in an earlier file, the setting is
+  unknown in the later ones. The tables carry over, except temporary tables.
+- A `--pretend` file is one session.
+
+## The metadata lock warning
+
+- "Writes continue" describes the change itself. Every `ALTER TABLE` also
+  waits for the metadata lock first. kilit warns about it, but cannot know
+  which transactions will be open when you deploy.
+- The warning covers `ALTER TABLE`, `CREATE INDEX` and `DROP INDEX ... ON`
+  only. `DROP TABLE`, `RENAME TABLE`, `TRUNCATE TABLE` and `LOCK TABLES` do not
+  get it.
+
+## Laravel
+
+- On Windows, the marks that PowerShell leaves in the double-byte code pages
+  (932, 936, 949, 950) and in 869 and 874 are not known.
+- `--pretend` does not print every read: `DB::getPdo()->query()`, Laravel 10's
+  Doctrine introspection and the affected-row counts of writes are not seen.
+  A `with ... update` gets the read note too.
+- An error raised outside any migration, after a migration that printed no
+  statements, is blamed on that migration.
+- A class-named migration whose name is wider than the terminal has no dots
+  and is unreadable; its statements go under the migration before it.
+
+More on these in [the Laravel notes](laravel.md#what-kilit-does-not-see).
