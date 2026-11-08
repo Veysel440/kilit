@@ -171,7 +171,7 @@ fn changed_tables(statement: &Statement) -> Vec<&str> {
 
 /// Keeps `new_tables` up to date with what `statement` creates, renames and
 /// drops.
-fn follow(statement: &Statement, new_tables: &mut Vec<String>) {
+pub(crate) fn follow(statement: &Statement, new_tables: &mut Vec<String>) {
     let mut rename = |from: &str, to: &str| {
         if let Some(table) = new_tables.iter_mut().find(|table| **table == key(from)) {
             *table = key(to);
@@ -202,7 +202,7 @@ fn follow(statement: &Statement, new_tables: &mut Vec<String>) {
 }
 
 /// Table names in any case, as the schema compares them.
-fn key(name: &str) -> String {
+pub(crate) fn key(name: &str) -> String {
     name.to_lowercase()
 }
 

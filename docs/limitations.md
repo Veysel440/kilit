@@ -80,9 +80,21 @@ safe.
 - "Writes continue" describes the change itself. Every `ALTER TABLE` also
   waits for the metadata lock first. kilit warns about it, but cannot know
   which transactions will be open when you deploy.
-- The warning covers `ALTER TABLE`, `CREATE INDEX` and `DROP INDEX ... ON`
-  only. `DROP TABLE`, `RENAME TABLE`, `TRUNCATE TABLE` and `LOCK TABLES` do not
-  get it.
+- The warning covers `ALTER TABLE`, `CREATE INDEX`, `DROP INDEX ... ON`,
+  `DROP TABLE`, `RENAME TABLE` (the old names) and `TRUNCATE TABLE`, on tables
+  that exist before the input. The lab measured each of these.
+- `LOCK TABLES` gets no warning. `LOCK TABLES ... READ` does not wait for a
+  transaction that only read the table, and reads do not queue behind it when
+  it waits.
+- A statement kilit cannot read gets the warning only in the forms above:
+  `ALTER`, `CREATE INDEX` and `DROP INDEX ... ON`, `DROP TABLES` and
+  `RENAME TABLES`.
+- `DROP TEMPORARY TABLE` names nothing. A temporary table created in one input
+  file still hides the warning for a `DROP`, `TRUNCATE` or `ALTER` of the same
+  name in a later file.
+- A table made by `CREATE TABLE ... LIKE` or `AS SELECT` is treated as existing,
+  so it is named. A `DROP`, `RENAME` or `TRUNCATE` of a name dropped earlier in
+  the input names it too, although MySQL then gives error 1146 or 1051.
 
 ## Laravel
 

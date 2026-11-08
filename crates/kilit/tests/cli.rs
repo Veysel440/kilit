@@ -2629,13 +2629,13 @@ no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE
     - if the table has had 64 instant column changes since it was last rebuilt: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)
 
 metadata lock on users:
-  Every ALTER TABLE first waits for the open transactions that have used its
-  table to end. While it waits, new queries on that table queue behind it,
-  reads too, even for an INSTANT change, and by default MySQL lets it wait a
-  year (lock_wait_timeout = 31536000). Run SET SESSION lock_wait_timeout = 5
-  before the migration to cap the wait: the ALTER then fails with error 1205
-  after 5 seconds, the queries behind it go on, and you can run the migration
-  again later.
+  Every ALTER TABLE, DROP TABLE, RENAME TABLE and TRUNCATE TABLE first waits
+  for the open transactions that have used any of its tables to end. While it
+  waits, new queries on those tables queue behind it, reads too, even for an
+  INSTANT change, and by default MySQL lets it wait a year (lock_wait_timeout
+  = 31536000). Run SET SESSION lock_wait_timeout = 5 before the migration to
+  cap the wait: the statement then fails with error 1205 after 5 seconds, the
+  queries behind it go on, and you can run the migration again later.
   measured by kilit-lab on mysql-8.4.13
 
 9 statements: 2 run while writes continue, 7 not checked
@@ -5981,4 +5981,503 @@ fn every_relative_link_points_at_a_file() {
         "links that point at nothing:\n{}",
         broken.join("\n")
     );
+}
+
+// Step 12b: the metadata lock warning also names the tables a DROP TABLE,
+// RENAME TABLE or TRUNCATE TABLE waits for. The lab measured on MySQL 8.0.46
+// and 8.4.13 that each of them waits for an open transaction that read the
+// table, that readers queue behind it, and that reads go on after error 1205;
+// LOCK TABLES did not wait for a reader, so it stays out of the warning.
+
+const LOCK_WARNING_STATEMENT_KINDS: &str =
+    "Every ALTER TABLE, DROP TABLE, RENAME TABLE and TRUNCATE TABLE first waits";
+
+fn write_lock_schema() -> PathBuf {
+    let file = Path::new(env!("CARGO_TARGET_TMPDIR")).join("metadata-lock-schema.sql");
+    std::fs::write(
+        &file,
+        "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `customers` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+",
+    )
+    .unwrap();
+    file
+}
+
+/// Text, JSON and exit status of `kilit check --schema <the lock schema>`
+/// with `extra` arguments.
+fn lock_run(extra: &[&str], input: &str) -> (String, serde_json::Value, Option<i32>) {
+    let schema = write_lock_schema();
+    let mut args = vec!["--schema", schema.to_str().unwrap()];
+    args.extend(extra);
+    text_and_json(&args, input)
+}
+
+/// The tables of the `metadata-lock` warning of the JSON, or None when it has
+/// none.
+fn locked_tables(json: &serde_json::Value) -> Option<Vec<String>> {
+    let warnings = json["warnings"].as_array().unwrap();
+    let locks: Vec<&serde_json::Value> = warnings
+        .iter()
+        .filter(|warning| warning["id"] == "metadata-lock")
+        .collect();
+    assert!(locks.len() <= 1, "{json}");
+    locks.first().map(|warning| {
+        warning["tables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|table| table.as_str().unwrap().to_owned())
+            .collect()
+    })
+}
+
+/// Asserts that the warning of `text` and `json` names exactly `tables`.
+fn assert_locked(text: &str, json: &serde_json::Value, tables: &[&str]) {
+    assert_eq!(
+        locked_tables(json),
+        Some(tables.iter().map(|table| (*table).to_owned()).collect()),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("\nmetadata lock on {}:\n", tables.join(", "))),
+        "{text}"
+    );
+    assert!(text.contains(LOCK_WARNING_STATEMENT_KINDS), "{text}");
+}
+
+/// Asserts that neither the text nor the JSON has a metadata lock warning.
+fn assert_not_locked(text: &str, json: &serde_json::Value) {
+    assert_eq!(locked_tables(json), None, "{text}");
+    assert!(!text.contains("metadata lock on"), "{text}");
+}
+
+fn impacts_of(json: &serde_json::Value) -> Vec<&str> {
+    json["sources"][0]["statements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|statement| statement["impact"].as_str().unwrap())
+        .collect()
+}
+
+#[test]
+fn dropping_a_table_of_the_schema_names_it_in_the_metadata_lock_warning() {
+    let (text, json, code) = lock_run(&[], "drop table `orders`;");
+    assert_locked(&text, &json, &["orders"]);
+    assert_eq!(impacts_of(&json), ["not_checked"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(json["exit_code"], 0);
+}
+
+#[test]
+fn dropping_a_table_if_it_exists_names_it_in_the_metadata_lock_warning() {
+    // Schema::dropIfExists('orders')
+    let (text, json, code) = lock_run(&[], "drop table if exists `orders`;");
+    assert_locked(&text, &json, &["orders"]);
+    assert_eq!(impacts_of(&json), ["not_checked"]);
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn dropping_a_table_in_capitals_without_backticks_names_it_too() {
+    let (text, json, _) = lock_run(&[], "DROP TABLE IF EXISTS orders;");
+    assert_locked(&text, &json, &["orders"]);
+}
+
+#[test]
+fn dropping_a_table_without_a_schema_file_names_it_because_it_may_exist() {
+    let output = kilit(&["check", "--format", "json"], "drop table `orders`;");
+    let json = json_of(&output);
+    assert_eq!(locked_tables(&json), Some(vec!["orders".to_owned()]));
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn several_tables_in_one_drop_are_each_named_in_the_order_they_appear() {
+    let (text, json, code) = lock_run(&[], "drop table users, `orders`, customers;");
+    assert_locked(&text, &json, &["users", "orders", "customers"]);
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn a_table_named_twice_in_different_letter_case_is_named_once() {
+    let (text, json, _) = lock_run(
+        &[],
+        "truncate table orders; drop table if exists users, ORDERS;",
+    );
+    assert_locked(&text, &json, &["orders", "users"]);
+}
+
+#[test]
+fn renaming_a_table_names_the_old_name_and_never_the_new_one() {
+    // Schema::rename('orders', 'orders_old')
+    let (text, json, code) = lock_run(&[], "rename table `orders` to `orders_old`;");
+    assert_locked(&text, &json, &["orders"]);
+    assert!(!text.contains("orders_old:"), "{text}");
+    assert_eq!(impacts_of(&json), ["unknown"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(json["exit_code"], 0);
+}
+
+#[test]
+fn renaming_several_tables_names_every_old_name() {
+    let (text, json, _) = lock_run(
+        &[],
+        "rename table orders to orders_old, users to users_old;",
+    );
+    assert_locked(&text, &json, &["orders", "users"]);
+}
+
+#[test]
+fn a_swap_rename_names_only_the_two_old_tables_and_not_the_temporary_name() {
+    let (text, json, _) = lock_run(
+        &[],
+        "rename table orders to tmp_swap, users to orders, tmp_swap to users;",
+    );
+    assert_locked(&text, &json, &["orders", "users"]);
+}
+
+#[test]
+fn truncating_a_table_with_and_without_the_word_table_names_it() {
+    // DB::table('orders')->truncate()
+    for sql in [
+        "truncate table `orders`;",
+        "truncate `orders`;",
+        "TRUNCATE orders;",
+    ] {
+        let (text, json, code) = lock_run(&[], sql);
+        assert_locked(&text, &json, &["orders"]);
+        assert_eq!(impacts_of(&json), ["unknown"], "{sql}");
+        assert_eq!(code, Some(0), "{sql}");
+    }
+}
+
+#[test]
+fn a_table_the_input_created_is_not_in_the_warning_when_it_is_renamed_truncated_or_dropped() {
+    for sql in [
+        "rename table notes to notes_old",
+        "truncate table notes",
+        "drop table notes",
+        "drop table if exists notes",
+    ] {
+        let input = format!(
+            "create table `notes` (`id` bigint unsigned not null auto_increment primary key, \
+             `body` varchar(255) not null);\n{sql};"
+        );
+        let (text, json, code) = lock_run(&[], &input);
+        assert_not_locked(&text, &json);
+        assert_eq!(code, Some(0), "{sql}");
+    }
+}
+
+#[test]
+fn a_created_table_is_followed_through_a_rename_and_stays_out_of_the_warning() {
+    // Migration 1 creates notes; migration 2 renames it, truncates the new
+    // name and drops it.
+    let input = "create table `notes` (`id` bigint unsigned not null auto_increment primary \
+                 key, `body` varchar(255) not null);\n\
+                 rename table `notes` to `notes_old`;\n\
+                 truncate table `notes_old`;\n\
+                 drop table `notes_old`;";
+    let (text, json, code) = lock_run(&[], input);
+    assert_not_locked(&text, &json);
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn a_drop_naming_a_created_table_and_a_schema_table_names_only_the_schema_one() {
+    let input = "create table `notes` (`id` bigint unsigned not null auto_increment primary \
+                 key);\n\
+                 drop table `notes`, `orders`;";
+    let (text, json, _) = lock_run(&[], input);
+    assert_locked(&text, &json, &["orders"]);
+    assert!(!text.contains("notes:"), "{text}");
+    assert!(!text.contains(", notes"), "{text}");
+}
+
+#[test]
+fn a_schema_table_renamed_to_a_new_name_keeps_both_names_in_the_warning_when_it_is_used_again() {
+    // orders existed before the input, so a transaction may use it under the
+    // new name too; the new name was not created by the input.
+    let (text, json, _) = lock_run(
+        &[],
+        "rename table orders to orders_old; truncate table orders_old;",
+    );
+    assert_locked(&text, &json, &["orders", "orders_old"]);
+}
+
+#[test]
+fn lock_tables_gives_no_metadata_lock_warning() {
+    // Measured: LOCK TABLES READ does not wait for a transaction that only
+    // read the table, and readers do not queue behind it.
+    for sql in [
+        "lock tables orders read;",
+        "LOCK TABLES `orders` WRITE;",
+        "lock tables orders read, users write; unlock tables;",
+    ] {
+        let (text, json, code) = lock_run(&[], sql);
+        assert_not_locked(&text, &json);
+        assert_eq!(code, Some(0), "{sql}");
+    }
+}
+
+#[test]
+fn an_alter_table_still_names_its_table_and_the_warning_has_the_same_keys_as_before() {
+    let (text, json, code) = lock_run(&[], "alter table orders add note varchar(255) null;");
+    assert_locked(&text, &json, &["orders"]);
+    assert_eq!(code, Some(0));
+    let warning = json["warnings"][0].as_object().unwrap();
+    let mut keys: Vec<&str> = warning.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["id", "message", "tables"]);
+    assert_eq!(json["format_version"], "1.0");
+}
+
+#[test]
+fn the_json_warning_text_names_the_measured_kinds_and_error_1205() {
+    let (_, json, _) = lock_run(&[], "drop table orders;");
+    let message = json["warnings"][0]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(LOCK_WARNING_STATEMENT_KINDS),
+        "{message}"
+    );
+    assert!(
+        message.contains("the statement then fails with error 1205"),
+        "{message}"
+    );
+}
+
+#[test]
+fn drop_rename_and_truncate_keep_their_impacts_and_exit_statuses_with_and_without_strict() {
+    // DROP TABLE is not checked, RENAME TABLE and TRUNCATE are unknown;
+    // only --strict counts the unknown ones (exit status 3).
+    for (sql, impact, strict_code) in [
+        ("drop table orders;", "not_checked", 0),
+        ("drop table if exists orders;", "not_checked", 0),
+        ("rename table orders to orders_old;", "unknown", 3),
+        ("truncate table orders;", "unknown", 3),
+    ] {
+        let (_, json, code) = lock_run(&[], sql);
+        assert_eq!(impacts_of(&json), [impact], "{sql}");
+        assert_eq!(code, Some(0), "{sql}");
+        assert_eq!(json["format_version"], "1.0", "{sql}");
+        assert_eq!(json["summary"]["fails"], 0, "{sql}");
+        assert_eq!(json["summary"]["writes_wait"], 0, "{sql}");
+
+        let (_, json, code) = lock_run(&["--strict"], sql);
+        assert_eq!(code, Some(strict_code), "{sql}");
+        assert_eq!(json["exit_code"], strict_code, "{sql}");
+        assert!(locked_tables(&json).is_some(), "{sql}");
+    }
+}
+
+#[test]
+fn a_drop_after_a_failing_alter_does_not_change_the_failure_or_the_exit_status() {
+    // The warning is added, the ALTER's answer and exit status stay.
+    let (text, json, code) = lock_run(
+        &[],
+        "alter table orders add unique index uq (user_id, amount, nosuch);\n\
+         alter table orders modify amount smallint not null;\n\
+         drop table customers;",
+    );
+    assert_eq!(locked_tables(&json).unwrap().last().unwrap(), "customers");
+    assert_eq!(code, json["exit_code"].as_i64().map(|c| c as i32));
+    assert!(
+        text.contains("metadata lock on orders, customers:"),
+        "{text}"
+    );
+}
+
+// Laravel's --pretend output of Schema::drop, Schema::dropIfExists,
+// Schema::rename and DB::table('orders')->truncate(), as Laravel 12 prints it
+// and as Laravel 13 prints it in its short form.
+
+fn laravel_forms(migrations: &[(&str, &[&str])]) -> [(&'static str, String); 2] {
+    [
+        ("long", pretend_long(migrations)),
+        ("short", pretend_short(migrations)),
+    ]
+}
+
+#[test]
+fn laravel_schema_drop_names_the_dropped_table_in_both_forms() {
+    // Schema::drop('orders')
+    let migrations: [(&str, &[&str]); 1] =
+        [("2026_05_01_000001_drop_orders", &["drop table `orders`"])];
+    for (form, input) in laravel_forms(&migrations) {
+        let (text, json, code) = lock_run(&[], &input);
+        assert_locked(&text, &json, &["orders"]);
+        assert_eq!(code, Some(0), "{form}");
+        assert_eq!(json["sources"].as_array().unwrap().len(), 1, "{form}");
+        assert_eq!(impacts_of(&json), ["not_checked"], "{form}");
+    }
+}
+
+#[test]
+fn laravel_schema_drop_if_exists_names_the_dropped_table_in_both_forms() {
+    // Schema::dropIfExists('orders')
+    let migrations: [(&str, &[&str]); 1] = [(
+        "2026_05_01_000001_drop_orders",
+        &["drop table if exists `orders`"],
+    )];
+    for (form, input) in laravel_forms(&migrations) {
+        let (text, json, code) = lock_run(&[], &input);
+        assert_locked(&text, &json, &["orders"]);
+        assert_eq!(code, Some(0), "{form}");
+        assert_eq!(impacts_of(&json), ["not_checked"], "{form}");
+    }
+}
+
+#[test]
+fn two_laravel_drop_if_exists_calls_name_both_tables_in_both_forms() {
+    // Schema::dropIfExists('orders'); Schema::dropIfExists('customers')
+    let migrations: [(&str, &[&str]); 1] = [(
+        "2026_05_01_000001_drop_two",
+        &[
+            "drop table if exists `orders`",
+            "drop table if exists `customers`",
+        ],
+    )];
+    for (form, input) in laravel_forms(&migrations) {
+        let (text, json, code) = lock_run(&[], &input);
+        assert_locked(&text, &json, &["orders", "customers"]);
+        assert_eq!(code, Some(0), "{form}");
+        assert_eq!(impacts_of(&json), ["not_checked", "not_checked"], "{form}");
+    }
+}
+
+#[test]
+fn laravel_schema_rename_names_the_old_table_only_in_both_forms() {
+    // Schema::rename('orders', 'orders_old')
+    let migrations: [(&str, &[&str]); 1] = [(
+        "2026_05_01_000001_rename_orders",
+        &["rename table `orders` to `orders_old`"],
+    )];
+    for (form, input) in laravel_forms(&migrations) {
+        let (text, json, code) = lock_run(&[], &input);
+        assert_locked(&text, &json, &["orders"]);
+        assert!(!text.contains("orders_old:"), "{form}: {text}");
+        assert_eq!(code, Some(0), "{form}");
+        assert_eq!(impacts_of(&json), ["unknown"], "{form}");
+    }
+}
+
+#[test]
+fn laravel_table_truncate_names_the_table_in_both_forms() {
+    // DB::table('orders')->truncate()
+    let migrations: [(&str, &[&str]); 1] = [(
+        "2026_05_01_000001_truncate_orders",
+        &["truncate table `orders`"],
+    )];
+    for (form, input) in laravel_forms(&migrations) {
+        let (text, json, code) = lock_run(&[], &input);
+        assert_locked(&text, &json, &["orders"]);
+        assert_eq!(code, Some(0), "{form}");
+        assert_eq!(impacts_of(&json), ["unknown"], "{form}");
+    }
+}
+
+#[test]
+fn a_laravel_migration_that_creates_then_renames_truncates_and_drops_gives_no_warning() {
+    // Migration 1: Schema::create('notes'). Migration 2: Schema::rename('notes',
+    // 'notes_old'), DB::table('notes_old')->truncate(), Schema::drop('notes_old').
+    let create = "create table `notes` (`id` bigint unsigned not null auto_increment primary \
+                  key, `body` varchar(255) not null) default character set utf8mb4 collate \
+                  'utf8mb4_unicode_ci'";
+    let migrations: [(&str, &[&str]); 2] = [
+        ("2026_05_01_000001_create_notes", &[create]),
+        (
+            "2026_05_01_000002_change_notes_ordered",
+            &[
+                "rename table `notes` to `notes_old`",
+                "truncate table `notes_old`",
+                "drop table `notes_old`",
+            ],
+        ),
+    ];
+    for (form, input) in laravel_forms(&migrations) {
+        let (text, json, code) = lock_run(&[], &input);
+        assert_not_locked(&text, &json);
+        assert_eq!(code, Some(0), "{form}");
+        assert_eq!(json["sources"].as_array().unwrap().len(), 2, "{form}");
+        assert_eq!(
+            impacts_of(&json),
+            ["not_checked"],
+            "{form}: the first source has the create only"
+        );
+        assert_eq!(
+            json["sources"][1]["statements"].as_array().unwrap().len(),
+            3,
+            "{form}"
+        );
+    }
+}
+
+// Step 12b, review findings. Measured by hand on MySQL 8.0.46 and 8.4.13 with
+// a transaction that had read orders open and lock_wait_timeout = 3.
+
+#[test]
+fn drop_tables_and_rename_tables_are_read_as_drop_table_and_rename_table() {
+    // MySQL takes TABLES as TABLE: both waited 3.1 s, then error 1205.
+    let (text, json, code) = lock_run(&[], "drop tables orders;");
+    assert_locked(&text, &json, &["orders"]);
+    assert_eq!(code, Some(0));
+
+    let (text, json, code) = lock_run(&[], "rename tables orders to orders_old;");
+    assert_locked(&text, &json, &["orders"]);
+    assert!(!text.contains("orders_old:"), "{text}");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn index_statements_kilit_cannot_read_still_name_their_table_and_stay_unknown() {
+    // Each waited, then 1205, on both servers.
+    for sql in [
+        "create fulltext index i on orders (status);",
+        "create index i on orders (amount) invisible;",
+        "drop index i on orders algorithm=inplace;",
+    ] {
+        let (text, json, code) = lock_run(&[], sql);
+        assert_locked(&text, &json, &["orders"]);
+        assert_eq!(impacts_of(&json), ["unknown"], "{sql}");
+        assert_eq!(code, Some(0), "{sql}");
+    }
+}
+
+#[test]
+fn dropping_a_temporary_table_waits_for_nothing_and_gives_no_warning() {
+    // 1051 at once, or returns at once with IF EXISTS: no wait.
+    for sql in [
+        "drop temporary table orders;",
+        "drop temporary table if exists orders;",
+    ] {
+        let (text, json, code) = lock_run(&[], sql);
+        assert_not_locked(&text, &json);
+        assert_eq!(impacts_of(&json), ["not_checked"], "{sql}");
+        assert_eq!(code, Some(0), "{sql}");
+    }
+}
+
+#[test]
+fn truncating_a_double_quoted_name_is_rejected_at_once_and_gives_no_warning() {
+    // Both servers: error 1064 at once, so nothing waits.
+    let (text, json, _) = lock_run(&[], "truncate table \"orders\";");
+    assert_not_locked(&text, &json);
 }

@@ -79,10 +79,11 @@ The ids, in the order they appear in the array:
 | --- | --- | --- |
 | `server-mismatch` | the schema dump names another MySQL series, or MariaDB with `--server`, or a version kilit cannot read | empty |
 | `laravel-error` | Laravel stopped with an error; `file` names the input | empty |
-| `metadata-lock` | the input alters a table that exists before it | the altered tables |
+| `metadata-lock` | the input alters, drops, renames or truncates a table that exists before it | those tables |
 
-The `metadata-lock` warning is left out when no existing table is altered. A
-new table, and a statement that is not checked, do not count.
+The `metadata-lock` warning is left out when no existing table is changed. A
+table created earlier in the input does not count. A `DROP TABLE` counts,
+although kilit does not check it.
 
 ## Example
 
@@ -162,7 +163,7 @@ SQL
       "tables": [
         "orders"
       ],
-      "message": "Every ALTER TABLE first waits for the open transactions that have used its table to end. While it waits, new queries on that table queue behind it, reads too, even for an INSTANT change, and by default MySQL lets it wait a year (lock_wait_timeout = 31536000). Run SET SESSION lock_wait_timeout = 5 before the migration to cap the wait: the ALTER then fails with error 1205 after 5 seconds, the queries behind it go on, and you can run the migration again later."
+      "message": "Every ALTER TABLE, DROP TABLE, RENAME TABLE and TRUNCATE TABLE first waits for the open transactions that have used any of its tables to end. While it waits, new queries on those tables queue behind it, reads too, even for an INSTANT change, and by default MySQL lets it wait a year (lock_wait_timeout = 31536000). Run SET SESSION lock_wait_timeout = 5 before the migration to cap the wait: the statement then fails with error 1205 after 5 seconds, the queries behind it go on, and you can run the migration again later."
     }
   ],
   "summary": {

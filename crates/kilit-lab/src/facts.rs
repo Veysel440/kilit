@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use kilit_core::{
     ALGORITHMS_THAT_WAIT, Algorithm, CHARSETS, DEFAULT_LOCK_WAIT_TIMEOUT, LOCK_WAIT_TIMEOUT_ERROR,
+    STATEMENTS_THAT_WAIT, StatementThatWaits,
 };
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts};
@@ -41,17 +42,19 @@ pub async fn check_charsets(conn: &mut Conn) -> Result<()> {
     Ok(())
 }
 
-/// How long the ALTER may wait in the check, in seconds. Long enough for the
-/// read behind it to give up first.
-const ALTER_WAIT: u64 = 3;
-/// How long the read behind the waiting ALTER may wait, in seconds.
+/// How long the probed statement may wait in the check, in seconds. Long
+/// enough for the read behind it to give up first.
+const STATEMENT_WAIT: u64 = 3;
+/// How long the read behind the waiting statement may wait, in seconds.
 const READ_WAIT: u64 = 1;
 
 /// Checks what kilit-core says about the metadata lock
-/// (`crates/kilit-core/src/metadata_lock.rs`), with one ALTER per algorithm:
+/// (`crates/kilit-core/src/metadata_lock.rs`), with one ALTER per algorithm
+/// and one statement of each kind in `STATEMENTS_THAT_WAIT`:
 ///
-/// 1. the ALTER waits for a transaction that has read the table and is still
-///    open, and gives up with error 1205 after `lock_wait_timeout` seconds;
+/// 1. the statement waits for a transaction that has read the table and is
+///    still open, and gives up with error 1205 after `lock_wait_timeout`
+///    seconds;
 /// 2. while it waits, a plain read of the table waits behind it;
 /// 3. once it has given up, reads go on;
 ///
@@ -74,6 +77,16 @@ pub async fn check_metadata_lock(conn: &mut Conn, opts: &Opts) -> Result<()> {
             .await
             .map_err(|err| format!("`{alter}`: {err}"))?;
     }
+    for kind in STATEMENTS_THAT_WAIT {
+        fixture::reset(conn, None, "").await?;
+        let (setup, statement) = statement_probe(kind);
+        if let Some(setup) = setup {
+            conn.query_drop(setup).await?;
+        }
+        check_waits(conn, opts, statement)
+            .await
+            .map_err(|err| format!("`{statement}`: {err}"))?;
+    }
     Ok(())
 }
 
@@ -86,39 +99,54 @@ fn probe(algorithm: Algorithm) -> &'static str {
     }
 }
 
-async fn check_waits(conn: &mut Conn, opts: &Opts, alter: &str) -> Result<()> {
+/// A statement of `kind` on the lab's `orders` table, after what it needs
+/// first: the fixture has no index on `amount` to drop.
+fn statement_probe(kind: StatementThatWaits) -> (Option<&'static str>, &'static str) {
+    match kind {
+        StatementThatWaits::CreateIndex => (None, "CREATE INDEX probe ON orders (amount)"),
+        StatementThatWaits::DropIndex => (
+            Some("ALTER TABLE orders ADD INDEX probe (amount)"),
+            "DROP INDEX probe ON orders",
+        ),
+        StatementThatWaits::DropTable => (None, "DROP TABLE orders"),
+        StatementThatWaits::RenameTable => (None, "RENAME TABLE orders TO probe"),
+        StatementThatWaits::TruncateTable => (None, "TRUNCATE TABLE orders"),
+    }
+}
+
+async fn check_waits(conn: &mut Conn, opts: &Opts, statement: &str) -> Result<()> {
     // A transaction that has read the table and stays open, like a request
     // that is still running or a worker that forgot to commit.
     let mut holder = session(opts).await?;
     holder.query_drop("START TRANSACTION").await?;
     holder.query_drop("SELECT id FROM orders LIMIT 1").await?;
 
-    let mut altering = session(opts).await?;
-    altering
-        .query_drop(format!("SET SESSION lock_wait_timeout = {ALTER_WAIT}"))
+    let mut waiting = session(opts).await?;
+    waiting
+        .query_drop(format!("SET SESSION lock_wait_timeout = {STATEMENT_WAIT}"))
         .await?;
-    let altering_id = altering.id();
+    let waiting_id = waiting.id();
     let mut reader = session(opts).await?;
     reader
         .query_drop(format!("SET SESSION lock_wait_timeout = {READ_WAIT}"))
         .await?;
 
-    let (altered, queued) = tokio::join!(altering.query_drop(alter), async {
-        wait_for_metadata_lock(conn, altering_id).await?;
+    let (ran, queued) = tokio::join!(waiting.query_drop(statement), async {
+        wait_for_metadata_lock(conn, waiting_id).await?;
         Ok::<_, Box<dyn std::error::Error>>(
             reader.query_drop("SELECT id FROM orders LIMIT 1").await,
         )
     });
-    // The ALTER's own result first: if it did not wait, that is the news.
-    gave_up(altered, "the ALTER")?;
-    gave_up(queued?, "a read behind the waiting ALTER")?;
+    // The statement's own result first: if it did not wait, that is the news.
+    gave_up(ran, "the statement")?;
+    gave_up(queued?, "a read behind the waiting statement")?;
     reader
         .query_drop("SELECT id FROM orders LIMIT 1")
         .await
-        .map_err(|err| format!("a read after the ALTER gave up failed: {err}"))?;
+        .map_err(|err| format!("a read after the statement gave up failed: {err}"))?;
 
     holder.query_drop("ROLLBACK").await?;
-    for session in [holder, altering, reader] {
+    for session in [holder, waiting, reader] {
         session.disconnect().await?;
     }
     Ok(())
@@ -133,7 +161,8 @@ async fn session(opts: &Opts) -> Result<Conn> {
 }
 
 /// Returns once the connection `id` waits for a metadata lock, or fails
-/// after two seconds. The probe ALTERs give up after ALTER_WAIT seconds.
+/// after two seconds. The probed statements give up after STATEMENT_WAIT
+/// seconds.
 async fn wait_for_metadata_lock(conn: &mut Conn, id: u32) -> Result<()> {
     for _ in 0..100 {
         let state: Option<Option<String>> = conn
@@ -148,7 +177,7 @@ async fn wait_for_metadata_lock(conn: &mut Conn, id: u32) -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    Err("the ALTER was not seen waiting for the metadata lock within 2 seconds".into())
+    Err("the statement was not seen waiting for the metadata lock within 2 seconds".into())
 }
 
 /// Checks that `what` waited until `lock_wait_timeout` and gave up.

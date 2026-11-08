@@ -61,6 +61,111 @@ fn read(sql: &str) -> StatementKind {
     }
 }
 
+/// The table a `TRUNCATE TABLE` empties, in the form MySQL takes:
+/// `TRUNCATE [TABLE] name`, one table. `None` for any other statement.
+pub(crate) fn truncated_table(sql: &str) -> Option<String> {
+    if !may_begin_with(sql, &["truncate"]) {
+        return None;
+    }
+    let statements = Parser::parse_sql(&MySqlDialect {}, sql).ok()?;
+    let [ast::Statement::Truncate(truncate)] = statements.as_slice() else {
+        return None;
+    };
+    let ast::Truncate {
+        table_names,
+        partitions: None,
+        if_exists: false,
+        identity: None,
+        cascade: None,
+        on_cluster: None,
+        ..
+    } = truncate
+    else {
+        return None;
+    };
+    match table_names.as_slice() {
+        [target] if !target.only && !target.has_asterisk && !double_quoted(&target.name) => {
+            Some(object_name(&target.name))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `sql` is a `DROP TEMPORARY TABLE`, which drops only a table of
+/// its own session.
+pub(crate) fn drops_temporary_table(sql: &str) -> bool {
+    let words = words(sql);
+    matches!(
+        [words.first(), words.get(1)].map(|word| word.map_or(Keyword::NoKeyword, keyword)),
+        [Keyword::DROP, Keyword::TEMPORARY]
+    )
+}
+
+/// `DROP [TEMPORARY] TABLES` and `RENAME TABLES`, which MySQL runs as `DROP
+/// TABLE` and `RENAME TABLE` but the parser cannot read, written with
+/// `TABLE`. `None` for any other statement.
+pub(crate) fn with_table_for_tables(sql: &str) -> Option<String> {
+    if !may_begin_with(sql, &["drop", "rename"]) {
+        return None;
+    }
+    let mut tokens = Tokenizer::new(&MySqlDialect {}, sql).tokenize().ok()?;
+    let mut words = tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| !matches!(token, Token::Whitespace(_)))
+        .map(|(at, token)| (at, keyword(token)));
+    let first: [Option<(usize, Keyword)>; 3] = [words.next(), words.next(), words.next()];
+    let tables = match first {
+        [Some((_, Keyword::DROP)), Some((at, Keyword::TABLES)), _]
+        | [
+            Some((_, Keyword::DROP)),
+            Some((_, Keyword::TEMPORARY)),
+            Some((at, Keyword::TABLES)),
+        ]
+        | [Some((_, Keyword::RENAME)), Some((at, Keyword::TABLES)), _] => at,
+        _ => return None,
+    };
+    tokens[tables] = Token::make_keyword("TABLE");
+    Some(tokens.iter().map(ToString::to_string).collect())
+}
+
+/// Whether `sql` may begin with one of `words`, in any case: a quick look
+/// at its first word, which says yes when a comment comes first.
+fn may_begin_with(sql: &str, words: &[&str]) -> bool {
+    let sql = sql.trim_start();
+    if sql.starts_with("--") || sql.starts_with('#') || sql.starts_with("/*") {
+        return true;
+    }
+    let first = sql
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .next()
+        .unwrap_or_default();
+    words.iter().any(|word| first.eq_ignore_ascii_case(word))
+}
+
+/// Whether the statement kilit could not read, which names `table` in
+/// [`table_named_in`], changes that table's definition: `ALTER ...`,
+/// `CREATE [UNIQUE | FULLTEXT | SPATIAL] INDEX` and `DROP INDEX`.
+pub(crate) fn alters_named_table(sql: &str) -> bool {
+    if !may_begin_with(sql, &["alter", "create", "drop"]) {
+        return false;
+    }
+    let words = words(sql);
+    let first: [Keyword; 3] =
+        std::array::from_fn(|at| words.get(at).map_or(Keyword::NoKeyword, keyword));
+    matches!(
+        first,
+        [Keyword::ALTER, _, _]
+            | [Keyword::CREATE, Keyword::INDEX, _]
+            | [
+                Keyword::CREATE,
+                Keyword::UNIQUE | Keyword::FULLTEXT | Keyword::SPATIAL,
+                Keyword::INDEX,
+            ]
+            | [Keyword::DROP, Keyword::INDEX, _]
+    )
+}
+
 /// An `ALTER TABLE` whose only changes are the table options `COMMENT`,
 /// `ENGINE`, `ROW_FORMAT` and `KEY_BLOCK_SIZE`, which the parser cannot
 /// read, with `ALGORITHM` and `LOCK` if written: `ALTER TABLE notes COMMENT

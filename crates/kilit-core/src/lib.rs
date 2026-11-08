@@ -45,7 +45,8 @@ pub use check::{
 pub use impact::{Impact, impacts, on_empty_tables, on_new_tables};
 pub use knowledge::{DEFAULT_SERIES, Knowledge, ScenarioResult, ServerResults};
 pub use metadata_lock::{
-    ALGORITHMS_THAT_WAIT, DEFAULT_LOCK_WAIT_TIMEOUT, LOCK_WAIT_TIMEOUT_ERROR, metadata_lock_warning,
+    ALGORITHMS_THAT_WAIT, DEFAULT_LOCK_WAIT_TIMEOUT, LOCK_WAIT_TIMEOUT_ERROR, STATEMENTS_THAT_WAIT,
+    StatementThatWaits, locked_tables, metadata_lock_warning,
 };
 pub use parse::parse;
 pub use pretend::{

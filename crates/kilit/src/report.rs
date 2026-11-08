@@ -6,7 +6,7 @@ use clap::ValueEnum;
 use kilit_core::{
     Algorithm, Impact, PRETEND_READ_NOTE, Prediction, Schema, ServerResults, Statement,
     StatementKind, Verdict, Writes, check_sessions, depends_on_rows, impacts,
-    metadata_lock_warning, on_empty_tables, on_new_tables, only_reads,
+    locked_tables as locked_tables_of, metadata_lock_warning, on_empty_tables, only_reads,
 };
 use serde::Serialize;
 
@@ -55,7 +55,8 @@ pub struct Report<'a> {
     laravel_errors: Vec<(&'a str, &'a str)>,
     /// More than one input was read: messages name theirs.
     several_inputs: bool,
-    /// Tables that exist before the migration and that an ALTER changes.
+    /// Tables that may exist before the migration and that an ALTER, DROP
+    /// TABLE, RENAME TABLE or TRUNCATE TABLE waits for.
     locked_tables: Vec<String>,
 }
 
@@ -75,8 +76,6 @@ struct Checked<'a> {
     statement: &'a Statement,
     prediction: Prediction,
     impact: Impact,
-    /// The statement changes only tables that the input created earlier.
-    on_new_table: bool,
     /// The statement changes a table that the input created earlier and
     /// that no statement since may have put rows in.
     on_empty_table: bool,
@@ -169,7 +168,6 @@ impl<'a> Report<'a> {
             others,
             server_dependent,
         );
-        let on_new_tables = on_new_tables(&statements);
         // Rows may come from lines kilit could not read, or from a statement
         // inside a `/*! */` comment, which kilit does not see.
         let rows_unseen = !input.unreadable.is_empty() || input.runs_comments;
@@ -180,7 +178,6 @@ impl<'a> Report<'a> {
         let mut checked = findings
             .into_iter()
             .zip(impacts)
-            .zip(on_new_tables)
             .zip(on_empty_tables)
             .zip(others_said);
         let sources: Vec<SourceReport> = input
@@ -194,14 +191,13 @@ impl<'a> Report<'a> {
                     .iter()
                     .enumerate()
                     .map(|(i, statement)| {
-                        let ((((finding, impact), on_new_table), on_empty_table), others) = checked
+                        let (((finding, impact), on_empty_table), others) = checked
                             .next()
                             .expect("check gives one finding per statement");
                         Checked {
                             statement,
                             prediction: finding.prediction,
                             impact,
-                            on_new_table,
                             on_empty_table,
                             first_read: source.first_read == Some(i),
                             later_read: source.first_read.is_some_and(|first| first < i)
@@ -215,19 +211,16 @@ impl<'a> Report<'a> {
             })
             .collect();
 
+        // No transaction can be using a table the input created, whatever
+        // kilit says about the statement; a DROP TABLE waits although kilit
+        // does not check it.
         let mut locked_tables: Vec<String> = Vec::new();
-        for checked in sources.iter().flat_map(|source| &source.statements) {
-            // No transaction can be using a table the input created, whatever
-            // kilit says about the statement.
-            if checked.on_new_table || checked.impact == Impact::NotChecked {
-                continue;
-            }
-            if let Some(table) = altered_table(checked.statement)
-                && !locked_tables
-                    .iter()
-                    .any(|known| known.eq_ignore_ascii_case(table))
+        for table in locked_tables_of(&statements).into_iter().flatten() {
+            if !locked_tables
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(&table))
             {
-                locked_tables.push(table.to_owned());
+                locked_tables.push(table);
             }
         }
 
@@ -493,23 +486,6 @@ impl<'a> Report<'a> {
         let mut json = serde_json::to_string_pretty(&report).expect("the report is plain data");
         json.push('\n');
         json
-    }
-}
-
-/// The table an ALTER TABLE changes, also when kilit could not read the rest.
-fn altered_table(statement: &Statement) -> Option<&str> {
-    match &statement.kind {
-        StatementKind::Alter(alter) => Some(&alter.table),
-        StatementKind::Unparsed {
-            table: Some(table), ..
-        } if statement
-            .sql
-            .get(..5)
-            .is_some_and(|word| word.eq_ignore_ascii_case("alter")) =>
-        {
-            Some(table)
-        }
-        _ => None,
     }
 }
 

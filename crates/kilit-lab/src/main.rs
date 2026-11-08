@@ -136,7 +136,9 @@ async fn run_target(url: &str, scenarios: &[Scenario], root: &Path, details: boo
 
     report::print_summary(&server, &address, &measurements);
     println!();
-    println!("  kilit-core's facts hold: character sets; ALTERs wait for open transactions");
+    println!(
+        "  kilit-core's facts hold: character sets; ALTER, DROP, RENAME and TRUNCATE TABLE wait for open transactions"
+    );
     if details {
         report::print_details(&measurements);
     }

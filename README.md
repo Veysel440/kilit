@@ -90,13 +90,13 @@ tables from database/schema/mysql-schema.sql: 4 (migrations, orders, shops, user
       - drops the default 'new'
 
 metadata lock on orders:
-  Every ALTER TABLE first waits for the open transactions that have used its
-  table to end. While it waits, new queries on that table queue behind it,
-  reads too, even for an INSTANT change, and by default MySQL lets it wait a
-  year (lock_wait_timeout = 31536000). Run SET SESSION lock_wait_timeout = 5
-  before the migration to cap the wait: the ALTER then fails with error 1205
-  after 5 seconds, the queries behind it go on, and you can run the migration
-  again later.
+  Every ALTER TABLE, DROP TABLE, RENAME TABLE and TRUNCATE TABLE first waits
+  for the open transactions that have used any of its tables to end. While it
+  waits, new queries on those tables queue behind it, reads too, even for an
+  INSTANT change, and by default MySQL lets it wait a year (lock_wait_timeout
+  = 31536000). Run SET SESSION lock_wait_timeout = 5 before the migration to
+  cap the wait: the statement then fails with error 1205 after 5 seconds, the
+  queries behind it go on, and you can run the migration again later.
   measured by kilit-lab on mysql-8.4.13
 
 8 statements: 3 make writes wait, 1 unknown, 2 run while writes continue, 1 changes a table created here, 1 not checked
@@ -260,11 +260,12 @@ Writes **wait** when the server refuses `LOCK=NONE`.
 
 ## The metadata lock
 
-An `ALTER TABLE` waits for every open transaction that has used its table, and
-new queries on the table queue behind it. kilit-lab checks this on every server
-it measures, with short timeouts: the ALTER waits 3 seconds and the read behind
-it 1 second, both give up with error 1205, and a read after the ALTER has given
-up runs.
+An `ALTER TABLE`, `DROP TABLE`, `RENAME TABLE` or `TRUNCATE TABLE` waits for
+every open transaction that has used its table, and new queries on the table
+queue behind it. So do `CREATE INDEX` and `DROP INDEX ... ON`. kilit-lab checks
+this on every server it measures, with short timeouts: the statement waits 3
+seconds and the read behind it 1 second, both give up with error 1205, and a
+read after the statement has given up runs.
 
 ```mermaid
 sequenceDiagram
@@ -287,7 +288,8 @@ sequenceDiagram
 ```
 
 This holds even for an INSTANT change. kilit prints one warning, naming the
-tables, whenever the input alters a table that exists. The 5 seconds in
+tables, whenever the input changes, drops, renames or truncates a table that
+exists. The diagram shows an `ALTER` as the example. The 5 seconds in
 `SET SESSION lock_wait_timeout = 5` are advice, not a measurement.
 
 ## Assumptions and limitations

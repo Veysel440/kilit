@@ -99,8 +99,9 @@ scenario of their own, once per server: how many bytes a character takes in
 each character set, and that an `ALTER TABLE` waits for a transaction that
 has read its table and is still open, with `ALGORITHM=INSTANT`, `INPLACE` and
 `COPY` alike, while a plain `SELECT` from another connection waits behind it.
-For the lock, the lab uses a wait of 3 seconds for the `ALTER` and 1 second for
-the read, and reads the default `lock_wait_timeout`, 31536000 seconds.
+The same checks run for `CREATE INDEX`, `DROP INDEX ... ON`, `DROP TABLE`,
+`RENAME TABLE` and `TRUNCATE TABLE`. For the lock, the lab uses a wait of 3
+seconds for the statement and 1 second for the read, and reads the default `lock_wait_timeout`, 31536000 seconds.
 
 **The matrix.** The results go to `matrix/`, one JSON file per server release.
 They hold no timestamps or ids, so a file changes only when a server behaves
@@ -267,7 +268,10 @@ impacts and from `--fail-on`; see
 [In CI](../README.md#in-ci) for the statuses.
 
 The metadata lock warning is printed once and names the existing tables the
-input alters. It covers `ALTER TABLE`, `CREATE INDEX` and `DROP INDEX ... ON`.
+input changes. It covers `ALTER TABLE`, `CREATE INDEX`, `DROP INDEX ... ON`,
+`DROP TABLE`, `RENAME TABLE` (the old names) and `TRUNCATE TABLE`, even where
+the statement's own impact is `NotChecked` or `Unknown`. Tables created earlier
+in the input are not named.
 
 ## Glossary
 
