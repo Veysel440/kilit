@@ -184,6 +184,7 @@ one does what.
 | ↳ when its expression has a string, a function call, `IN`, `BETWEEN` or `LIKE`, or it is `NOT ENFORCED` | not answered yet | – |
 | Drop a CHECK constraint<br>`DROP CONSTRAINT …` (raw SQL) | INSTANT | continue |
 | ↳ with `DROP CHECK …`, which kilit cannot read yet | not answered yet | – |
+| Set the table comment<br>`$table->comment('Orders placed by users')` | INPLACE | continue |
 
 ¹ Seven ways of adding a column were measured, and all are INSTANT: nullable,
 `NOT NULL` with and without a default, `AFTER`, `FIRST`, with a character set,
@@ -367,7 +368,7 @@ does.
 For SQL files, or saved `--pretend` output:
 
 ```sh
-kilit check --schema schema.sql migration.sql   # several files run in order, as one migration
+kilit check --schema schema.sql migration.sql   # several files run in order, each in a session of its own
 kilit check --server mysql-8.0.46 migration.sql # the default is the newest server, mysql-8.4.13
 kilit servers                                   # the servers kilit has results for
 ```
@@ -547,10 +548,19 @@ kilit is young, and it says so when it does not know. Today:
   with no `ENGINE` is taken as InnoDB, the server default, and kilit does not
   read `default_storage_engine` from a `--schema` file, so a table created
   under a different default there is still taken as InnoDB.
-- sqlparser 0.63 cannot read `CONVERT TO CHARACTER SET`, `ALTER TABLE ... ENGINE=...`,
-  `ALTER TABLE ... ROW_FORMAT=...`, `ALTER TABLE ... KEY_BLOCK_SIZE=...`,
-  `RENAME INDEX`, `ALGORITHM=NOCOPY` or `OPTIMIZE TABLE` yet, so kilit reports
-  them as unreadable.
+- sqlparser 0.63 cannot read `CONVERT TO CHARACTER SET`, `RENAME INDEX`,
+  `ALGORITHM=NOCOPY` or `OPTIMIZE TABLE` yet, so kilit reports them as
+  unreadable. It reads an `ALTER TABLE` made only of `COMMENT`, `ENGINE`,
+  `ROW_FORMAT` and `KEY_BLOCK_SIZE` itself. Only the comment is measured:
+  changing the engine, the row format or the key block size gets no answer,
+  though the table stays known. It becomes unknown when MySQL may refuse the
+  change because of the table's keys or foreign keys.
+- Several input files are several sessions, as `mysql < a.sql` and
+  `mysql < b.sql` are. `foreign_key_checks`, `sql_log_bin` and
+  `old_alter_table` start from the MySQL defaults in each file, and a note
+  names the earlier file's `SET`. After a `SET GLOBAL` or `SET PERSIST` in
+  an earlier file, the setting is unknown in the later ones. The tables carry
+  over, except temporary tables. A `--pretend` file is one session.
 - "Writes continue" describes the change itself. Every `ALTER TABLE` also
   waits for the metadata lock first; kilit warns about it, but cannot know
   which transactions will be open when you deploy.

@@ -384,7 +384,8 @@ fn read_line(line: &str) -> Line<'_> {
     }
     // A migration's name has no spaces. Laravel fills the rest of the line
     // with dots, as many as fit: none for a name as wide as the terminal,
-    // two when it detects an AI agent and shortens its output.
+    // two in the shorter form it prints when certain environment
+    // variables are set.
     // The dots follow a space. Without them a line is a name only in the
     // form Laravel gives migration files; a migration that is not an
     // anonymous class is named by its class, always with dots here.
@@ -597,9 +598,9 @@ mod tests {
     }
 
     #[test]
-    fn the_shorter_output_for_ai_agents_reads_the_same() {
-        // Laravel 13 prints this when it detects an AI agent, such as
-        // Claude Code, through environment variables.
+    fn the_shorter_output_reads_the_same() {
+        // Laravel 13 prints this shorter form when certain environment
+        // variables are set.
         let pretend = read_pretend(
             "
  INFO Running migrations.

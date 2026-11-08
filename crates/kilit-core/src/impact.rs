@@ -292,8 +292,7 @@ mod tests {
     fn what_kilit_cannot_tell_stays_unknown_on_a_new_table() {
         // Nothing waits for a table the migration created, but MySQL may
         // still reject the statement: 8.0.46 and 8.4.13 fail the CHECK with
-        // error 1064, as NOT VALID is PostgreSQL's. The comment is MySQL's,
-        // but kilit cannot read it.
+        // error 1064, as NOT VALID is PostgreSQL's. The comment is measured.
         assert_eq!(
             impacts_of(
                 "create table `order_tags` (`id` bigint unsigned not null auto_increment primary key, \
@@ -306,7 +305,7 @@ mod tests {
             [
                 Impact::NotChecked,
                 Impact::Unknown,
-                Impact::Unknown,
+                Impact::NewTable,
                 Impact::NewTable,
             ]
         );

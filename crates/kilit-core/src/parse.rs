@@ -23,7 +23,7 @@ use crate::split::split;
 use crate::statement::{
     Algorithm, Alter, Check, CheckColumns, Column, DataType, Engine, ForeignKey, ForeignKeyAction,
     Generated, Index, IndexKind, IntegerSize, Lock, Operation, Position, Rename, RowFormat,
-    Statement, StatementKind, Table, Variable,
+    Statement, StatementKind, Table, TableOptions, Variable,
 };
 
 /// Reads every statement in `sql`, in order.
@@ -54,11 +54,122 @@ fn read(sql: &str) -> StatementKind {
                 table: table_named_in(sql),
             },
         },
-        Err(err) => StatementKind::Unparsed {
+        Err(err) => table_options_alter(sql).unwrap_or_else(|| StatementKind::Unparsed {
             error: unreadable(parser_message(err)),
             table: table_named_in(sql),
-        },
+        }),
     }
+}
+
+/// An `ALTER TABLE` whose only changes are the table options `COMMENT`,
+/// `ENGINE`, `ROW_FORMAT` and `KEY_BLOCK_SIZE`, which the parser cannot
+/// read, with `ALGORITHM` and `LOCK` if written: `ALTER TABLE notes COMMENT
+/// = 'Notes'`. The options come in any order, with or without `=`, between
+/// commas or spaces; `ALGORITHM` and `LOCK` between commas, as MySQL takes
+/// them. `None` for anything else, and for forms MySQL 8.0.46 and 8.4.13 do
+/// not accept or kilit does not follow: a quoted `ENGINE`, `ROW_FORMAT` or
+/// `KEY_BLOCK_SIZE`, a `COMMENT` that is not one quoted string, a comment
+/// MySQL runs (`/*! ... */`).
+fn table_options_alter(sql: &str) -> Option<StatementKind> {
+    if sql.contains("/*!") {
+        return None;
+    }
+    let words = words(sql);
+    let [first, second, ..] = words.as_slice() else {
+        return None;
+    };
+    if keyword(first) != Keyword::ALTER || keyword(second) != Keyword::TABLE {
+        return None;
+    }
+    // MySQL takes a double-quoted name for a string, not a table.
+    if words
+        .iter()
+        .any(|word| matches!(word, Token::Word(word) if word.quote_style == Some('"')))
+    {
+        return None;
+    }
+    let (table, mut rest) = table_after(&words, Keyword::TABLE)?;
+    let mut alter = Alter {
+        table,
+        ..Alter::default()
+    };
+    let mut options = TableOptions::default();
+    let mut any_option = false;
+    // Whether the clause before is a table option, which the next one may
+    // follow without a comma.
+    let mut after_option = false;
+    while let [Token::Word(word), after @ ..] = rest {
+        if word.quote_style.is_some() {
+            return None;
+        }
+        let name = word.value.to_ascii_uppercase();
+        let is_option = matches!(
+            name.as_str(),
+            "COMMENT" | "ENGINE" | "ROW_FORMAT" | "KEY_BLOCK_SIZE"
+        );
+        if after_option && !is_option {
+            return None;
+        }
+        let (value, after) = match after {
+            [Token::Eq, value, after @ ..] | [value, after @ ..] => (value, after),
+            [] => return None,
+        };
+        match (name.as_str(), value) {
+            ("COMMENT", Token::SingleQuotedString(text) | Token::DoubleQuotedString(text)) => {
+                options.comment = Some(text.clone());
+            }
+            ("ENGINE", Token::Word(engine)) if engine.quote_style.is_none_or(|q| q == '`') => {
+                options.engine = Some(Engine::named(&engine.value));
+            }
+            ("ROW_FORMAT", Token::Word(format)) if format.quote_style.is_none() => {
+                options.row_format = Some(RowFormat::named(&format.value));
+            }
+            ("KEY_BLOCK_SIZE", Token::Number(size, false))
+                if size.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                options.key_block_size = Some(size.clone());
+            }
+            ("ALGORITHM", Token::Word(algorithm)) if algorithm.quote_style.is_none() => {
+                alter.algorithm = match algorithm.value.to_ascii_uppercase().as_str() {
+                    "DEFAULT" => None,
+                    "INSTANT" => Some(Algorithm::Instant),
+                    "INPLACE" => Some(Algorithm::Inplace),
+                    "COPY" => Some(Algorithm::Copy),
+                    _ => return None,
+                };
+            }
+            ("LOCK", Token::Word(lock)) if lock.quote_style.is_none() => {
+                alter.lock = match lock.value.to_ascii_uppercase().as_str() {
+                    "DEFAULT" => None,
+                    "NONE" => Some(Lock::None),
+                    "SHARED" => Some(Lock::Shared),
+                    "EXCLUSIVE" => Some(Lock::Exclusive),
+                    _ => return None,
+                };
+            }
+            _ => return None,
+        }
+        any_option |= is_option;
+        rest = match after {
+            [] => &[],
+            [Token::Comma, next @ ..] if !next.is_empty() => {
+                after_option = false;
+                next
+            }
+            [Token::Word(_), ..] if is_option => {
+                after_option = true;
+                after
+            }
+            _ => return None,
+        };
+    }
+    if !rest.is_empty() || !any_option {
+        return None;
+    }
+    alter
+        .operations
+        .push(Operation::ChangeTableOptions(options));
+    Some(StatementKind::Alter(alter))
 }
 
 /// The reason kilit gives no answer for a statement it could not read.
@@ -1274,10 +1385,23 @@ fn set_statement(set: ast::Set) -> StatementKind {
             variable,
             mut values,
         } if values.len() == 1 => vec![(scope, variable, values.remove(0))],
-        ast::Set::MultipleAssignments { assignments } => assignments
-            .into_iter()
-            .map(|assignment| (assignment.scope, assignment.name, assignment.value))
-            .collect(),
+        // MySQL applies a scope keyword to the assignments after it that
+        // have none of their own, as in `SET GLOBAL a = 1, b = 2`; the
+        // parser keeps it on the first one only.
+        ast::Set::MultipleAssignments { assignments } => {
+            let mut carried = None;
+            assignments
+                .into_iter()
+                .map(|assignment| {
+                    if assignment.scope.is_some() {
+                        carried = assignment.scope;
+                    }
+                    let own = object_name(&assignment.name).starts_with("@@");
+                    let scope = if own { assignment.scope } else { carried };
+                    (scope, assignment.name, assignment.value)
+                })
+                .collect()
+        }
         _ => return StatementKind::Other,
     };
 
@@ -1801,6 +1925,198 @@ mod tests {
     }
 
     #[test]
+    fn a_scope_keyword_carries_to_the_assignments_after_it() {
+        let names = |sql: &str| match kind(sql) {
+            StatementKind::Set { variables } => variables
+                .into_iter()
+                .map(|variable| (variable.name, variable.global))
+                .collect(),
+            _ => Vec::new(),
+        };
+        // MySQL applies GLOBAL to foreign_key_checks too: nothing is left
+        // for this session.
+        assert_eq!(names("SET GLOBAL a = 1, foreign_key_checks = 0"), []);
+        assert_eq!(
+            names("SET GLOBAL a = 1, SESSION b = 2, foreign_key_checks = 0"),
+            [
+                ("b".to_owned(), false),
+                ("foreign_key_checks".to_owned(), false)
+            ]
+        );
+        assert_eq!(
+            names("SET GLOBAL a = 1, sql_log_bin = 1"),
+            [("sql_log_bin".to_owned(), true)]
+        );
+        for sql in [
+            "SET GLOBAL a = 1, SESSION foreign_key_checks = 0",
+            "SET GLOBAL a = 1, LOCAL foreign_key_checks = 0",
+            "SET GLOBAL a = 1, @@foreign_key_checks = 0",
+            "SET GLOBAL a = 1, @@session.foreign_key_checks = 0",
+            // `@@global.` belongs to its own variable only.
+            "SET @@global.a = 1, foreign_key_checks = 0",
+        ] {
+            assert_eq!(
+                names(sql),
+                [("foreign_key_checks".to_owned(), false)],
+                "{sql}"
+            );
+        }
+    }
+
+    fn options_of(sql: &str) -> (Alter, TableOptions) {
+        let alter = alter(sql);
+        let [Operation::ChangeTableOptions(options)] = alter.operations.as_slice() else {
+            panic!("{sql}: expected table options, got {:?}", alter.operations);
+        };
+        let options = options.clone();
+        (alter, options)
+    }
+
+    #[test]
+    fn reads_alter_table_statements_made_of_table_options() {
+        let comment = |text: &str| TableOptions {
+            comment: Some(text.into()),
+            ..TableOptions::default()
+        };
+        for (sql, options) in [
+            (
+                "alter table `notes` comment = 'Notes kept by staff'",
+                comment("Notes kept by staff"),
+            ),
+            ("ALTER TABLE notes COMMENT 'x'", comment("x")),
+            ("ALTER TABLE notes COMMENT \"x\"", comment("x")),
+            (
+                "alter table `notes` comment = 'It''s a note'",
+                comment("It's a note"),
+            ),
+            ("ALTER TABLE notes COMMENT = ''", comment("")),
+            (
+                "ALTER TABLE notes COMMENT = 'ROW_FORMAT=COMPACT, ADD COLUMN x INT'",
+                comment("ROW_FORMAT=COMPACT, ADD COLUMN x INT"),
+            ),
+            ("ALTER TABLE notes COMMENT='x', COMMENT='y'", comment("y")),
+            ("ALTER TABLE notes COMMENT='x' COMMENT='y'", comment("y")),
+            (
+                "ALTER TABLE notes ENGINE InnoDB",
+                TableOptions {
+                    engine: Some(Engine::InnoDb),
+                    ..TableOptions::default()
+                },
+            ),
+            (
+                "ALTER TABLE notes engine = `MyISAM`",
+                TableOptions {
+                    engine: Some(Engine::MyIsam),
+                    ..TableOptions::default()
+                },
+            ),
+            (
+                "ALTER TABLE notes KEY_BLOCK_SIZE=8, ROW_FORMAT=COMPRESSED, COMMENT='a', \
+                 ENGINE=InnoDB",
+                TableOptions {
+                    comment: Some("a".into()),
+                    engine: Some(Engine::InnoDb),
+                    row_format: Some(RowFormat::Compressed),
+                    key_block_size: Some("8".into()),
+                },
+            ),
+            (
+                "ALTER TABLE notes row_format fixed /* why */ key_block_size 4",
+                TableOptions {
+                    row_format: Some(RowFormat::Other("fixed".into())),
+                    key_block_size: Some("4".into()),
+                    ..TableOptions::default()
+                },
+            ),
+        ] {
+            let (alter, read) = options_of(sql);
+            assert_eq!(alter.table, "notes", "{sql}");
+            assert_eq!(read, options, "{sql}");
+        }
+    }
+
+    #[test]
+    fn table_options_take_algorithm_and_lock_between_commas() {
+        for (sql, algorithm, lock) in [
+            (
+                "ALTER TABLE t COMMENT='x', ALGORITHM=INSTANT",
+                Some(Algorithm::Instant),
+                None,
+            ),
+            (
+                "ALTER TABLE t COMMENT='x', ALGORITHM=INPLACE, LOCK=NONE",
+                Some(Algorithm::Inplace),
+                Some(Lock::None),
+            ),
+            (
+                "ALTER TABLE t ALGORITHM COPY, COMMENT='x'",
+                Some(Algorithm::Copy),
+                None,
+            ),
+            (
+                "ALTER TABLE t COMMENT='x', LOCK=DEFAULT, ALGORITHM=DEFAULT",
+                None,
+                None,
+            ),
+            (
+                "ALTER TABLE t COMMENT='x', LOCK=SHARED",
+                None,
+                Some(Lock::Shared),
+            ),
+        ] {
+            let (alter, _) = options_of(sql);
+            assert_eq!(alter.algorithm, algorithm, "{sql}");
+            assert_eq!(alter.lock, lock, "{sql}");
+        }
+    }
+
+    #[test]
+    fn table_options_mysql_refuses_or_mixed_with_other_changes_stay_unparsed() {
+        for sql in [
+            // MySQL 8.0.46 and 8.4.13 refuse these with 1064.
+            "ALTER TABLE t COMMENT='x' ALGORITHM=INSTANT",
+            "ALTER TABLE t ROW_FORMAT='DYNAMIC'",
+            "ALTER TABLE t KEY_BLOCK_SIZE='8'",
+            "ALTER TABLE t COMMENT=_utf8mb4'x'",
+            "ALTER TABLE t COMMENT=N'x'",
+            "ALTER TABLE t COMMENT='a' 'b'",
+            "ALTER TABLE t COMMENT = x",
+            "ALTER TABLE t COMMENT = 1",
+            "ALTER TABLE t COMMENT='x',",
+            "ALTER TABLE t , COMMENT='x'",
+            "ALTER TABLE t COMMENT='x',, ENGINE=InnoDB",
+            "ALTER TABLE t COMMENT=",
+            "ALTER TABLE t KEY_BLOCK_SIZE=8.5",
+            // A quoted engine, as 9a decided for CREATE TABLE.
+            "ALTER TABLE t ENGINE='InnoDB'",
+            // Anything else in the statement.
+            "ALTER TABLE t COMMENT='x', AUTO_INCREMENT=5",
+            "ALTER TABLE t COMMENT='x' DEFAULT CHARSET=utf8mb4",
+            "ALTER TABLE t COMMENT='x', ADD COLUMN y INT NULL",
+            "ALTER TABLE t COMMENT='x', ALGORITHM=SOMETHING",
+            "ALTER TABLE t COMMENT='x' /*!50100 , ADD COLUMN y INT */",
+        ] {
+            assert!(
+                matches!(
+                    kind(sql),
+                    StatementKind::Unparsed { ref table, .. } if table.as_deref() == Some("t")
+                ),
+                "{sql}: {:?}",
+                kind(sql)
+            );
+        }
+        // MySQL takes a double-quoted name for a string.
+        assert!(matches!(
+            kind("ALTER TABLE \"t\" COMMENT='x'"),
+            StatementKind::Unparsed { .. }
+        ));
+        assert!(matches!(
+            kind("ALTER TABLE t ALGORITHM=INPLACE"),
+            StatementKind::Alter(Alter { ref operations, .. }) if operations.is_empty()
+        ));
+    }
+
+    #[test]
     fn a_global_sql_log_bin_is_kept() {
         // MySQL refuses it; kilit keeps it so the statements after it are
         // not judged as if nothing had touched the binary log.
@@ -2108,7 +2424,7 @@ mod tests {
         // All valid MySQL that sqlparser 0.63 does not read yet.
         for sql in [
             "ALTER TABLE t CONVERT TO CHARACTER SET utf8mb4",
-            "ALTER TABLE t ENGINE=InnoDB",
+            "ALTER TABLE t ENGINE=InnoDB, AUTO_INCREMENT=5",
             "ALTER TABLE t RENAME INDEX a TO b",
             "ALTER TABLE t ADD c INT, ALGORITHM=NOCOPY",
             "OPTIMIZE TABLE t",

@@ -53,7 +53,8 @@ enum Command {
 #[derive(Args)]
 struct CheckArgs {
     /// SQL files or saved `migrate --pretend` output, checked in order as one
-    /// migration. Without a file, or with `-`, kilit reads standard input
+    /// migration, each file in a session of its own. Without a file, or with
+    /// `-`, kilit reads standard input
     #[arg(value_name = "FILE")]
     files: Vec<PathBuf>,
 

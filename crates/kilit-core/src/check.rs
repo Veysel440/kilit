@@ -21,7 +21,7 @@ use crate::schema::{ConstraintKind, Schema, TableState, has_descending, names_fo
 use crate::statement::{
     Alter, Check, CheckColumns, Column, DataType, Engine, ForeignKey, ForeignKeyAction, Index,
     IndexKind, IntegerSize, Lock, Operation, Position, RowFormat, Statement, StatementKind, Table,
-    Variable,
+    TableOptions, Variable,
 };
 
 /// What kilit says about one statement of the input.
@@ -678,8 +678,19 @@ const DROP_CHECK_CONSTRAINT: Case = Case {
     exceptions: &[],
 };
 
+/// `COMMENT = '...'` as the statement's only change. A change of ENGINE,
+/// ROW_FORMAT or KEY_BLOCK_SIZE has not been measured.
+const SET_TABLE_COMMENT: Case = Case {
+    id: "set-table-comment",
+    scenarios: &["set-table-comment"],
+    exceptions: &[],
+};
+
+/// The most characters a table comment holds in MySQL 8.0 and 8.4.
+const MAX_TABLE_COMMENT: usize = 2048;
+
 /// Every case kilit knows.
-pub const CASES: [&Case; 27] = [
+pub const CASES: [&Case; 28] = [
     &ADD_COLUMN,
     &ADD_COLUMN_EXPRESSION_DEFAULT,
     &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT,
@@ -707,6 +718,7 @@ pub const CASES: [&Case; 27] = [
     &DROP_FOREIGN_KEY,
     &ADD_CHECK_CONSTRAINT,
     &DROP_CHECK_CONSTRAINT,
+    &SET_TABLE_COMMENT,
 ];
 
 /// MyISAM tables. MySQL can change only a MyISAM table's metadata in place,
@@ -1261,108 +1273,303 @@ const MODIFY_CASES: [&Case; 12] = [
 /// Checks every statement, in order, against what the lab measured on one
 /// server. `schema` holds the tables as they are before the first
 /// statement; pass an empty one when they are not known. There is one
-/// finding per statement.
+/// finding per statement. The statements run in one session, as one SQL
+/// file does: see [`check_sessions`] for several.
 pub fn check(statements: &[Statement], schema: &Schema, results: &ServerResults) -> Vec<Finding> {
+    check_sessions(&[statements], schema, results)
+}
+
+/// Like [`check`], for statements that run in several sessions one after
+/// the other, such as several SQL files given to the `mysql` client one at
+/// a time. Each session starts with the MySQL defaults of the settings kilit
+/// follows, unless an earlier session set one globally; the tables carry
+/// over. There is one finding per statement, in order.
+pub fn check_sessions(
+    sessions: &[&[Statement]],
+    schema: &Schema,
+    results: &ServerResults,
+) -> Vec<Finding> {
     let mut schema = schema.clone();
     let mut session = Session::default();
     let mut agreements = Agreements::default();
-    let mut findings = Vec::with_capacity(statements.len());
-    for statement in statements {
-        if matches!(
-            statement.kind,
-            StatementKind::Set { .. } | StatementKind::Other | StatementKind::Unparsed { .. }
-        ) {
-            let sql = statement.sql.to_ascii_lowercase();
-            if sql.contains("restrict_fk_on_non_standard_key") {
-                session.restrict_fk_set = true;
-            }
-            // Any scope, any value: the engine of a table created after it
-            // without ENGINE is the server's to pick. `default_tmp_storage_engine`
-            // does the same for temporary tables.
-            if sql.contains("storage_engine") {
-                schema.default_engine_changes();
-            }
-            if sql.contains("sql_mode") {
-                session.sql_mode_set = true;
-            }
-            if sql.contains("binlog_format") {
-                session.binlog_format_set = true;
-            }
-            // `SET GLOBAL` and `SET PERSIST` leave this session's value as
-            // it was. A session value set in the same statement is read
-            // below.
-            if sql.trim_start().starts_with("set") && sets_foreign_key_checks_globally(&sql) {
+    let mut findings = Vec::with_capacity(sessions.iter().map(|statements| statements.len()).sum());
+    for (at, statements) in sessions.iter().enumerate() {
+        if at > 0 {
+            session.starts_again();
+            schema.session_ends();
+        }
+        for statement in *statements {
+            let prediction = check_one(
+                statement,
+                &mut session,
+                &mut schema,
+                results,
+                &mut agreements,
+            );
+            findings.push(Finding {
+                line: statement.line,
+                sql: statement.sql.clone(),
+                prediction,
+            });
+        }
+    }
+    findings
+}
+
+/// Checks one statement and moves the session and the tables past it.
+fn check_one<'r>(
+    statement: &Statement,
+    session: &mut Session,
+    schema: &mut Schema,
+    results: &'r ServerResults,
+    agreements: &mut Agreements<'r>,
+) -> Prediction {
+    let mut unread_foreign_key_checks = false;
+    // MySQL refuses the whole SET when it assigns sql_log_bin globally
+    // (error 1228), and 8.0.46 when it names restrict_fk_on_non_standard_key
+    // (error 1193): the session keeps its values, or not.
+    let mut may_be_refused = false;
+    if matches!(
+        statement.kind,
+        StatementKind::Set { .. } | StatementKind::Other | StatementKind::Unparsed { .. }
+    ) {
+        let sql = statement.sql.to_ascii_lowercase();
+        may_be_refused = sql.contains("restrict_fk_on_non_standard_key")
+            || matches!(&statement.kind, StatementKind::Set { variables }
+                if variables.iter().any(|variable| variable.name == "sql_log_bin" && variable.global));
+        if sql.contains("restrict_fk_on_non_standard_key") {
+            session.restrict_fk_set = true;
+        }
+        // Any scope, any value: the engine of a table created after it
+        // without ENGINE is the server's to pick. `default_tmp_storage_engine`
+        // does the same for temporary tables.
+        if sql.contains("storage_engine") {
+            schema.default_engine_changes();
+        }
+        if sql.contains("sql_mode") {
+            session.sql_mode_set = true;
+        }
+        if sql.contains("binlog_format") {
+            session.binlog_format_set = true;
+        }
+        // `SET GLOBAL` and `SET PERSIST` leave this session's value as it
+        // was, but a session started after it begins with the global value.
+        // A session value set in the same statement is read below.
+        if sql.trim_start().starts_with("set") {
+            let scopes = scopes_assigned(&sql, "foreign_key_checks");
+            if !scopes.is_empty() && scopes.iter().all(|scope| scope.sets_global()) {
                 session.foreign_key_checks_global = true;
             }
-            // Any scope, any value: a table without `ROW_FORMAT` may get
-            // another row format, and its keys another limit.
-            if sql.contains("innodb_default_row_format") {
-                session.default_row_format_set = true;
-                schema.default_row_format_changes();
+            if scopes.iter().any(|scope| scope.sets_global()) {
+                session.later_sessions.foreign_key_checks_global = true;
             }
-            if sql.contains("innodb_strict_mode") {
-                session.strict_mode_set = true;
-                schema.default_row_format_changes();
-            }
-            // Only a session value kilit reads counts: a global one, a
-            // PERSIST, or any form kilit cannot read leaves the session's
-            // value unknown.
-            let named = sql.matches("old_alter_table").count();
+            // A session value kilit sees assigned but cannot read, such as
+            // `foreign_key_checks := DEFAULT`, leaves the checks unknown.
+            let assigned = scopes
+                .iter()
+                .filter(|scope| **scope == Scope::Session)
+                .count();
             let read = match &statement.kind {
                 StatementKind::Set { variables } => variables
                     .iter()
-                    .filter(|variable| variable.name == "old_alter_table")
+                    .filter(|variable| variable.name == "foreign_key_checks" && !variable.global)
                     .count(),
                 _ => 0,
             };
-            // `SET GLOBAL a = 1, old_alter_table = ON` sets the global value
-            // of both: a scope keyword carries to the assignments after it.
-            let scoped = sql.contains("global") || sql.contains("persist");
-            if named != read || (named > 0 && scoped) {
-                session.old_alter_table = OldAlterTable::Unknown(statement.line);
+            unread_foreign_key_checks = assigned > read;
+            let sql_log_bin = scopes_assigned(&sql, "sql_log_bin");
+            if sql_log_bin.iter().any(|scope| scope.sets_global()) {
+                session.later_sessions.sql_log_bin_global = true;
+            }
+            // kilit reads no PERSIST: like a GLOBAL one, which MySQL
+            // refuses, it leaves the binary log unclear.
+            if sql_log_bin
+                .iter()
+                .any(|scope| matches!(scope, Scope::Persist | Scope::PersistOnly))
+            {
+                session.binary_log = BinaryLog::Other("PERSIST sql_log_bin".to_owned());
             }
         }
-        let prediction = match &statement.kind {
-            StatementKind::Alter(alter) => predict(
-                alter,
-                &statement.sql,
-                &session,
-                &schema,
-                results,
-                &mut agreements,
-            ),
-            StatementKind::Set { variables } => {
-                session.apply(variables, statement.line);
-                not_checked(format!(
-                    "sets {} for the statements after it",
-                    variables
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ))
-            }
-            StatementKind::CreateTable { .. } => {
-                not_checked("creates a new table; no existing rows are touched")
-            }
-            StatementKind::DropTable { .. } => not_checked(
-                "drops tables with all their rows; kilit checks locks and copies, not lost data",
-            ),
-            StatementKind::RenameTable { .. } => {
-                unknown("renaming tables has not been measured yet")
-            }
-            StatementKind::Other => not_checked("not a schema change"),
-            StatementKind::Unparsed { error, .. } => unknown(error.as_str()),
+        // Any scope, any value: a table without `ROW_FORMAT` may get
+        // another row format, and its keys another limit.
+        if sql.contains("innodb_default_row_format") {
+            session.default_row_format_set = true;
+            schema.default_row_format_changes();
+        }
+        if sql.contains("innodb_strict_mode") {
+            session.strict_mode_set = true;
+            schema.default_row_format_changes();
+        }
+        // Only a session value kilit reads counts: a global one, a
+        // PERSIST, or any form kilit cannot read leaves the session's
+        // value unknown.
+        let named = sql.matches("old_alter_table").count();
+        let read = match &statement.kind {
+            StatementKind::Set { variables } => variables
+                .iter()
+                .filter(|variable| variable.name == "old_alter_table")
+                .count(),
+            _ => 0,
         };
-        // The next statement sees the tables as this one leaves them.
-        follow(&mut schema, statement, &prediction);
-        findings.push(Finding {
-            line: statement.line,
-            sql: statement.sql.clone(),
-            prediction,
-        });
+        // `SET GLOBAL a = 1, old_alter_table = ON` sets the global value
+        // of both: a scope keyword carries to the assignments after it, and
+        // kilit reads no global value of it, and no PERSIST.
+        if named != read {
+            session.old_alter_table = OldAlterTable::Unknown(statement.line);
+            // It may be the global value a later session starts with.
+            session.later_sessions.old_alter_table_unclear = true;
+        }
     }
-    findings
+    let prediction = match &statement.kind {
+        StatementKind::Alter(alter) => {
+            let mut prediction =
+                predict(alter, &statement.sql, session, schema, results, agreements);
+            // A written ALGORITHM wins over old_alter_table.
+            if session.earlier_session.old_alter_table
+                && alter.algorithm.is_none()
+                && let Prediction::Measured { notes, .. } = &mut prediction
+            {
+                notes.push(ASSUMES_OLD_ALTER_TABLE_IN_A_NEW_SESSION.to_owned());
+            }
+            prediction
+        }
+        StatementKind::Set { variables } => {
+            session.apply(variables, statement.line, may_be_refused);
+            not_checked(format!(
+                "sets {} for the statements after it",
+                variables
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        }
+        StatementKind::CreateTable { .. } => {
+            not_checked("creates a new table; no existing rows are touched")
+        }
+        StatementKind::DropTable { .. } => not_checked(
+            "drops tables with all their rows; kilit checks locks and copies, not lost data",
+        ),
+        StatementKind::RenameTable { .. } => unknown("renaming tables has not been measured yet"),
+        StatementKind::Other => not_checked("not a schema change"),
+        StatementKind::Unparsed { error, .. } => unknown(error.as_str()),
+    };
+    if unread_foreign_key_checks {
+        session.foreign_key_checks = Setting::Unknown;
+        session.foreign_key_checks_global = false;
+        session.earlier_session.foreign_key_checks = false;
+        session.foreign_key_checks_unknown = format!(
+            "line {} sets foreign_key_checks in a form kilit cannot read",
+            statement.line
+        );
+    }
+    // The next statement sees the tables as this one leaves them, unless
+    // MySQL may refuse it for the table's keys.
+    if let Some((table, reason, engine, unclear)) = options_kilit_cannot_follow(statement, schema) {
+        schema.lose_table(&table, reason, engine, unclear);
+    } else {
+        follow(schema, statement, &prediction);
+    }
+    prediction
+}
+
+/// An `ALTER TABLE` of table options that MySQL may refuse for the keys of
+/// a table kilit knows: kilit cannot tell whether it ran, so it stops
+/// trusting the table. The table, why, the engine it may have, and whether
+/// its row format is unclear.
+fn options_kilit_cannot_follow(
+    statement: &Statement,
+    schema: &Schema,
+) -> Option<(String, String, Option<Engine>, bool)> {
+    let StatementKind::Alter(alter) = &statement.kind else {
+        return None;
+    };
+    let [Operation::ChangeTableOptions(options)] = alter.operations.as_slice() else {
+        return None;
+    };
+    let TableState::Known(table) = schema.table(&alter.table) else {
+        return None;
+    };
+    let reason = keys_fit(table, options).err()?;
+    let engine = match &options.engine {
+        Some(_) => Some(Engine::Unknown),
+        None => table.engine.clone(),
+    };
+    Some((
+        alter.table.clone(),
+        format!("line {}: {reason}", statement.line),
+        engine,
+        true,
+    ))
+}
+
+/// Whether the keys of `table` fit the engine and row format that `options`
+/// give it, as far as kilit can tell: MySQL refuses the change with error
+/// 1071 when a key is longer than the new limit, and a MyISAM table's
+/// AUTO_INCREMENT column that InnoDB cannot take with error 1075.
+fn keys_fit(table: &Table, options: &TableOptions) -> Result<(), String> {
+    let engine = options.engine.as_ref().or(table.engine.as_ref());
+    let was_myisam = table.engine == Some(Engine::MyIsam);
+    let row_format = options.row_format.as_ref().or(table.row_format.as_ref());
+    // (most bytes of one key column, most bytes of a key)
+    let (column_limit, key_limit) = match engine {
+        // kilit gives no answer for these tables anyway.
+        Some(Engine::Other(_) | Engine::Unknown) => return Ok(()),
+        Some(Engine::MyIsam) => (MYISAM_KEY_BYTES, MYISAM_KEY_BYTES),
+        None | Some(Engine::InnoDb) => match row_format {
+            Some(RowFormat::Compact | RowFormat::Redundant) => (767, 3072),
+            Some(RowFormat::Other(_) | RowFormat::Unknown) => return Ok(()),
+            // An InnoDB table keeps the limit it had, or gets a higher one.
+            _ if !was_myisam => return Ok(()),
+            _ => (3072, 3072),
+        },
+    };
+    let cannot_tell = |key: &str| {
+        Err(format!(
+            "kilit cannot tell whether MySQL takes the key {key} with the new engine or row \
+             format"
+        ))
+    };
+    if was_myisam && engine != Some(&Engine::MyIsam) {
+        for column in table.columns.iter().filter(|column| column.auto_increment) {
+            let first = |columns: &[String]| {
+                columns
+                    .first()
+                    .is_some_and(|first| first.eq_ignore_ascii_case(&column.name))
+            };
+            if !first(&table.primary_key)
+                && !table.indexes.iter().any(|index| first(&index.columns))
+            {
+                return cannot_tell(&format!("on the AUTO_INCREMENT column {}", column.name));
+            }
+        }
+    }
+    let primary = (!table.primary_key.is_empty()).then_some(("PRIMARY", &table.primary_key));
+    let mut indexes = Vec::new();
+    for index in &table.indexes {
+        let name = index.name.as_deref().unwrap_or("without a name");
+        // A FULLTEXT or spatial index has limits of its own.
+        if !matches!(index.kind, IndexKind::Plain | IndexKind::Unique) {
+            return cannot_tell(name);
+        }
+        indexes.push((name, &index.columns));
+    }
+    for (name, columns) in primary.into_iter().chain(indexes) {
+        let mut total = 0u64;
+        for entry in columns {
+            let Ok(bytes) = key_bytes(table, entry, "") else {
+                return cannot_tell(name);
+            };
+            if bytes > column_limit {
+                return cannot_tell(name);
+            }
+            total = total.saturating_add(bytes);
+        }
+        if total > key_limit {
+            return cannot_tell(name);
+        }
+    }
+    Ok(())
 }
 
 /// Moves `schema` past `statement`. MySQL runs an ALTER TABLE whole or not
@@ -1403,6 +1610,8 @@ struct Session {
     /// sets this session's after it. The global value does not change the
     /// session's.
     foreign_key_checks_global: bool,
+    /// Why `foreign_key_checks` is unknown, when it is [`Setting::Unknown`].
+    foreign_key_checks_unknown: String,
     /// `sql_log_bin`, which decides whether MySQL refuses some expression
     /// defaults.
     binary_log: BinaryLog,
@@ -1428,6 +1637,29 @@ struct Session {
     /// The input names `innodb_strict_mode`, in any form kilit can see. The
     /// lab measured the default, which is ON.
     strict_mode_set: bool,
+    /// What this session's statements leave to the sessions after it.
+    later_sessions: LaterSessions,
+    /// A session before this one set these settings in its own scope; this
+    /// one starts from the MySQL default again, and has not set them yet.
+    earlier_session: EarlierSession,
+}
+
+/// What a session leaves to the sessions after it: a value set globally
+/// is the one they start with.
+#[derive(Clone, Copy, Default)]
+struct LaterSessions {
+    foreign_key_checks_global: bool,
+    sql_log_bin_global: bool,
+    /// `old_alter_table` set globally, or in a form kilit cannot read.
+    old_alter_table_unclear: bool,
+}
+
+/// Settings an earlier session set for itself only.
+#[derive(Clone, Copy, Default)]
+struct EarlierSession {
+    foreign_key_checks: bool,
+    sql_log_bin: bool,
+    old_alter_table: bool,
 }
 
 /// `old_alter_table` in this session, as far as the input says.
@@ -1440,6 +1672,9 @@ enum OldAlterTable {
     /// The statement on this line sets it globally, to `DEFAULT`, or in a
     /// form kilit cannot read. It stays unknown from there on.
     Unknown(usize),
+    /// An earlier session set it globally, or in a form kilit cannot read,
+    /// and this one starts with the global value.
+    UnknownFromEarlierSession,
 }
 
 /// Whether the session's statements go to the binary log, as far as the
@@ -1465,16 +1700,47 @@ enum Setting {
     Off,
     /// Set to something kilit does not understand.
     Unclear,
+    /// kilit cannot tell the value: [`Session::foreign_key_checks_unknown`]
+    /// says why.
+    Unknown,
 }
 
 impl Session {
-    fn apply(&mut self, variables: &[Variable], line: usize) {
+    /// Follows the session variables of one SET. When MySQL `may_be_refused`
+    /// it, the ones it sets become unknown.
+    fn apply(&mut self, variables: &[Variable], line: usize, may_be_refused: bool) {
         for variable in variables {
             match variable.name.as_str() {
+                "foreign_key_checks" if !variable.global && may_be_refused => {
+                    self.foreign_key_checks = Setting::Unknown;
+                    self.foreign_key_checks_global = false;
+                    self.earlier_session.foreign_key_checks = false;
+                    self.foreign_key_checks_unknown = format!(
+                        "line {line} sets foreign_key_checks in a SET that MySQL may refuse as a \
+                         whole, and the lab has not measured it"
+                    );
+                }
+                // MySQL refuses 'DEFAULT' in quotes, and keeps the value.
+                "foreign_key_checks"
+                    if !variable.global
+                        && variable.value.starts_with(['\'', '"'])
+                        && variable.value[1..]
+                            .trim_end_matches(['\'', '"'])
+                            .eq_ignore_ascii_case("DEFAULT") => {}
                 // A global value does not change this session's.
                 "foreign_key_checks" if !variable.global => {
                     self.foreign_key_checks = Setting::parse(&variable.value);
                     self.foreign_key_checks_global = false;
+                    self.earlier_session.foreign_key_checks = false;
+                    // MySQL gives the session a value that depends on the
+                    // global one, which kilit cannot see.
+                    if self.foreign_key_checks == Setting::ServerDefault {
+                        self.foreign_key_checks = Setting::Unknown;
+                        self.foreign_key_checks_unknown = format!(
+                            "line {line} sets foreign_key_checks to DEFAULT, which the lab has \
+                             not measured"
+                        );
+                    }
                 }
                 "sql_log_bin" => {
                     let on = !variable.global && Setting::parse(&variable.value) == Setting::On;
@@ -1483,25 +1749,80 @@ impl Session {
                     } else {
                         BinaryLog::Other(variable.to_string())
                     };
+                    self.earlier_session.sql_log_bin = false;
                 }
                 // `DEFAULT` takes the global value, which kilit cannot see.
                 // MySQL takes ON and OFF in quotes, but refuses '1' or 'TRUE'
                 // and keeps the value it had.
-                "old_alter_table" if !matches!(self.old_alter_table, OldAlterTable::Unknown(_)) => {
+                "old_alter_table" if !self.old_alter_table.unknown() => {
                     let quoted = variable.value.starts_with(['\'', '"']);
                     let word = variable.value.trim_matches(['\'', '"']);
                     let refused = quoted
                         && !(word.eq_ignore_ascii_case("ON") || word.eq_ignore_ascii_case("OFF"));
                     self.old_alter_table = match Setting::parse(&variable.value) {
-                        _ if variable.global || refused => OldAlterTable::Unknown(line),
+                        _ if variable.global || refused || may_be_refused => {
+                            OldAlterTable::Unknown(line)
+                        }
                         Setting::On => OldAlterTable::On,
                         Setting::Off => OldAlterTable::Off,
-                        Setting::ServerDefault | Setting::Unclear => OldAlterTable::Unknown(line),
+                        Setting::ServerDefault | Setting::Unclear | Setting::Unknown => {
+                            OldAlterTable::Unknown(line)
+                        }
                     };
+                    self.earlier_session.old_alter_table = false;
                 }
                 _ => {}
             }
         }
+    }
+
+    /// A new session starts: each followed setting takes its MySQL default
+    /// again, or is unknown when an earlier session set it globally. What
+    /// kilit saw named anywhere earlier stays seen.
+    fn starts_again(&mut self) {
+        let later = self.later_sessions;
+        let earlier = EarlierSession {
+            foreign_key_checks: self.earlier_session.foreign_key_checks
+                || self.foreign_key_checks != Setting::ServerDefault
+                || self.foreign_key_checks_global,
+            sql_log_bin: self.earlier_session.sql_log_bin || self.binary_log != BinaryLog::NotSet,
+            old_alter_table: self.earlier_session.old_alter_table
+                || self.old_alter_table != OldAlterTable::Off,
+        };
+        self.foreign_key_checks_global = false;
+        if later.foreign_key_checks_global {
+            self.foreign_key_checks = Setting::Unknown;
+            self.foreign_key_checks_unknown = "an earlier file sets foreign_key_checks \
+                globally, and each file runs in a new session, which starts with the global \
+                value"
+                .to_owned();
+        } else {
+            self.foreign_key_checks = Setting::ServerDefault;
+        }
+        self.binary_log = if later.sql_log_bin_global {
+            BinaryLog::Other("sql_log_bin globally in an earlier file".to_owned())
+        } else {
+            BinaryLog::NotSet
+        };
+        self.old_alter_table = if later.old_alter_table_unclear {
+            OldAlterTable::UnknownFromEarlierSession
+        } else {
+            OldAlterTable::Off
+        };
+        self.earlier_session = EarlierSession {
+            foreign_key_checks: earlier.foreign_key_checks && !later.foreign_key_checks_global,
+            sql_log_bin: earlier.sql_log_bin && !later.sql_log_bin_global,
+            old_alter_table: earlier.old_alter_table && !later.old_alter_table_unclear,
+        };
+    }
+}
+
+impl OldAlterTable {
+    fn unknown(self) -> bool {
+        matches!(
+            self,
+            OldAlterTable::Unknown(_) | OldAlterTable::UnknownFromEarlierSession
+        )
     }
 }
 
@@ -1523,8 +1844,20 @@ const ASSUMES_FOREIGN_KEY_CHECKS_AFTER_GLOBAL: &str = "assumes foreign_key_check
      session, the MySQL default: a statement before this one changes its global value, which \
      does not change this session";
 
+const ASSUMES_FOREIGN_KEY_CHECKS_IN_A_NEW_SESSION: &str = "assumes foreign_key_checks is ON, \
+     the MySQL default: an earlier file sets it, but each file runs in a new session, and \
+     nothing in this one sets it before this statement";
+
 const ASSUMES_BINARY_LOG: &str =
     "assumes the binary log is on with binlog_format = ROW, the MySQL default";
+
+const ASSUMES_BINARY_LOG_IN_A_NEW_SESSION: &str = "assumes the binary log is on with \
+     binlog_format = ROW, the MySQL default: an earlier file sets sql_log_bin, but each file \
+     runs in a new session, and nothing in this one sets it before this statement";
+
+const ASSUMES_OLD_ALTER_TABLE_IN_A_NEW_SESSION: &str = "assumes old_alter_table is OFF, the \
+     MySQL default: an earlier file sets it, but each file runs in a new session, and nothing \
+     in this one sets it before this statement";
 
 impl Session {
     /// What kilit assumes when no statement before sets this session's
@@ -1532,43 +1865,152 @@ impl Session {
     fn assumes_foreign_key_checks(&self) -> &'static str {
         if self.foreign_key_checks_global {
             ASSUMES_FOREIGN_KEY_CHECKS_AFTER_GLOBAL
+        } else if self.earlier_session.foreign_key_checks {
+            ASSUMES_FOREIGN_KEY_CHECKS_IN_A_NEW_SESSION
         } else {
             ASSUMES_FOREIGN_KEY_CHECKS
         }
     }
+
+    /// What kilit assumes when no statement before sets this session's
+    /// `sql_log_bin`.
+    fn assumes_binary_log(&self) -> &'static str {
+        if self.earlier_session.sql_log_bin {
+            ASSUMES_BINARY_LOG_IN_A_NEW_SESSION
+        } else {
+            ASSUMES_BINARY_LOG
+        }
+    }
 }
 
-/// Whether every `foreign_key_checks` in `sql`, a SET in lowercase, is the
-/// global or persisted value that the SET assigns: `SET GLOBAL
-/// foreign_key_checks = 0`, or `SET PERSIST foreign_key_checks = 0`, which
-/// kilit cannot read. `PERSIST_ONLY` changes neither the global value nor
-/// the session's, and reading `@@global.foreign_key_checks` changes nothing.
-fn sets_foreign_key_checks_globally(sql: &str) -> bool {
-    const NAME: &str = "foreign_key_checks";
-    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '@' || c == '$';
-    // `rest` ends where an assignment starts: after SET or a comma.
-    let starts_assignment = |rest: &str| {
-        let rest = rest.trim_end();
-        rest.ends_with(',')
-            || rest
-                .strip_suffix("set")
-                .is_some_and(|before| !before.ends_with(is_word))
+/// Where a `SET` assigns a variable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scope {
+    Session,
+    Global,
+    Persist,
+    PersistOnly,
+}
+
+impl Scope {
+    /// Whether the assignment changes the global value: a session started
+    /// after it begins with that value.
+    fn sets_global(self) -> bool {
+        matches!(self, Scope::Global | Scope::Persist)
+    }
+}
+
+/// The scope of each assignment of the variable `name` in `sql`, a SET in
+/// lowercase, as MySQL takes it: `GLOBAL`, `PERSIST`, `PERSIST_ONLY`,
+/// `SESSION` or `LOCAL` applies to the assignments after it that have no
+/// scope of their own, and `@@global.` and the like to their variable only.
+/// kilit reads none of `PERSIST`'s forms as a statement. Reading the global
+/// value, as in `SET @saved = @@global.foreign_key_checks`, assigns nothing.
+fn scopes_assigned(sql: &str, name: &str) -> Vec<Scope> {
+    let sql = without_comments(sql);
+    let Some(body) = sql.trim_start().strip_prefix("set") else {
+        return Vec::new();
     };
-    let mut named = sql.match_indices(NAME).peekable();
-    named.peek().is_some()
-        && named.all(|(at, _)| {
-            let before = sql[..at].trim_end();
-            let after = sql[at + NAME.len()..].trim_start();
-            let scoped = ["@@global.", "@@persist."]
-                .iter()
-                .any(|scope| before.strip_suffix(scope).is_some_and(starts_assignment))
-                || ["global", "persist"].iter().any(|scope| {
-                    before.strip_suffix(scope).is_some_and(|rest| {
-                        rest.ends_with(char::is_whitespace) && starts_assignment(rest)
-                    })
-                });
-            scoped && (after.starts_with('=') || after.starts_with(":="))
-        })
+    if !body.starts_with(char::is_whitespace) {
+        return Vec::new();
+    }
+    let mut scopes = Vec::new();
+    let mut carried = Scope::Session;
+    for assignment in assignments(body) {
+        let mut target = assignment.trim_start();
+        for (keyword, scope) in [
+            ("persist_only", Scope::PersistOnly),
+            ("persist", Scope::Persist),
+            ("global", Scope::Global),
+            ("session", Scope::Session),
+            ("local", Scope::Session),
+        ] {
+            if let Some(rest) = target.strip_prefix(keyword)
+                && rest.starts_with(char::is_whitespace)
+            {
+                carried = scope;
+                target = rest.trim_start();
+                break;
+            }
+        }
+        let Some((variable, _)) = target.split_once('=') else {
+            continue;
+        };
+        let variable = variable.trim_end();
+        let variable = variable.strip_suffix(':').unwrap_or(variable).trim_end();
+        let (scope, variable) = [
+            ("@@persist_only.", Scope::PersistOnly),
+            ("@@persist.", Scope::Persist),
+            ("@@global.", Scope::Global),
+            ("@@session.", Scope::Session),
+            ("@@local.", Scope::Session),
+            ("@@", Scope::Session),
+        ]
+        .into_iter()
+        .find_map(|(prefix, scope)| Some((scope, variable.strip_prefix(prefix)?)))
+        .unwrap_or((carried, variable));
+        if variable.trim_matches('`') == name {
+            scopes.push(scope);
+        }
+    }
+    scopes
+}
+
+/// `sql` with each comment outside quotes made one space, except a `/*!`
+/// comment, which MySQL runs: its text stays.
+fn without_comments(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut rest = sql;
+    let mut quote = None;
+    while let Some(c) = rest.chars().next() {
+        if let Some(open) = quote {
+            if c == open {
+                quote = None;
+            }
+        } else if c == '\'' || c == '"' || c == '`' {
+            quote = Some(c);
+        } else if rest.starts_with("/*") && !rest.starts_with("/*!") {
+            let end = rest[2..].find("*/").map_or(rest.len(), |at| at + 4);
+            out.push(' ');
+            rest = &rest[end..];
+            continue;
+        } else if rest.starts_with("-- ") || rest.starts_with('#') {
+            let end = rest.find('\n').unwrap_or(rest.len());
+            out.push(' ');
+            rest = &rest[end..];
+            continue;
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+/// The assignments of a SET's body: its text between commas outside quotes
+/// and parentheses.
+fn assignments(body: &str) -> Vec<&str> {
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    let mut quote = None;
+    for (at, c) in body.char_indices() {
+        match quote {
+            Some(open) if c == open => quote = None,
+            Some(_) => {}
+            None => match c {
+                '\'' | '"' | '`' => quote = Some(c),
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    pieces.push(&body[start..at]);
+                    start = at + 1;
+                }
+                _ => {}
+            },
+        }
+    }
+    pieces.push(&body[start..]);
+    pieces
 }
 
 fn predict<'r>(
@@ -1592,11 +2034,21 @@ fn predict<'r>(
         }
     };
     let table = schema.table(&alter.table);
-    if let OldAlterTable::Unknown(line) = session.old_alter_table {
-        return unknown(format!(
-            "line {line} sets old_alter_table globally, to DEFAULT, or in a form kilit cannot \
-             read, and with it ON MySQL copies the table"
-        ));
+    match session.old_alter_table {
+        OldAlterTable::Unknown(line) => {
+            return unknown(format!(
+                "line {line} sets old_alter_table globally, to DEFAULT, or in a form kilit \
+                 cannot read, and with it ON MySQL copies the table"
+            ));
+        }
+        OldAlterTable::UnknownFromEarlierSession => {
+            return unknown(
+                "an earlier file sets old_alter_table globally or in a form kilit cannot read, \
+                 and each file runs in a new session, which starts with the global value; with \
+                 it ON MySQL copies the table",
+            );
+        }
+        OldAlterTable::Off | OldAlterTable::On => {}
     }
     // The engine decides which measurements apply, before any case.
     let myisam = match measured_engine(table, &alter.table) {
@@ -1789,8 +2241,8 @@ fn measured_engine<'a>(table: TableState<'a>, name: &str) -> Result<Option<&'a T
     Err(match engine {
         Engine::Unknown => format!(
             "kilit cannot tell the engine of {name}: the input sets default_storage_engine \
-             or default_tmp_storage_engine before creating it, or a statement kilit could not \
-             read names an engine"
+             or default_tmp_storage_engine before creating it, or a statement names an engine \
+             for it that kilit cannot follow"
         ),
         other => format!(
             "{name} uses the {other} engine; the lab has measured InnoDB tables, and MyISAM \
@@ -2669,6 +3121,10 @@ fn applies(condition: Condition, situation: &Situation<'_>) -> Applies {
                         "{column} is in the foreign key {key}, and the lab has not measured \
                          changing such a column with foreign_key_checks off"
                     )),
+                    Setting::Unknown => Applies::Unmeasured(format!(
+                        "{column} is in the foreign key {key}, and {}",
+                        situation.session.foreign_key_checks_unknown
+                    )),
                 };
             }
             match referenced_by(situation.schema, table, column) {
@@ -3413,6 +3869,12 @@ fn only_index_of_foreign_key(table: &Table, name: &str, situation: &Situation<'_
                  value kilit does not understand"
             ));
         }
+        Setting::Unknown => {
+            return Applies::Unmeasured(format!(
+                "{name} serves the foreign key {key_name}, and {}",
+                situation.session.foreign_key_checks_unknown
+            ));
+        }
     };
     if index.kind != IndexKind::Plain || index.columns.len() > 2 {
         return Applies::Unmeasured(format!(
@@ -4030,7 +4492,7 @@ fn classify(
                                     binlog_format = ROW, the MySQL default"
                             .into());
                     }
-                    notes.push(ASSUMES_BINARY_LOG.to_owned());
+                    notes.push(session.assumes_binary_log().to_owned());
                     case
                 }
             }
@@ -4143,8 +4605,38 @@ fn classify(
                     "foreign_key_checks is set to a value kilit does not understand".into(),
                 );
             }
+            Setting::Unknown => return Err(session.foreign_key_checks_unknown.clone()),
         },
         Operation::DropForeignKey { .. } => &DROP_FOREIGN_KEY,
+        Operation::ChangeTableOptions(options) => {
+            let changed: Vec<&str> = [
+                ("ENGINE", options.engine.is_some()),
+                ("ROW_FORMAT", options.row_format.is_some()),
+                ("KEY_BLOCK_SIZE", options.key_block_size.is_some()),
+            ]
+            .into_iter()
+            .filter_map(|(option, written)| written.then_some(option))
+            .collect();
+            if !changed.is_empty() {
+                return Err(format!(
+                    "changing a table's {} has not been measured yet",
+                    changed.join(" and ")
+                ));
+            }
+            // MySQL refuses a longer one in strict SQL mode, and shortens it
+            // in the others.
+            if options
+                .comment
+                .as_ref()
+                .is_some_and(|comment| comment.chars().count() > MAX_TABLE_COMMENT)
+            {
+                return Err(format!(
+                    "a table comment longer than {MAX_TABLE_COMMENT} characters has not been \
+                     measured"
+                ));
+            }
+            &SET_TABLE_COMMENT
+        }
         Operation::AddCheck(check) => {
             check_new_constraint(check, table, schema)?;
             &ADD_CHECK_CONSTRAINT
@@ -4791,30 +5283,60 @@ mod tests {
 
     #[test]
     fn a_global_foreign_key_checks_is_told_from_a_session_one() {
-        for sql in [
-            "set global foreign_key_checks = 0",
-            "set @@global.foreign_key_checks = 0",
-            "set persist foreign_key_checks = 0",
-            "set @@persist.foreign_key_checks = 0",
-            "set session sql_mode = '', global foreign_key_checks := 0",
+        use Scope::{Global, Persist, PersistOnly, Session};
+        for (sql, scopes) in [
+            ("set global foreign_key_checks = 0", vec![Global]),
+            ("set @@global.foreign_key_checks = 0", vec![Global]),
+            ("set persist foreign_key_checks = 0", vec![Persist]),
+            ("set @@persist.foreign_key_checks = 0", vec![Persist]),
+            (
+                "set session sql_mode = '', global foreign_key_checks := 0",
+                vec![Global],
+            ),
+            ("set foreign_key_checks = 0", vec![Session]),
+            ("set session foreign_key_checks = 0", vec![Session]),
+            ("set local foreign_key_checks = 0", vec![Session]),
+            ("set @@foreign_key_checks = 0", vec![Session]),
+            ("set `foreign_key_checks` = 0", vec![Session]),
+            // A scope keyword carries to the assignments after it that have
+            // none of their own.
+            (
+                "set persist foreign_key_checks = 0, foreign_key_checks = 1",
+                vec![Persist, Persist],
+            ),
+            (
+                "set global sql_log_bin = 1, foreign_key_checks = 0",
+                vec![Global],
+            ),
+            (
+                "set persist_only innodb_strict_mode = on, foreign_key_checks = 0",
+                vec![PersistOnly],
+            ),
+            (
+                "set global a = 1, session b = 2, foreign_key_checks = 0",
+                vec![Session],
+            ),
+            ("set global a = 'x,y', foreign_key_checks = 0", vec![Global]),
+            // `@@global.` and `@@` belong to their own variable only.
+            ("set @@global.a = 1, foreign_key_checks = 0", vec![Session]),
+            ("set global a = 1, @@foreign_key_checks = 0", vec![Session]),
+            (
+                "set global a = 1, @@session.foreign_key_checks = 0, foreign_key_checks = 1",
+                vec![Session, Global],
+            ),
+            ("set persist_only foreign_key_checks = 0", vec![PersistOnly]),
+            (
+                "set @@persist_only.foreign_key_checks = 0",
+                vec![PersistOnly],
+            ),
+            ("set my_global foreign_key_checks = 0", vec![]),
+            ("set global sql_log_bin = 1", vec![]),
+            // Reading the global value assigns nothing.
+            ("set @saved = @@global.foreign_key_checks", vec![]),
+            ("set @a = 1, @saved = @@global.foreign_key_checks", vec![]),
+            ("select foreign_key_checks = 0", vec![]),
         ] {
-            assert!(sets_foreign_key_checks_globally(sql), "{sql}");
-        }
-        for sql in [
-            "set foreign_key_checks = 0",
-            "set session foreign_key_checks = 0",
-            "set @@foreign_key_checks = 0",
-            "set persist foreign_key_checks = 0, foreign_key_checks = 1",
-            "set my_global foreign_key_checks = 0",
-            "set global sql_log_bin = 1",
-            // PERSIST_ONLY changes the value the server starts with next time.
-            "set persist_only foreign_key_checks = 0",
-            "set @@persist_only.foreign_key_checks = 0",
-            // Reading the global value changes nothing.
-            "set @saved = @@global.foreign_key_checks",
-            "set @a = 1, @saved = @@global.foreign_key_checks",
-        ] {
-            assert!(!sets_foreign_key_checks_globally(sql), "{sql}");
+            assert_eq!(scopes_assigned(sql, "foreign_key_checks"), scopes, "{sql}");
         }
     }
 
@@ -4906,6 +5428,313 @@ mod tests {
             }
         ));
         assert!(reason(predictions.remove(3)).contains("does not understand"));
+    }
+
+    const ADD_ORDERS_USER: &str =
+        "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users (id)";
+
+    #[test]
+    fn foreign_key_checks_set_to_default_are_unknown_until_set_again() {
+        for set in [
+            "SET foreign_key_checks = DEFAULT",
+            "SET SESSION foreign_key_checks = DEFAULT",
+            "SET LOCAL foreign_key_checks = default",
+            "SET @@foreign_key_checks = DEFAULT",
+            "SET @@session.foreign_key_checks=DEFAULT",
+            "SET @@local.FOREIGN_KEY_CHECKS = DEFAULT",
+            "SET sql_log_bin = 1, foreign_key_checks = DEFAULT",
+        ] {
+            let mut predictions = predictions(&format!(
+                "{set};\n{ADD_ORDERS_USER};\nSET foreign_key_checks = 1;\n{ADD_ORDERS_USER};"
+            ));
+            assert_eq!(case_id(&predictions.pop().unwrap()), "add-foreign-key");
+            assert_eq!(
+                reason(predictions.remove(1)),
+                "line 1 sets foreign_key_checks to DEFAULT, which the lab has not measured",
+                "{set}"
+            );
+        }
+        // A foreign key's column, and the index that serves it.
+        let setup = "ALTER TABLE orders ADD CONSTRAINT orders_user FOREIGN KEY (user_id) \
+                     REFERENCES users (id);\nALTER TABLE orders ADD INDEX by_user (user_id);";
+        for (sql, expected) in [
+            (
+                "ALTER TABLE orders DROP COLUMN user_id",
+                "user_id is in the foreign key orders_user, and line 1 sets foreign_key_checks \
+                 to DEFAULT, which the lab has not measured",
+            ),
+            (
+                "ALTER TABLE orders DROP INDEX by_user",
+                "by_user serves the foreign key orders_user, and line 1 sets \
+                 foreign_key_checks to DEFAULT, which the lab has not measured",
+            ),
+        ] {
+            let sql = format!("SET foreign_key_checks = DEFAULT;\n{sql}");
+            assert_eq!(reason(on_shop(setup, &sql)), expected, "{sql}");
+        }
+        // The global value only changes the global value.
+        let (_, _, notes) = measured(on_shop(
+            "",
+            &format!("SET GLOBAL foreign_key_checks = DEFAULT;\n{ADD_ORDERS_USER}"),
+        ));
+        assert_eq!(notes[0], ASSUMES_FOREIGN_KEY_CHECKS_AFTER_GLOBAL);
+    }
+
+    /// The predictions for `files`, each one a session, on [`SHOP`].
+    fn in_sessions(files: &[&str]) -> Vec<Prediction> {
+        let parsed: Vec<Vec<Statement>> = files.iter().map(|sql| parse(sql)).collect();
+        let sessions: Vec<&[Statement]> = parsed.iter().map(Vec::as_slice).collect();
+        check_sessions(&sessions, &Schema::from_sql(SHOP), results())
+            .into_iter()
+            .map(|finding| finding.prediction)
+            .collect()
+    }
+
+    #[test]
+    fn each_session_starts_with_the_mysql_defaults() {
+        let last = |files: &[&str]| in_sessions(files).pop().unwrap();
+        // In one session the checks stay off.
+        assert_eq!(
+            case_id(&last(&[&format!(
+                "SET foreign_key_checks = 0;\n{ADD_ORDERS_USER}"
+            )])),
+            "add-foreign-key-checks-off"
+        );
+        let (case, _, notes) = measured(last(&["SET foreign_key_checks = 0;", ADD_ORDERS_USER]));
+        assert_eq!(case, "add-foreign-key");
+        assert_eq!(notes[0], ASSUMES_FOREIGN_KEY_CHECKS_IN_A_NEW_SESSION);
+        let (case, _, notes) = measured(last(&[
+            "SET foreign_key_checks = 0;",
+            &format!("SET foreign_key_checks = 1;\n{ADD_ORDERS_USER}"),
+        ]));
+        assert_eq!(case, "add-foreign-key");
+        assert!(
+            !notes.iter().any(|note| note.starts_with("assumes")),
+            "{notes:?}"
+        );
+
+        let (case, _, notes) = measured(last(&["SET old_alter_table = ON;", ADD_COUPON]));
+        assert_eq!(case, "add-column");
+        assert!(
+            notes.contains(&ASSUMES_OLD_ALTER_TABLE_IN_A_NEW_SESSION.to_owned()),
+            "{notes:?}"
+        );
+        let (_, _, notes) = measured(last(&[
+            "SET old_alter_table = ON;",
+            &format!("{ADD_COUPON}, ALGORITHM=INPLACE"),
+        ]));
+        assert!(!notes.contains(&ASSUMES_OLD_ALTER_TABLE_IN_A_NEW_SESSION.to_owned()));
+
+        let default = "ALTER TABLE orders ADD COLUMN due DATE NULL DEFAULT (CURDATE())";
+        let (_, _, notes) = measured(last(&["SET sql_log_bin = 0;", default]));
+        assert_eq!(notes, [ASSUMES_BINARY_LOG_IN_A_NEW_SESSION]);
+        let (_, _, notes) = measured(last(&["SELECT 1;", default]));
+        assert_eq!(notes, [ASSUMES_BINARY_LOG]);
+    }
+
+    #[test]
+    fn a_global_value_set_in_an_earlier_session_is_unknown_in_the_later_ones() {
+        let last = |files: &[&str]| in_sessions(files).pop().unwrap();
+        for set in [
+            "SET GLOBAL foreign_key_checks = 0;",
+            "SET @@global.foreign_key_checks = 0;",
+            "SET PERSIST foreign_key_checks = 0;",
+            "SET GLOBAL innodb_lock_wait_timeout = 50, foreign_key_checks = 0;",
+        ] {
+            assert_eq!(
+                reason(last(&[set, "SELECT 1;", ADD_ORDERS_USER])),
+                "an earlier file sets foreign_key_checks globally, and each file runs in a new \
+                 session, which starts with the global value",
+                "{set}"
+            );
+            // Until the session sets it.
+            assert_eq!(
+                case_id(&last(&[
+                    set,
+                    &format!("SET foreign_key_checks = 1;\n{ADD_ORDERS_USER}")
+                ])),
+                "add-foreign-key"
+            );
+        }
+        // PERSIST_ONLY changes the value the server starts with next time.
+        let (_, _, notes) = measured(last(&[
+            "SET PERSIST_ONLY foreign_key_checks = 0;",
+            ADD_ORDERS_USER,
+        ]));
+        assert_eq!(notes[0], ASSUMES_FOREIGN_KEY_CHECKS);
+
+        for set in [
+            "SET GLOBAL old_alter_table = ON;",
+            "SET PERSIST old_alter_table = ON;",
+            "SET GLOBAL foreign_key_checks = 1, old_alter_table = ON;",
+        ] {
+            let reason = reason(last(&[set, ADD_COUPON]));
+            assert!(
+                reason.starts_with("an earlier file sets old_alter_table globally"),
+                "{set}: {reason}"
+            );
+        }
+        let default = "ALTER TABLE orders ADD COLUMN due DATE NULL DEFAULT (CURDATE())";
+        let reason = reason(last(&["SET GLOBAL sql_log_bin = 1;", default]));
+        assert!(
+            reason.contains("sets sql_log_bin globally in an earlier file"),
+            "{reason}"
+        );
+        // What is named anywhere earlier stays named.
+        let reason = super::tests::reason(last(&["SET binlog_format = 'ROW';", default]));
+        assert!(reason.contains("names binlog_format"), "{reason}");
+    }
+
+    #[test]
+    fn a_set_mysql_may_refuse_leaves_what_it_sets_unknown() {
+        for set in [
+            "SET foreign_key_checks = 0, GLOBAL sql_log_bin = 1",
+            "SET foreign_key_checks = 0, restrict_fk_on_non_standard_key = OFF",
+        ] {
+            assert_eq!(
+                reason(on_shop("", &format!("{set};\n{ADD_ORDERS_USER}"))),
+                "line 1 sets foreign_key_checks in a SET that MySQL may refuse as a whole, and \
+                 the lab has not measured it",
+                "{set}"
+            );
+        }
+        let reason = reason(on_shop(
+            "",
+            &format!("SET old_alter_table = ON, GLOBAL sql_log_bin = 1;\n{ADD_COUPON}"),
+        ));
+        assert!(
+            reason.starts_with("line 1 sets old_alter_table"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn foreign_key_checks_assigned_in_a_form_kilit_cannot_read_are_unknown() {
+        for set in [
+            "SET foreign_key_checks := DEFAULT",
+            "SET @@`foreign_key_checks` = DEFAULT",
+            "SET NAMES utf8mb4, foreign_key_checks = 0",
+            "SET PERSIST a = 1, SESSION foreign_key_checks = 0",
+        ] {
+            assert_eq!(
+                reason(on_shop("", &format!("{set};\n{ADD_ORDERS_USER}"))),
+                "line 1 sets foreign_key_checks in a form kilit cannot read",
+                "{set}"
+            );
+        }
+        // MySQL refuses DEFAULT in quotes and keeps the value.
+        let (case, _, notes) = measured(on_shop(
+            "",
+            &format!("SET foreign_key_checks = 'DEFAULT';\n{ADD_ORDERS_USER}"),
+        ));
+        assert_eq!(
+            (case, notes[0].as_str()),
+            ("add-foreign-key", ASSUMES_FOREIGN_KEY_CHECKS)
+        );
+        // A comment is not a scope.
+        assert_eq!(
+            scopes_assigned("set/**/global foreign_key_checks = 0", "foreign_key_checks"),
+            [Scope::Global]
+        );
+        assert_eq!(
+            scopes_assigned(
+                "set global a = '/* x', foreign_key_checks = 0 -- b",
+                "foreign_key_checks"
+            ),
+            [Scope::Global]
+        );
+    }
+
+    #[test]
+    fn a_table_comment_longer_than_mysql_takes_is_unknown() {
+        let sql = format!("ALTER TABLE orders COMMENT = '{}'", "é".repeat(2048));
+        assert_eq!(measured(on_shop("", &sql)).0, "set-table-comment");
+        let sql = format!("ALTER TABLE orders COMMENT = '{}'", "a".repeat(2049));
+        assert_eq!(
+            reason(on_shop("", &sql)),
+            "a table comment longer than 2048 characters has not been measured"
+        );
+    }
+
+    #[test]
+    fn a_new_engine_or_row_format_the_keys_may_not_fit_loses_the_table() {
+        let table = |sql: &str| {
+            let mut schema = Schema::from_sql(SHOP);
+            let mut session = Session::default();
+            let mut agreements = Agreements::default();
+            for statement in parse(sql) {
+                check_one(
+                    &statement,
+                    &mut session,
+                    &mut schema,
+                    results(),
+                    &mut agreements,
+                );
+            }
+            match schema.table("orders") {
+                TableState::Known(_) => "known",
+                TableState::Lost { .. } => "lost",
+                TableState::Missing => "missing",
+            }
+        };
+        for (sql, state) in [
+            // Integer keys fit every limit.
+            ("ALTER TABLE orders ENGINE=MyISAM", "known"),
+            ("ALTER TABLE orders ROW_FORMAT=COMPACT", "known"),
+            // 255 utf8mb4 characters are 1020 bytes.
+            (
+                "ALTER TABLE orders ADD INDEX by_email (email);\nALTER TABLE orders ENGINE=MyISAM",
+                "lost",
+            ),
+            (
+                "ALTER TABLE orders ADD INDEX by_email (email);\n\
+                 ALTER TABLE orders ROW_FORMAT=REDUNDANT",
+                "lost",
+            ),
+            (
+                "ALTER TABLE orders ADD INDEX by_note (note);\nALTER TABLE orders ENGINE=MyISAM",
+                "known",
+            ),
+            (
+                "ALTER TABLE orders ADD INDEX by_email (email);\n\
+                 ALTER TABLE orders ROW_FORMAT=COMPRESSED",
+                "known",
+            ),
+            (
+                "ALTER TABLE orders ADD FULLTEXT ft (note);\nALTER TABLE orders ENGINE=MyISAM",
+                "lost",
+            ),
+            (
+                "ALTER TABLE orders ADD INDEX by_prefix (email(10));\n\
+                 ALTER TABLE orders ROW_FORMAT=COMPACT",
+                "lost",
+            ),
+        ] {
+            assert_eq!(table(sql), state, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_myisam_table_whose_auto_increment_column_leads_no_key_may_not_become_innodb() {
+        let mut keys = Table {
+            engine: Some(Engine::MyIsam),
+            columns: parse("CREATE TABLE t (a INT, b INT AUTO_INCREMENT)")
+                .into_iter()
+                .find_map(|statement| match statement.kind {
+                    StatementKind::CreateTable { table, .. } => Some(table.columns),
+                    _ => None,
+                })
+                .unwrap(),
+            primary_key: vec!["a".into(), "b".into()],
+            ..Table::default()
+        };
+        let innodb = TableOptions {
+            engine: Some(Engine::InnoDb),
+            ..TableOptions::default()
+        };
+        assert!(keys_fit(&keys, &innodb).is_err());
+        keys.primary_key = vec!["b".into(), "a".into()];
+        assert!(keys_fit(&keys, &innodb).is_ok());
     }
 
     #[test]
@@ -8961,19 +9790,22 @@ mod tests {
         assert_eq!(
             case_of(last_with(
                 MYISAM_ORDERS,
-                &format!("ALTER TABLE orders ENGINE=InnoDB; {add}")
+                &format!("ALTER TABLE orders ENGINE=InnoDB, AUTO_INCREMENT=5; {add}")
             )),
             "add-column"
         );
         assert_eq!(
             case_of(last_with(
                 &innodb,
-                &format!("ALTER TABLE orders ENGINE=InnoDB; {add}")
+                &format!("ALTER TABLE orders ENGINE=InnoDB, AUTO_INCREMENT=5; {add}")
             )),
             "add-column"
         );
         for (schema, before) in [
-            (innodb.as_str(), "ALTER TABLE orders ENGINE=MyISAM"),
+            (
+                innodb.as_str(),
+                "ALTER TABLE orders ENGINE=MyISAM, AUTO_INCREMENT=5",
+            ),
             (
                 MYISAM_ORDERS,
                 "ALTER TABLE orders ADD COLUMN x INT, ALGORITHM=SOMETHING",
@@ -9488,12 +10320,24 @@ mod tests {
     #[test]
     fn a_table_lost_with_a_written_row_format_is_unknown() {
         for (options, setup, unknown_after) in [
-            ("", "ALTER TABLE orders ROW_FORMAT=COMPRESSED;", true),
-            ("", "ALTER TABLE orders KEY_BLOCK_SIZE=8;", true),
-            ("", "ALTER TABLE orders ENGINE=InnoDB;", false),
+            (
+                "",
+                "ALTER TABLE orders ROW_FORMAT=COMPRESSED, AUTO_INCREMENT=5;",
+                true,
+            ),
+            (
+                "",
+                "ALTER TABLE orders KEY_BLOCK_SIZE=8, AUTO_INCREMENT=5;",
+                true,
+            ),
+            (
+                "",
+                "ALTER TABLE orders ENGINE=InnoDB, AUTO_INCREMENT=5;",
+                false,
+            ),
             (
                 " ROW_FORMAT=COMPACT",
-                "ALTER TABLE orders ENGINE=InnoDB;",
+                "ALTER TABLE orders ENGINE=InnoDB, AUTO_INCREMENT=5;",
                 true,
             ),
         ] {
@@ -9509,6 +10353,99 @@ mod tests {
             } else {
                 assert_eq!(case_id(&prediction), "add-column", "{options} {setup}");
             }
+        }
+    }
+
+    #[test]
+    fn a_table_keeps_the_options_an_alter_table_writes() {
+        for (options, setup, case) in [
+            (
+                "",
+                "ALTER TABLE orders ROW_FORMAT=COMPRESSED",
+                "compressed-add-column",
+            ),
+            (
+                "",
+                "ALTER TABLE orders KEY_BLOCK_SIZE=8",
+                "compressed-add-column",
+            ),
+            ("", "ALTER TABLE orders ENGINE=InnoDB", "add-column"),
+            ("", "ALTER TABLE orders COMMENT = 'x'", "add-column"),
+            (
+                " ROW_FORMAT=COMPACT",
+                "ALTER TABLE orders ENGINE=InnoDB",
+                "compact-add-column",
+            ),
+            (
+                " ROW_FORMAT=COMPACT",
+                "ALTER TABLE orders ROW_FORMAT=DEFAULT",
+                "add-column",
+            ),
+            (
+                " KEY_BLOCK_SIZE=8",
+                "ALTER TABLE orders ROW_FORMAT=DEFAULT",
+                "compressed-add-column",
+            ),
+        ] {
+            let mut predictions =
+                predictions_with(&shop_with(options), &format!("{setup};\n{ADD_COUPON}"));
+            assert_eq!(
+                case_id(&predictions.pop().unwrap()),
+                case,
+                "{options} {setup}"
+            );
+        }
+        // Forms the lab has not measured, or MySQL refuses.
+        for (options, setup, reason_has) in [
+            ("", "ALTER TABLE orders ROW_FORMAT=FIXED", "FIXED"),
+            (
+                "",
+                "ALTER TABLE orders KEY_BLOCK_SIZE=4",
+                "KEY_BLOCK_SIZE=4",
+            ),
+            (
+                " KEY_BLOCK_SIZE=8",
+                "ALTER TABLE orders ROW_FORMAT=DYNAMIC",
+                "KEY_BLOCK_SIZE=8 with ROW_FORMAT=DYNAMIC",
+            ),
+            ("", "ALTER TABLE orders ENGINE=MEMORY", "MEMORY"),
+        ] {
+            let mut predictions =
+                predictions_with(&shop_with(options), &format!("{setup};\n{ADD_COUPON}"));
+            let reason = reason(predictions.pop().unwrap());
+            assert!(reason.contains(reason_has), "{options} {setup}: {reason}");
+        }
+    }
+
+    #[test]
+    fn a_table_comment_is_measured_and_other_options_are_not() {
+        let (case, verdict, _) = measured(on_shop("", "ALTER TABLE orders COMMENT = 'Orders'"));
+        assert_eq!(case, "set-table-comment");
+        assert_eq!(verdict, "INPLACE, no rebuild, writes continue");
+        for (sql, written) in [
+            ("ALTER TABLE orders ENGINE=InnoDB", "ENGINE"),
+            ("ALTER TABLE orders ROW_FORMAT=COMPRESSED", "ROW_FORMAT"),
+            (
+                "ALTER TABLE orders COMMENT 'x' KEY_BLOCK_SIZE 8 ROW_FORMAT COMPRESSED",
+                "ROW_FORMAT and KEY_BLOCK_SIZE",
+            ),
+        ] {
+            assert_eq!(
+                reason(on_shop("", sql)),
+                format!("changing a table's {written} has not been measured yet"),
+                "{sql}"
+            );
+        }
+        for (options, sql, why) in [
+            (" ROW_FORMAT=COMPRESSED", "", "COMPRESSED"),
+            (" ENGINE=MyISAM", "", "MyISAM"),
+            ("", "SET old_alter_table = ON;", "old_alter_table"),
+        ] {
+            let reason = reason(on_orders_with(
+                options,
+                &format!("{sql}ALTER TABLE orders COMMENT = 'x'"),
+            ));
+            assert!(reason.contains(why), "{options}: {reason}");
         }
     }
 

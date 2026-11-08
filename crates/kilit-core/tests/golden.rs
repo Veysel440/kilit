@@ -3394,12 +3394,14 @@ fn changing_the_engine_with_alter_table_decides_what_follows() {
         ("ENGINE InnoDB", lab_after(&[]), INSTANT),
         ("ENGINE=InnoDB", myisam_lab_after(&[]), INSTANT),
         ("ENGINE=MyISAM, ENGINE=InnoDB", lab_after(&[]), INSTANT),
-        // To MyISAM, or somewhere else: unknown.
-        ("ENGINE=MyISAM", lab_after(&[]), "unknown"),
-        ("ENGINE MyISAM", lab_after(&[]), "unknown"),
-        ("engine = myisam", lab_after(&[]), "unknown"),
+        // To MyISAM (step 11b: the table stays known, with the new engine):
+        // the later statement gets the MyISAM answer.
+        ("ENGINE=MyISAM", lab_after(&[]), COPY),
+        ("ENGINE MyISAM", lab_after(&[]), COPY),
+        ("engine = myisam", lab_after(&[]), COPY),
+        ("ENGINE=InnoDB, ENGINE=MyISAM", lab_after(&[]), COPY),
+        // A quoted engine is not read, and somewhere else is not measured.
         ("ENGINE='MyISAM'", lab_after(&[]), "unknown"),
-        ("ENGINE=InnoDB, ENGINE=MyISAM", lab_after(&[]), "unknown"),
         ("ENGINE=MEMORY", lab_after(&[]), "unknown"),
     ] {
         let sql = format!("ALTER TABLE orders {engine};\n{then}");
@@ -3414,25 +3416,34 @@ fn changing_the_engine_with_alter_table_decides_what_follows() {
 }
 
 #[test]
-fn a_table_lost_by_a_change_of_engine_remembers_the_engine_that_statement_writes() {
+fn a_change_of_engine_keeps_a_table_without_foreign_keys_known_and_loses_one_with_them() {
+    // Step 11b: without a foreign key the table stays known, with the engine
+    // the statement writes.
     let innodb = "CREATE TABLE orders (id INT PRIMARY KEY) ENGINE=InnoDB;
                   ALTER TABLE orders ENGINE=MyISAM;";
     assert!(matches!(
         Schema::from_sql(innodb).table("orders"),
-        TableState::Lost {
-            engine: Some(Engine::MyIsam),
-            ..
-        }
+        TableState::Known(table) if table.engine == Some(Engine::MyIsam)
     ));
     let myisam = "CREATE TABLE orders (id INT PRIMARY KEY) ENGINE=MyISAM;
                   ALTER TABLE orders ENGINE=InnoDB;";
     assert!(matches!(
         Schema::from_sql(myisam).table("orders"),
-        TableState::Lost {
-            engine: Some(Engine::InnoDb),
-            ..
-        }
+        TableState::Known(table) if table.engine == Some(Engine::InnoDb)
     ));
+    // A table with a foreign key, or one that a foreign key points at, is
+    // lost by a change to MyISAM.
+    let keyed = "CREATE TABLE users (id INT PRIMARY KEY) ENGINE=InnoDB;
+                 CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, KEY (user_id),
+                     CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id))
+                     ENGINE=InnoDB;";
+    for table in ["orders", "users"] {
+        let schema = Schema::from_sql(&format!("{keyed}ALTER TABLE {table} ENGINE=MyISAM;"));
+        assert!(
+            matches!(schema.table(table), TableState::Lost { .. }),
+            "{table}"
+        );
+    }
 }
 
 #[test]
@@ -3626,7 +3637,8 @@ CREATE TABLE `orders` (
 #[test]
 fn the_word_engine_in_a_quoted_string_of_an_alter_is_not_read_as_an_engine() {
     // p8: the table is MyISAM after the first statement, whatever the
-    // comment says.
+    // comment says (step 11b: it stays known, so the later statement gets
+    // the MyISAM answer).
     let schema = "CREATE TABLE `orders` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
   `amount` int NOT NULL,
@@ -3638,7 +3650,7 @@ fn the_word_engine_in_a_quoted_string_of_an_alter_is_not_read_as_an_engine() {
         schema,
         "ALTER TABLE orders ENGINE=MyISAM, COMMENT 'was engine InnoDB';
          ALTER TABLE orders ADD COLUMN c INT NULL;",
-        "unknown",
+        COPY,
     );
 }
 
@@ -4979,25 +4991,29 @@ fn naming_innodb_strict_mode_makes_index_answers_on_other_row_formats_unknown() 
 }
 
 #[test]
-fn an_unreadable_alter_that_writes_a_row_format_or_block_size_loses_the_table_as_unknown() {
-    // Decision 4: ALTER TABLE ... ROW_FORMAT=... is not
-    // read, and nothing says what the table is now.
+fn an_alter_that_writes_a_row_format_or_block_size_on_a_table_kilit_does_not_know_leaves_it_unknown()
+ {
+    // Decision 4 of step 9b, kept for a table kilit cannot see (step 11b):
+    // the statement is read, but nothing says what the table was, so it
+    // may have a row format other than DYNAMIC.
+    let lost = format!("{LAB_TABLES}ALTER TABLE orders AUTO_INCREMENT = 5;");
     let then = "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;";
-    for option in [
-        "ROW_FORMAT=COMPRESSED",
-        "ROW_FORMAT=DYNAMIC",
-        "ROW_FORMAT=COMPACT",
-        "ROW_FORMAT=DEFAULT",
-        "row_format=compressed",
-        "KEY_BLOCK_SIZE=8",
-        "KEY_BLOCK_SIZE=0",
-    ] {
-        assert_every_answer(
-            option,
-            LAB_TABLES,
-            &format!("ALTER TABLE orders {option};\n{then}"),
-            &[UNKNOWN, UNKNOWN],
-        );
+    for schema in [lost.as_str(), ""] {
+        for option in [
+            "ROW_FORMAT=COMPRESSED",
+            "row_format=compressed",
+            "KEY_BLOCK_SIZE=8",
+        ] {
+            let sql = format!("ALTER TABLE orders {option};\n{then}");
+            assert_every_answer(option, schema, &sql, &[UNKNOWN, UNKNOWN]);
+            for server in [MYSQL_80, MYSQL_84] {
+                let reason = unknown_reason_on(server, schema, &sql);
+                assert!(
+                    reason.contains("may have a row format other than DYNAMIC"),
+                    "{server}: {option}: {reason}"
+                );
+            }
+        }
     }
 }
 
@@ -5552,5 +5568,1160 @@ fn a_1071_on_a_compact_table_has_no_note_about_duplicate_values() {
                 other => panic!("{operation} on {server}: {other:?}"),
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Step 11b: ALTER TABLE statements that only set table options, and how a SET
+// reaches the session.
+//
+// The answers for COMMENT come from the lab's hand tests on both servers
+// (manual/step11b, results.tsv) and the scenario set-table-comment: as written,
+// ALGORITHM=INPLACE, INPLACE with LOCK=NONE and LOCK=NONE run INPLACE with no
+// rebuild and writes continue; ALGORITHM=INSTANT fails with 1845; COPY
+// rebuilds and writes wait. Laravel's `$table->comment('...')` writes
+// `alter table `t` comment = '...'` as a statement of its own.
+// ---------------------------------------------------------------------------
+
+/// The first statement of `sql` has no answer: the reason on `server`.
+fn first_reason_on(server: &str, schema: &str, sql: &str) -> String {
+    let results = Knowledge::built_in().server(server).unwrap();
+    let findings = check(&parse(sql), &Schema::from_sql(schema), results);
+    match &findings[0].prediction {
+        Prediction::Unknown { reason } => reason.clone(),
+        other => panic!("{server}: {sql}: {other:?}"),
+    }
+}
+
+/// Whether a measured answer carries the note about a FULLTEXT index kilit
+/// could not rule out.
+fn mentions_fulltext(prediction: &Prediction) -> bool {
+    notes_of(prediction)
+        .iter()
+        .any(|note| note.contains("FULLTEXT"))
+}
+
+/// The lab's record of a forced COPY says the table was copied and does not
+/// say whether writes wait.
+const COPY_NOT_MEASURED: &str = "COPY, copies every row, writes not measured";
+const ADD_C: &str = "ALTER TABLE orders ADD COLUMN c INT NULL;";
+const NOTHING_MEASURED: &str = "has not been measured yet";
+
+#[test]
+fn the_lab_s_table_comment_scenario_records_what_the_hand_tests_found() {
+    // Hand tests: ALTER TABLE orders COMMENT = 'x' on an InnoDB DYNAMIC table.
+    for results in Knowledge::built_in().servers() {
+        let server = results.server.name();
+        let scenario = results
+            .scenario("set-table-comment")
+            .unwrap_or_else(|| panic!("set-table-comment was not measured on {server}"));
+        for (variant, expected) in [
+            (Variant::SERVER_DEFAULT, INPLACE),
+            (Variant::forced(kilit_core::Algorithm::Instant), FAILS_1845),
+            (Variant::forced(kilit_core::Algorithm::Inplace), INPLACE),
+            (Variant::forced(kilit_core::Algorithm::Copy), COPY),
+            (Variant::LOCK_NONE, INPLACE),
+        ] {
+            let verdict = scenario.verdict_for(variant).unwrap();
+            let shown = match &verdict {
+                Verdict::Fails { code, .. } => format!("fails with error {code}"),
+                other => other.to_string(),
+            };
+            // The lab's own record of a COPY run does not say whether writes
+            // wait; it says the table was copied.
+            if expected == COPY {
+                assert!(
+                    shown.starts_with("COPY, copies every row"),
+                    "{server} as {variant}: {shown}"
+                );
+            } else {
+                assert_eq!(shown, expected, "{server} as {variant}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_table_comment_runs_inplace_with_no_rebuild_and_writes_continue_in_every_spelling() {
+    // $table->comment('Orders placed by users');
+    for option in [
+        "COMMENT = 'x'",
+        "COMMENT 'x'",
+        "comment='x'",
+        "Comment = 'x'",
+        "COMMENT = ''",
+        "COMMENT = 'Orders placed by users'",
+        "COMMENT = 'It''s a note'",
+        "COMMENT = 'one; two'",
+    ] {
+        assert_orders(option, LAB_TABLES, option, INPLACE);
+    }
+    // The form Laravel prints, with a backticked table.
+    assert_answer(
+        "laravel",
+        LAB_TABLES,
+        "alter table `orders` comment = 'Orders placed by users';",
+        INPLACE,
+    );
+}
+
+#[test]
+fn a_table_comment_with_a_backslash_escaped_quote_is_one_string() {
+    // MySQL reads \' inside a string as a quote (no ANSI mode).
+    assert_orders(
+        "backslash",
+        LAB_TABLES,
+        r"COMMENT = 'it\'s, ENGINE=MyISAM'",
+        INPLACE,
+    );
+}
+
+#[test]
+fn forcing_a_variant_on_a_table_comment_gets_the_answer_of_exactly_that_variant() {
+    for (clause, answer) in [
+        (", ALGORITHM=INSTANT", FAILS_1845),
+        (", ALGORITHM=INPLACE", INPLACE),
+        (", ALGORITHM=INPLACE, LOCK=NONE", INPLACE),
+        (", ALGORITHM=COPY", COPY_NOT_MEASURED),
+        (", LOCK=NONE", INPLACE),
+        (", ALGORITHM=DEFAULT", INPLACE),
+        (", ALGORITHM=DEFAULT, LOCK=NONE", INPLACE),
+        (", algorithm = inplace", INPLACE),
+        (", LOCK=NONE, ALGORITHM=INPLACE", INPLACE),
+    ] {
+        for comment in ["COMMENT = 'x'", "COMMENT 'x'"] {
+            assert_orders(
+                &format!("{comment}{clause}"),
+                LAB_TABLES,
+                &format!("{comment}{clause}"),
+                answer,
+            );
+        }
+    }
+}
+
+#[test]
+fn a_comment_string_holding_option_words_is_text_and_changes_nothing() {
+    for comment in [
+        "ROW_FORMAT=COMPACT, ENGINE=MyISAM",
+        "KEY_BLOCK_SIZE=8",
+        "x', ALGORITHM=INSTANT",
+        "engine=MyISAM row_format=compressed",
+    ] {
+        let comment = comment.replace('\'', "''");
+        let sql = format!("ALTER TABLE orders COMMENT = '{comment}';\n{ADD_C}");
+        assert_every_answer(&comment, LAB_TABLES, &sql, &[INPLACE, INSTANT]);
+    }
+}
+
+#[test]
+fn a_table_comment_leaves_the_table_known_and_free_of_the_fulltext_note() {
+    // Before step 11b the unreadable statement lost the table, and a later
+    // ADD COLUMN carried the note about a FULLTEXT index kilit could not see.
+    let sql = format!("ALTER TABLE orders COMMENT = 'x';\n{ADD_C}");
+    for server in [MYSQL_80, MYSQL_84] {
+        let predictions = predictions_on(server, LAB_TABLES, &sql);
+        assert_eq!(predictions.len(), 2);
+        assert!(!mentions_fulltext(&predictions[1]), "{server}");
+        assert!(
+            matches!(
+                Schema::from_sql(&format!("{LAB_TABLES}ALTER TABLE orders COMMENT = 'x';"))
+                    .table("orders"),
+                TableState::Known(_)
+            ),
+            "{server}"
+        );
+    }
+    // The contrast: a statement kilit cannot follow does lose it.
+    let lost = format!("ALTER TABLE orders AUTO_INCREMENT = 5;\n{ADD_C}");
+    for server in [MYSQL_80, MYSQL_84] {
+        let predictions = predictions_on(server, LAB_TABLES, &lost);
+        assert!(mentions_fulltext(&predictions[1]), "{server}");
+    }
+}
+
+#[test]
+fn a_known_table_with_a_fulltext_index_keeps_it_through_a_table_comment() {
+    let schema = format!("{LAB_TABLES}ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note);\n");
+    // The FULLTEXT index is still seen: a new column copies the table.
+    assert_answer(
+        "comment, then add column",
+        &schema,
+        &format!("ALTER TABLE orders COMMENT = 'x';\n{ADD_C}"),
+        COPY,
+    );
+}
+
+#[test]
+fn the_column_changes_after_a_table_comment_keep_their_answers() {
+    for (operation, answer) in [
+        ("DROP COLUMN note", INSTANT),
+        ("RENAME COLUMN note TO memo", INSTANT),
+        ("MODIFY COLUMN amount BIGINT NOT NULL", COPY),
+        ("ADD INDEX idx_orders_amount (amount)", INPLACE),
+    ] {
+        assert_answer(
+            operation,
+            LAB_TABLES,
+            &format!("ALTER TABLE orders COMMENT = 'x';\nALTER TABLE orders {operation};"),
+            answer,
+        );
+    }
+}
+
+#[test]
+fn a_table_comment_on_myisam_a_non_dynamic_row_format_or_old_alter_table_is_unknown() {
+    // Decision 2: the lab measured only an InnoDB DYNAMIC table with
+    // old_alter_table off.
+    let comment = "ALTER TABLE orders COMMENT = 'x';";
+    assert_answer("myisam", &myisam_lab_after(&[]), comment, UNKNOWN);
+    for options in [
+        COMPRESSED,
+        COMPACT_OPTION,
+        REDUNDANT_OPTION,
+        " KEY_BLOCK_SIZE=8",
+    ] {
+        assert_answer(options, &lab_with_options(options, &[]), comment, UNKNOWN);
+    }
+    for set in OLD_ALTER_TABLE_ON {
+        assert_answer(set, LAB_TABLES, &format!("{set};\n{comment}"), UNKNOWN);
+    }
+    // Turned off again, the measured answer is back.
+    assert_answer(
+        "off again",
+        LAB_TABLES,
+        &format!("SET old_alter_table = ON;\nSET old_alter_table = OFF;\n{comment}"),
+        INPLACE,
+    );
+}
+
+#[test]
+fn a_table_comment_on_a_table_kilit_does_not_know_changes_nothing_about_it() {
+    let lost = format!("{LAB_TABLES}ALTER TABLE orders AUTO_INCREMENT = 5;");
+    let sql = format!("ALTER TABLE orders COMMENT = 'x';\n{ADD_C}");
+    // A missing table stays missing: today's InnoDB answers.
+    assert_every_answer("missing", "", &sql, &[INPLACE, INSTANT]);
+    // A lost table stays lost: its later statement keeps the FULLTEXT note.
+    assert_every_answer("lost", &lost, &sql, &[INPLACE, INSTANT]);
+    for server in [MYSQL_80, MYSQL_84] {
+        let predictions = predictions_on(server, &lost, &sql);
+        assert!(mentions_fulltext(&predictions[1]), "{server}");
+    }
+}
+
+#[test]
+fn an_option_alter_that_names_the_engine_a_row_format_or_a_block_size_is_unknown_and_says_so() {
+    for (options, names) in [
+        ("ENGINE=InnoDB", "ENGINE"),
+        ("ENGINE InnoDB", "ENGINE"),
+        ("engine = innodb", "ENGINE"),
+        ("ENGINE=MyISAM", "ENGINE"),
+        ("ROW_FORMAT=DYNAMIC", "ROW_FORMAT"),
+        ("row_format = compressed", "ROW_FORMAT"),
+        ("KEY_BLOCK_SIZE=8", "KEY_BLOCK_SIZE"),
+        ("KEY_BLOCK_SIZE 0", "KEY_BLOCK_SIZE"),
+        ("COMMENT = 'x', ENGINE=InnoDB", "ENGINE"),
+        ("ENGINE=InnoDB COMMENT = 'x'", "ENGINE"),
+        (
+            "ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8",
+            "ROW_FORMAT and KEY_BLOCK_SIZE",
+        ),
+        (
+            "KEY_BLOCK_SIZE=8, ROW_FORMAT=COMPRESSED",
+            "ROW_FORMAT and KEY_BLOCK_SIZE",
+        ),
+        ("ENGINE=InnoDB, ROW_FORMAT=DYNAMIC", "ENGINE and ROW_FORMAT"),
+        ("ROW_FORMAT=DYNAMIC, ENGINE=InnoDB", "ENGINE and ROW_FORMAT"),
+        (
+            "KEY_BLOCK_SIZE=0, ENGINE=InnoDB",
+            "ENGINE and KEY_BLOCK_SIZE",
+        ),
+        (
+            "KEY_BLOCK_SIZE=8 COMMENT='x' ROW_FORMAT=COMPRESSED ENGINE=InnoDB",
+            "ENGINE and ROW_FORMAT and KEY_BLOCK_SIZE",
+        ),
+        ("ENGINE=InnoDB, ALGORITHM=COPY", "ENGINE"),
+        ("ROW_FORMAT=DYNAMIC, LOCK=NONE", "ROW_FORMAT"),
+    ] {
+        let sql = format!("ALTER TABLE orders {options};");
+        for server in [MYSQL_80, MYSQL_84] {
+            assert_eq!(
+                first_reason_on(server, LAB_TABLES, &sql),
+                format!("changing a table's {names} {NOTHING_MEASURED}"),
+                "{server}: {options}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_backticked_laravel_form_of_an_engine_change_is_unknown_too() {
+    // DB::statement('alter table `orders` engine = InnoDB')
+    assert_answer(
+        "backticks",
+        LAB_TABLES,
+        "alter table `orders` engine = InnoDB;",
+        UNKNOWN,
+    );
+}
+
+#[test]
+fn after_a_row_format_alter_the_later_statements_get_the_answers_of_that_row_format() {
+    let then = format!("ALTER TABLE orders {ADD_COLUMN};");
+    // Every way the hand tests made the table COMPRESSED, written in an ALTER.
+    for option in COMPRESSED_SPELLINGS.iter().take(12) {
+        let sql = format!("ALTER TABLE orders {};\n{then}", option.trim());
+        assert_every_answer(option, LAB_TABLES, &sql, &[UNKNOWN, INPLACE_REBUILD]);
+    }
+    // The comment next to it does not matter.
+    for options in [
+        "ROW_FORMAT=COMPRESSED, COMMENT='x'",
+        "COMMENT='x' ROW_FORMAT=COMPRESSED",
+        "COMMENT 'x', ROW_FORMAT COMPRESSED",
+    ] {
+        let sql = format!("ALTER TABLE orders {options};\n{then}");
+        assert_every_answer(options, LAB_TABLES, &sql, &[UNKNOWN, INPLACE_REBUILD]);
+    }
+    // The last one wins.
+    for (options, answer) in [
+        ("ROW_FORMAT=COMPRESSED, ROW_FORMAT=DYNAMIC", INSTANT),
+        ("ROW_FORMAT=DYNAMIC, ROW_FORMAT=COMPRESSED", INPLACE_REBUILD),
+        ("ROW_FORMAT=COMPACT", INSTANT),
+        ("ROW_FORMAT=REDUNDANT", INSTANT),
+        ("ROW_FORMAT=DYNAMIC", INSTANT),
+        ("ROW_FORMAT=DEFAULT", INSTANT),
+        ("KEY_BLOCK_SIZE=0", INSTANT),
+    ] {
+        let sql = format!("ALTER TABLE orders {options};\n{then}");
+        assert_every_answer(options, LAB_TABLES, &sql, &[UNKNOWN, answer]);
+    }
+}
+
+#[test]
+fn a_compressed_table_made_by_an_alter_refuses_instant_like_one_created_so() {
+    let sql = format!(
+        "ALTER TABLE orders KEY_BLOCK_SIZE=8;\nALTER TABLE orders {ADD_COLUMN}, ALGORITHM=INSTANT;"
+    );
+    assert_every_answer("key block size", LAB_TABLES, &sql, &[UNKNOWN, FAILS_1845]);
+}
+
+#[test]
+fn a_row_format_or_block_size_the_lab_did_not_measure_leaves_the_later_statements_unknown() {
+    let then = format!("ALTER TABLE orders {ADD_COLUMN};");
+    for options in [
+        "ROW_FORMAT=FIXED",
+        "KEY_BLOCK_SIZE=4",
+        "KEY_BLOCK_SIZE=1",
+        "KEY_BLOCK_SIZE=2",
+        "KEY_BLOCK_SIZE=16",
+        "ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4",
+    ] {
+        let sql = format!("ALTER TABLE orders {options};\n{then}");
+        assert_every_answer(options, LAB_TABLES, &sql, &[UNKNOWN, UNKNOWN]);
+    }
+    // ROW_FORMAT=DYNAMIC against KEY_BLOCK_SIZE=8: MySQL refuses it (1478).
+    let sql = format!("ALTER TABLE orders ROW_FORMAT=DYNAMIC;\n{then}");
+    assert_every_answer(
+        "dynamic on a block size of 8",
+        &lab_with_options(" KEY_BLOCK_SIZE=8", &[]),
+        &sql,
+        &[UNKNOWN, UNKNOWN],
+    );
+}
+
+#[test]
+fn a_dump_with_a_compressed_orders_returns_to_dynamic_with_an_alter() {
+    let sql = format!("ALTER TABLE orders ROW_FORMAT=DYNAMIC;\nALTER TABLE orders {ADD_COLUMN};");
+    assert_every_answer(
+        "compressed to dynamic",
+        &lab_with_options(COMPRESSED, &[]),
+        &sql,
+        &[UNKNOWN, INSTANT],
+    );
+}
+
+#[test]
+fn after_an_engine_alter_the_later_statements_get_the_answers_of_that_engine() {
+    // To MyISAM and back, with no foreign key anywhere near the table.
+    for (options, schema, answer) in [
+        ("ENGINE=MyISAM", lab_after(&[]), COPY),
+        ("engine = MyISAM", lab_after(&[]), COPY),
+        ("ENGINE MyISAM", lab_after(&[]), COPY),
+        ("ENGINE=InnoDB, ENGINE=MyISAM", lab_after(&[]), COPY),
+        ("COMMENT='x', ENGINE=MyISAM", lab_after(&[]), COPY),
+        ("ENGINE=InnoDB", myisam_lab_after(&[]), INSTANT),
+        (
+            "ENGINE=MyISAM, ENGINE=InnoDB",
+            myisam_lab_after(&[]),
+            INSTANT,
+        ),
+    ] {
+        let sql = format!("ALTER TABLE orders {options};\n{ADD_C}");
+        assert_every_answer(options, &schema, &sql, &[UNKNOWN, answer]);
+    }
+    // Other engines are not measured.
+    for options in ["ENGINE=MEMORY", "ENGINE=ARCHIVE", "ENGINE=CSV"] {
+        let sql = format!("ALTER TABLE orders {options};\n{ADD_C}");
+        assert_every_answer(options, LAB_TABLES, &sql, &[UNKNOWN, UNKNOWN]);
+    }
+}
+
+#[test]
+fn a_changed_engine_shows_in_every_later_change_of_the_table() {
+    let sql = "ALTER TABLE orders ENGINE=MyISAM;
+        ALTER TABLE orders DROP COLUMN note;
+        ALTER TABLE orders RENAME COLUMN amount TO total;
+        ALTER TABLE orders ADD INDEX idx_orders_total (total);";
+    assert_every_answer("myisam", LAB_TABLES, sql, &[UNKNOWN, COPY, INSTANT, COPY]);
+}
+
+#[test]
+fn a_change_to_myisam_of_a_table_with_a_foreign_key_or_a_parent_loses_the_table() {
+    let child = lab_after(&[&format!("ALTER TABLE orders {MYISAM_ADD_FK}")]);
+    for (table, options) in [
+        ("orders", "ENGINE=MyISAM"),
+        ("users", "ENGINE=MyISAM"),
+        ("orders", "ENGINE=MEMORY"),
+        ("users", "ENGINE=MEMORY"),
+    ] {
+        let sql =
+            format!("ALTER TABLE {table} {options};\nALTER TABLE {table} ADD COLUMN c INT NULL;");
+        assert_every_answer(
+            &format!("{table} {options}"),
+            &child,
+            &sql,
+            &[UNKNOWN, UNKNOWN],
+        );
+    }
+    // Still InnoDB: nothing changes.
+    for table in ["orders", "users"] {
+        let sql = format!(
+            "ALTER TABLE {table} ENGINE=InnoDB;\nALTER TABLE {table} ADD COLUMN c INT NULL;"
+        );
+        assert_every_answer(table, &child, &sql, &[UNKNOWN, INSTANT]);
+    }
+}
+
+#[test]
+fn an_engine_or_row_format_alter_on_a_table_kilit_does_not_know_leaves_it_as_before() {
+    let lost = format!("{LAB_TABLES}ALTER TABLE orders AUTO_INCREMENT = 5;");
+    for schema in ["", lost.as_str()] {
+        // The engine written is the engine the table has.
+        assert_every_answer(
+            "myisam",
+            schema,
+            &format!("ALTER TABLE orders ENGINE=MyISAM;\n{ADD_C}"),
+            &[UNKNOWN, UNKNOWN],
+        );
+        assert_every_answer(
+            "innodb",
+            schema,
+            &format!("ALTER TABLE orders ENGINE=InnoDB;\n{ADD_C}"),
+            &[UNKNOWN, INSTANT],
+        );
+        // A comment next to the engine changes nothing else.
+        assert_every_answer(
+            "myisam and comment",
+            schema,
+            &format!("ALTER TABLE orders COMMENT = 'x', ENGINE=MyISAM;\n{ADD_C}"),
+            &[UNKNOWN, UNKNOWN],
+        );
+    }
+}
+
+/// A statement kilit still cannot read, and whether it loses `orders`.
+const UNREADABLE_OPTION_ALTERS: [(&str, bool); 16] = [
+    ("ALTER TABLE orders COMMENT='x' ALGORITHM=INSTANT", true),
+    ("ALTER TABLE orders ENGINE='InnoDB'", false),
+    ("ALTER TABLE orders ROW_FORMAT='DYNAMIC'", false),
+    ("ALTER TABLE orders KEY_BLOCK_SIZE='8'", false),
+    ("ALTER TABLE orders COMMENT='x', AUTO_INCREMENT=5", true),
+    (
+        "ALTER TABLE orders COMMENT='x', ADD COLUMN y INT NULL",
+        true,
+    ),
+    ("ALTER TABLE orders COMMENT=_utf8mb4'x'", true),
+    ("ALTER TABLE orders COMMENT='a' 'b'", true),
+    ("ALTER TABLE orders COMMENT = x", true),
+    ("ALTER TABLE orders , COMMENT='x'", true),
+    ("ALTER TABLE orders COMMENT='x',", true),
+    ("ALTER TABLE orders COMMENT='x',, ALGORITHM=INPLACE", true),
+    ("ALTER TABLE orders /*!80000 COMMENT='x' */", true),
+    (
+        "ALTER TABLE orders COMMENT='x' /*!80000 , ALGORITHM=INPLACE */",
+        true,
+    ),
+    ("ALTER TABLE orders COMMENT='x', COMMENT", true),
+    ("ALTER TABLE \"orders\" COMMENT='x'", false),
+];
+
+#[test]
+fn an_option_alter_kilit_still_cannot_read_is_unknown_and_loses_the_table_as_before() {
+    for (statement, loses) in UNREADABLE_OPTION_ALTERS {
+        let sql = format!("{statement};\n{ADD_C}");
+        for server in [MYSQL_80, MYSQL_84] {
+            let reason = first_reason_on(server, LAB_TABLES, &sql);
+            assert!(
+                reason.starts_with("kilit could not read this statement"),
+                "{server}: {statement}: {reason}"
+            );
+            if loses {
+                let predictions = predictions_on(server, LAB_TABLES, &sql);
+                assert!(
+                    mentions_fulltext(&predictions[1]),
+                    "{server}: {statement}: {:?}",
+                    predictions[1]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_quoted_option_value_in_an_alter_is_not_read_as_the_value_it_names() {
+    // ENGINE='MyISAM' is accepted by MySQL but kilit does not read it: the
+    // table must not get the InnoDB answer afterwards, as for CREATE TABLE.
+    assert_every_answer(
+        "quoted myisam",
+        LAB_TABLES,
+        &format!("ALTER TABLE orders ENGINE='MyISAM';\n{ADD_C}"),
+        &[UNKNOWN, UNKNOWN],
+    );
+}
+
+#[test]
+fn option_alters_are_followed_by_the_statements_after_a_failed_one() {
+    // K11: a measured failure leaves the tables as they were.
+    let sql = format!(
+        "ALTER TABLE orders COMMENT = 'x', ALGORITHM=INSTANT;\nALTER TABLE orders {ADD_COLUMN}, ALGORITHM=INSTANT;"
+    );
+    assert_every_answer("failed comment", LAB_TABLES, &sql, &[FAILS_1845, INSTANT]);
+}
+
+#[test]
+fn a_table_option_alter_from_a_mysqldump_schema_keeps_the_table_known() {
+    // `orders` as mysqldump writes it, with no row format.
+    let schema = dump_orders("", "");
+    let sql = format!("ALTER TABLE `orders` COMMENT = 'x';\nALTER TABLE `orders` {ADD_COLUMN};");
+    assert_every_answer("dump", &schema, &sql, &[INPLACE, INSTANT]);
+    let compressed =
+        format!("ALTER TABLE `orders` ROW_FORMAT=COMPRESSED;\nALTER TABLE `orders` {ADD_COLUMN};");
+    assert_every_answer(
+        "dump, compressed",
+        &schema,
+        &compressed,
+        &[UNKNOWN, INPLACE_REBUILD],
+    );
+}
+
+// SET scope. A GLOBAL, PERSIST or PERSIST_ONLY keyword applies to the later
+// assignments of the same SET that have no scope of their own; `@@global.`,
+// `@@session.` and `@@` apply to their own variable only. Hand tests of step
+// 11b: `@@global.x = 1, y = 0` sets y for the session, so does
+// `GLOBAL a = 1, @@y = 0`.
+
+const CHECKS_ON_PLAIN: &str =
+    "assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it";
+const CHECKS_ON_GLOBAL_CHANGED: &str = "assumes foreign_key_checks is ON in this session, the \
+     MySQL default: a statement before this one changes its global value, which does not change \
+     this session";
+
+/// A child column that does not match its parent: the key fails with 3780
+/// when the checks are on, and is unknown when they are off.
+fn mismatching_key_schema() -> String {
+    lab_after(&["ALTER TABLE orders ADD COLUMN ref INT NULL"])
+}
+
+#[test]
+fn a_global_keyword_carries_to_the_later_assignments_so_the_session_checks_stay_on() {
+    let schema = mismatching_key_schema();
+    for (set, note) in [
+        (
+            "SET GLOBAL innodb_lock_wait_timeout = 50, foreign_key_checks = 0",
+            CHECKS_ON_GLOBAL_CHANGED,
+        ),
+        (
+            "SET PERSIST innodb_lock_wait_timeout = 50, foreign_key_checks = 0",
+            CHECKS_ON_GLOBAL_CHANGED,
+        ),
+        (
+            "SET GLOBAL foreign_key_checks = 0, innodb_lock_wait_timeout = 50",
+            CHECKS_ON_GLOBAL_CHANGED,
+        ),
+        (
+            "SET @@global.innodb_lock_wait_timeout = 50, @@global.foreign_key_checks = 0",
+            CHECKS_ON_GLOBAL_CHANGED,
+        ),
+        (
+            "SET PERSIST_ONLY innodb_lock_wait_timeout = 50, foreign_key_checks = 0",
+            CHECKS_ON_PLAIN,
+        ),
+    ] {
+        let sql = format!("{set};\nALTER TABLE orders {REF};");
+        for server in [MYSQL_80, MYSQL_84] {
+            let predictions = predictions_on(server, &schema, &sql);
+            match predictions.last().unwrap() {
+                Prediction::Measured {
+                    verdict: Verdict::Fails { code, .. },
+                    notes,
+                    ..
+                } => {
+                    assert_eq!(*code, 3780, "{server}: {set}");
+                    assert!(
+                        notes.iter().any(|n| n == note),
+                        "{server}: {set}: {notes:?}"
+                    );
+                    let other = if note == CHECKS_ON_PLAIN {
+                        CHECKS_ON_GLOBAL_CHANGED
+                    } else {
+                        CHECKS_ON_PLAIN
+                    };
+                    assert!(
+                        !notes.iter().any(|n| n == other),
+                        "{server}: {set}: {notes:?}"
+                    );
+                }
+                other => panic!("{server}: {set}: {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn a_scope_of_its_own_or_a_session_keyword_turns_the_session_checks_off() {
+    let schema = mismatching_key_schema();
+    for set in [
+        "SET @@global.innodb_lock_wait_timeout = 50, foreign_key_checks = 0",
+        "SET GLOBAL innodb_lock_wait_timeout = 50, @@foreign_key_checks = 0",
+        "SET GLOBAL innodb_lock_wait_timeout = 50, SESSION foreign_key_checks = 0",
+        "SET GLOBAL innodb_lock_wait_timeout = 50, @@session.foreign_key_checks = 0",
+        "SET SESSION innodb_lock_wait_timeout = 50, foreign_key_checks = 0",
+        "SET LOCAL innodb_lock_wait_timeout = 50, foreign_key_checks = 0",
+        "SET innodb_lock_wait_timeout = 50, foreign_key_checks = 0",
+    ] {
+        // Checks off and a mismatch kilit can see: unknown, as for a plain
+        // SET foreign_key_checks = 0.
+        assert_answer(
+            set,
+            &schema,
+            &format!("{set};\nALTER TABLE orders {REF};"),
+            UNKNOWN,
+        );
+    }
+}
+
+#[test]
+fn a_global_set_of_two_variables_leaves_the_checks_on_for_dropping_a_foreign_key_column() {
+    let schema = lab_after(&[&format!("ALTER TABLE orders {MYISAM_ADD_FK}")]);
+    let drop = "ALTER TABLE orders DROP COLUMN user_id;";
+    assert_answer("plain", &schema, drop, FAILS_1828);
+    assert_answer(
+        "global carries",
+        &schema,
+        &format!("SET GLOBAL innodb_lock_wait_timeout = 50, foreign_key_checks = 0;\n{drop}"),
+        FAILS_1828,
+    );
+    // With the checks off for the session, the column goes.
+    assert_ne!(
+        on_both(
+            &schema,
+            &format!("SET @@global.innodb_lock_wait_timeout = 50, foreign_key_checks = 0;\n{drop}")
+        ),
+        [FAILS_1828, FAILS_1828]
+    );
+}
+
+const FAILS_1828: &str = "fails with error 1828";
+const FAILS_1674: &str = "fails with error 1674";
+const UUID_DEFAULT: &str =
+    "ALTER TABLE orders ADD COLUMN token CHAR(36) NOT NULL DEFAULT (UUID());";
+
+#[test]
+fn a_global_keyword_carries_to_sql_log_bin_and_a_scope_of_its_own_does_not() {
+    // sql_log_bin = 1 or ON keeps the measured answer; a GLOBAL scope makes
+    // it unknown, as GLOBAL sql_log_bin alone does.
+    assert_answer(
+        "global alone",
+        LAB_TABLES,
+        &format!("SET GLOBAL sql_log_bin = 1;\n{UUID_DEFAULT}"),
+        UNKNOWN,
+    );
+    for set in [
+        "SET GLOBAL innodb_lock_wait_timeout = 50, sql_log_bin = 1",
+        "SET PERSIST innodb_lock_wait_timeout = 50, sql_log_bin = 1",
+        "SET PERSIST_ONLY innodb_lock_wait_timeout = 50, sql_log_bin = 1",
+    ] {
+        assert_answer(set, LAB_TABLES, &format!("{set};\n{UUID_DEFAULT}"), UNKNOWN);
+    }
+    for set in [
+        "SET @@global.innodb_lock_wait_timeout = 50, sql_log_bin = 1",
+        "SET GLOBAL innodb_lock_wait_timeout = 50, @@sql_log_bin = 1",
+        "SET GLOBAL innodb_lock_wait_timeout = 50, SESSION sql_log_bin = 1",
+    ] {
+        assert_answer(
+            set,
+            LAB_TABLES,
+            &format!("{set};\n{UUID_DEFAULT}"),
+            FAILS_1674,
+        );
+    }
+    // The session scope turning it off is as before.
+    assert_answer(
+        "session off",
+        LAB_TABLES,
+        &format!("SET @@global.innodb_lock_wait_timeout = 50, sql_log_bin = 0;\n{UUID_DEFAULT}"),
+        UNKNOWN,
+    );
+}
+
+#[test]
+fn a_global_keyword_carries_to_old_alter_table_in_every_position_and_a_scope_of_its_own_does_not() {
+    let add = format!("ALTER TABLE orders {ADD_COLUMN};");
+    for set in [
+        "SET GLOBAL innodb_lock_wait_timeout = 50, old_alter_table = ON",
+        "SET PERSIST innodb_lock_wait_timeout = 50, old_alter_table = ON",
+        "SET GLOBAL old_alter_table = ON, innodb_lock_wait_timeout = 50",
+    ] {
+        assert_answer(set, LAB_TABLES, &format!("{set};\n{add}"), UNKNOWN);
+    }
+    // The session's old_alter_table is ON: the table is copied.
+    for set in [
+        "SET @@global.innodb_lock_wait_timeout = 50, old_alter_table = ON",
+        "SET GLOBAL innodb_lock_wait_timeout = 50, @@old_alter_table = ON",
+        "SET GLOBAL innodb_lock_wait_timeout = 50, SESSION old_alter_table = ON",
+    ] {
+        assert_answer(set, LAB_TABLES, &format!("{set};\n{add}"), COPY);
+    }
+}
+
+// foreign_key_checks = DEFAULT. Hand tests of step 11a's review: the session
+// ends with the checks off on both servers (the inverse of the global value);
+// the lab has not measured it, so every answer that depends on the checks is
+// unknown until a readable session SET of the variable.
+
+const SESSION_DEFAULTS: [&str; 9] = [
+    "SET foreign_key_checks = DEFAULT",
+    "SET SESSION foreign_key_checks = DEFAULT",
+    "SET LOCAL foreign_key_checks = DEFAULT",
+    "SET @@foreign_key_checks = DEFAULT",
+    "SET @@session.foreign_key_checks = DEFAULT",
+    "SET @@local.foreign_key_checks = DEFAULT",
+    "set Foreign_Key_Checks = default",
+    "SET innodb_lock_wait_timeout = 50, foreign_key_checks = DEFAULT",
+    "SET GLOBAL innodb_lock_wait_timeout = 50, SESSION foreign_key_checks = DEFAULT",
+];
+
+fn sets_default_reason(line: usize) -> String {
+    format!("line {line} sets foreign_key_checks to DEFAULT, which the lab has not measured")
+}
+
+#[test]
+fn a_session_default_of_foreign_key_checks_makes_a_new_key_unknown_with_the_line_of_the_set() {
+    // A key that fails with the checks on, and one that fits.
+    let failing = mismatching_key_schema();
+    let fitting = lab_after(&[OC_REF]);
+    for set in SESSION_DEFAULTS {
+        for (name, schema) in [("mismatch", &failing), ("fit", &fitting)] {
+            let sql = format!("{set};\nALTER TABLE orders {REF};");
+            assert_answer(&format!("{set}: {name}"), schema, &sql, UNKNOWN);
+            for server in [MYSQL_80, MYSQL_84] {
+                assert_eq!(
+                    unknown_reason_on(server, schema, &sql),
+                    sets_default_reason(1),
+                    "{server}: {set}: {name}"
+                );
+            }
+        }
+    }
+    // The line of the SET, not of the key.
+    let sql = format!(
+        "SET foreign_key_checks = 1;\nSET foreign_key_checks = 1;\nSET foreign_key_checks = DEFAULT;\nSELECT 1;\nALTER TABLE orders {REF};"
+    );
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(
+            unknown_reason_on(server, &failing, &sql),
+            sets_default_reason(3),
+            "{server}"
+        );
+    }
+}
+
+#[test]
+fn a_later_readable_session_set_of_foreign_key_checks_brings_the_measured_answers_back() {
+    let failing = mismatching_key_schema();
+    for set in [
+        "SET foreign_key_checks = 1",
+        "SET SESSION foreign_key_checks = ON",
+    ] {
+        let sql = format!("SET foreign_key_checks = DEFAULT;\n{set};\nALTER TABLE orders {REF};");
+        assert_answer(set, &failing, &sql, FAILS_3780);
+    }
+    // Off is off again: a mismatch kilit can see is unknown, as before.
+    let sql = format!(
+        "SET foreign_key_checks = DEFAULT;\nSET foreign_key_checks = 0;\nALTER TABLE orders {REF};"
+    );
+    assert_answer("off", &failing, &sql, UNKNOWN);
+}
+
+#[test]
+fn a_default_of_foreign_key_checks_does_not_touch_the_statements_that_do_not_depend_on_it() {
+    let sql = format!("SET foreign_key_checks = DEFAULT;\nALTER TABLE orders {ADD_COLUMN};");
+    assert_every_answer("add column", LAB_TABLES, &sql, &["not checked", INSTANT]);
+}
+
+#[test]
+fn a_global_default_of_foreign_key_checks_changes_only_the_global_value() {
+    let failing = mismatching_key_schema();
+    let sql = format!("SET GLOBAL foreign_key_checks = DEFAULT;\nALTER TABLE orders {REF};");
+    assert_answer("global default", &failing, &sql, FAILS_3780);
+    for server in [MYSQL_80, MYSQL_84] {
+        let predictions = predictions_on(server, &failing, &sql);
+        assert!(
+            notes_of(predictions.last().unwrap())
+                .iter()
+                .any(|note| note == CHECKS_ON_GLOBAL_CHANGED),
+            "{server}"
+        );
+    }
+}
+
+/// `orders` with a key block of its own: `idx_orders_user` serves the key
+/// `fk_orders_user`, as mysqldump writes them.
+const KEYED_ORDERS: &str = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_orders_user` (`user_id`),
+  CONSTRAINT `fk_orders_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+";
+
+#[test]
+fn a_session_default_of_foreign_key_checks_makes_dropping_a_key_column_or_its_index_unknown() {
+    let drop_column = "ALTER TABLE orders DROP COLUMN user_id;";
+    let drop_index = "ALTER TABLE orders DROP INDEX idx_orders_user;";
+    // As before: with the checks on, both fail.
+    assert_answer("column", KEYED_ORDERS, drop_column, FAILS_1828);
+    assert_answer("index", KEYED_ORDERS, drop_index, FAILS_1553);
+    for set in SESSION_DEFAULTS {
+        for (statement, shape) in [
+            (
+                drop_column,
+                format!(
+                    "user_id is in the foreign key fk_orders_user, and {}",
+                    sets_default_reason(1)
+                ),
+            ),
+            (
+                drop_index,
+                format!(
+                    "idx_orders_user serves the foreign key fk_orders_user, and {}",
+                    sets_default_reason(1)
+                ),
+            ),
+        ] {
+            let sql = format!("{set};\n{statement}");
+            assert_answer(&format!("{set}: {statement}"), KEYED_ORDERS, &sql, UNKNOWN);
+            for server in [MYSQL_80, MYSQL_84] {
+                assert_eq!(
+                    unknown_reason_on(server, KEYED_ORDERS, &sql),
+                    shape,
+                    "{server}: {set}: {statement}"
+                );
+            }
+        }
+    }
+    // A readable session SET brings them back.
+    for statement in [drop_column, drop_index] {
+        let answer = if statement == drop_column {
+            FAILS_1828
+        } else {
+            FAILS_1553
+        };
+        assert_answer(
+            statement,
+            KEYED_ORDERS,
+            &format!("SET foreign_key_checks = DEFAULT;\nSET foreign_key_checks = 1;\n{statement}"),
+            answer,
+        );
+    }
+}
+
+const FAILS_1553: &str = "fails with error 1553";
+
+#[test]
+fn changing_the_type_of_a_foreign_key_column_after_a_default_of_the_checks_is_unknown() {
+    // The 1828 shape for MODIFY: the column is in a key and the checks matter.
+    let sql = "SET foreign_key_checks = DEFAULT;
+               ALTER TABLE orders MODIFY COLUMN user_id INT NOT NULL;";
+    assert_answer("modify", KEYED_ORDERS, sql, UNKNOWN);
+    assert_eq!(
+        unknown_reason_on(MYSQL_84, KEYED_ORDERS, sql),
+        format!(
+            "user_id is in the foreign key fk_orders_user, and {}",
+            sets_default_reason(1)
+        )
+    );
+}
+
+// Regression tests for what the step 11b review found. The server runs are
+// the review's hand tests (both servers, session only): MySQL 1628 for a
+// comment over 2048 characters, 1228 for a GLOBAL sql_log_bin, 1193 for an
+// unknown variable (and, on 8.0.46, restrict_fk_on_non_standard_key), 1071 for
+// a key too long for the new engine or row format, 1231 for a quoted DEFAULT.
+
+#[test]
+fn a_table_comment_over_2048_characters_is_unknown_and_2048_keeps_the_measured_answer() {
+    let reason = "a table comment longer than 2048 characters has not been measured";
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(
+            unknown_reason_on(
+                server,
+                LAB_TABLES,
+                &format!("ALTER TABLE orders COMMENT = '{}';", "a".repeat(2049))
+            ),
+            reason,
+            "{server}"
+        );
+        assert_eq!(
+            unknown_reason_on(
+                server,
+                LAB_TABLES,
+                &format!("ALTER TABLE orders COMMENT '{}';", "\u{e9}".repeat(2049))
+            ),
+            reason,
+            "{server}"
+        );
+    }
+    // Characters count, not bytes: 2048 two-byte characters are accepted.
+    for comment in ["a".repeat(2048), "\u{e9}".repeat(2048)] {
+        assert_orders(
+            "2048 characters",
+            LAB_TABLES,
+            &format!("COMMENT = '{comment}'"),
+            INPLACE,
+        );
+    }
+}
+
+#[test]
+fn a_set_that_mysql_refuses_as_a_whole_leaves_old_alter_table_unknown() {
+    // 1228 for a GLOBAL sql_log_bin: the whole statement fails, so
+    // old_alter_table may or may not have changed.
+    let add = format!("ALTER TABLE orders {ADD_COLUMN};");
+    for set in [
+        "SET SESSION old_alter_table = ON, GLOBAL foreign_key_checks = 0, sql_log_bin = 0",
+        "SET old_alter_table = ON, GLOBAL sql_log_bin = 1",
+    ] {
+        let sql = format!("{set};\n{add}");
+        assert_answer(set, LAB_TABLES, &sql, UNKNOWN);
+        for server in [MYSQL_80, MYSQL_84] {
+            let reason = unknown_reason_on(server, LAB_TABLES, &sql);
+            assert!(
+                reason.starts_with("line 1 sets old_alter_table"),
+                "{server}: {set}: {reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_set_that_mysql_refuses_as_a_whole_leaves_foreign_key_checks_unknown() {
+    let schema = mismatching_key_schema();
+    let reason = "line 1 sets foreign_key_checks in a SET that MySQL may refuse as a whole, \
+                  and the lab has not measured it";
+    for set in [
+        "SET foreign_key_checks = 0, GLOBAL sql_log_bin = 1",
+        "SET foreign_key_checks = 0, restrict_fk_on_non_standard_key = OFF",
+    ] {
+        let sql = format!("{set};\nALTER TABLE orders {REF};");
+        // Not the checks-off answer, and not the checks-on failure.
+        for server in [MYSQL_80, MYSQL_84] {
+            assert_eq!(
+                unknown_reason_on(server, &schema, &sql),
+                reason,
+                "{server}: {set}"
+            );
+        }
+    }
+}
+
+/// The review's `t1`: utf8mb4 VARCHAR(255) columns, one of them indexed.
+const T1_TABLE: &str = "CREATE TABLE t1 (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  email VARCHAR(255) NULL,
+  note VARCHAR(255) NULL,
+  KEY by_email (email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+";
+
+#[test]
+fn a_change_of_engine_that_mysql_may_refuse_for_the_keys_loses_the_table() {
+    // ENGINE=MyISAM on InnoDB t1: 1071, a key over 1000 bytes; the table
+    // stays InnoDB on the server.
+    for server in [MYSQL_80, MYSQL_84] {
+        let reason = unknown_reason_on(
+            server,
+            T1_TABLE,
+            &format!("ALTER TABLE t1 ENGINE=MyISAM;\n{ADD_C_T1}"),
+        );
+        assert!(
+            reason.starts_with("kilit cannot tell the engine of t1"),
+            "{server}: {reason}"
+        );
+    }
+    // A table with a FULLTEXT index is lost too.
+    let fulltext = lab_after(&["ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note)"]);
+    assert_every_answer(
+        "fulltext",
+        &fulltext,
+        &format!("ALTER TABLE orders ENGINE=MyISAM;\n{ADD_C}"),
+        &[UNKNOWN, UNKNOWN],
+    );
+    // MyISAM to InnoDB with an AUTO_INCREMENT column that is not first in any
+    // key: 1075.
+    let auto = "CREATE TABLE m (a INT NOT NULL, id INT NOT NULL AUTO_INCREMENT, KEY (a, id))
+                ENGINE=MyISAM;";
+    assert_every_answer(
+        "auto_increment second in its key",
+        auto,
+        "ALTER TABLE m ENGINE=InnoDB;\nALTER TABLE m ADD COLUMN c INT NULL;",
+        &[UNKNOWN, UNKNOWN],
+    );
+}
+
+const ADD_C_T1: &str = "ALTER TABLE t1 ADD COLUMN c INT NULL;";
+
+#[test]
+fn a_change_to_compact_or_redundant_that_mysql_may_refuse_for_the_keys_loses_the_table() {
+    // ROW_FORMAT=COMPACT on t1: 1071 (767 bytes); the table stays DYNAMIC
+    // and ADD INDEX by_note then works, so kilit must not say 1071.
+    for options in [
+        "ROW_FORMAT=COMPACT",
+        "ROW_FORMAT=REDUNDANT",
+        "row_format = compact",
+    ] {
+        let sql = format!("ALTER TABLE t1 {options};\nALTER TABLE t1 ADD INDEX by_note (note);");
+        assert_every_answer(options, T1_TABLE, &sql, &[UNKNOWN, UNKNOWN]);
+    }
+    let fulltext = lab_after(&["ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note)"]);
+    assert_every_answer(
+        "fulltext",
+        &fulltext,
+        &format!("ALTER TABLE orders ROW_FORMAT=COMPACT;\n{ADD_C}"),
+        &[UNKNOWN, UNKNOWN],
+    );
+}
+
+#[test]
+fn keys_of_integers_keep_the_new_engine_or_row_format_and_other_changes_are_followed() {
+    let keyed = lab_after(&["ALTER TABLE orders ADD INDEX idx_orders_amount (amount)"]);
+    assert_every_answer(
+        "myisam, integer key",
+        &keyed,
+        &format!("ALTER TABLE orders ENGINE=MyISAM;\n{ADD_C}"),
+        &[UNKNOWN, COPY],
+    );
+    assert_every_answer(
+        "compact, integer key",
+        &keyed,
+        &format!("ALTER TABLE orders ROW_FORMAT=COMPACT;\n{ADD_C}"),
+        &[UNKNOWN, INSTANT],
+    );
+    // On t1, with its string key, the changes that cannot break a key.
+    for (options, answer) in [
+        ("ROW_FORMAT=DYNAMIC", INSTANT),
+        ("ROW_FORMAT=DEFAULT", INSTANT),
+        ("ROW_FORMAT=COMPRESSED", INPLACE_REBUILD),
+        ("KEY_BLOCK_SIZE=8", INPLACE_REBUILD),
+    ] {
+        let sql = format!("ALTER TABLE t1 {options};\nALTER TABLE t1 {ADD_COLUMN};");
+        assert_every_answer(options, T1_TABLE, &sql, &[UNKNOWN, answer]);
+    }
+}
+
+#[test]
+fn a_foreign_key_checks_assignment_kilit_cannot_read_makes_a_new_key_unknown() {
+    let schema = mismatching_key_schema();
+    let reason = "line 1 sets foreign_key_checks in a form kilit cannot read";
+    // All three turn the checks off or to their default on the server.
+    for set in [
+        "SET foreign_key_checks := DEFAULT",
+        "SET @@`foreign_key_checks` = DEFAULT",
+        "SET NAMES utf8mb4, foreign_key_checks = 0",
+    ] {
+        let sql = format!("{set};\nALTER TABLE orders {REF};");
+        for server in [MYSQL_80, MYSQL_84] {
+            assert_eq!(
+                unknown_reason_on(server, &schema, &sql),
+                reason,
+                "{server}: {set}"
+            );
+        }
+    }
+    // The header mysqldump writes is still read: the checks are off, and a
+    // key that fits gets the checks-off answer, INPLACE.
+    let fitting = lab_after(&[OC_REF]);
+    assert_answer(
+        "mysqldump header",
+        &fitting,
+        &format!(
+            "SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;\n\
+             ALTER TABLE orders {REF};"
+        ),
+        INPLACE,
+    );
+}
+
+#[test]
+fn a_quoted_default_of_foreign_key_checks_changes_nothing() {
+    // MySQL gives 1231 and keeps the value: the checks stay on.
+    let sql = format!("SET foreign_key_checks = 'DEFAULT';\nALTER TABLE orders {REF};");
+    assert_answer("mismatch", &mismatching_key_schema(), &sql, FAILS_3780);
+    assert_answer("fit", &lab_after(&[OC_REF]), &sql, COPY);
+    for server in [MYSQL_80, MYSQL_84] {
+        let predictions = predictions_on(server, &mismatching_key_schema(), &sql);
+        assert!(
+            notes_of(predictions.last().unwrap())
+                .iter()
+                .any(|note| note == CHECKS_ON_PLAIN),
+            "{server}"
+        );
+    }
+}
+
+#[test]
+fn a_comment_between_set_and_global_still_makes_the_value_global() {
+    let schema = mismatching_key_schema();
+    let sql = format!("SET/**/GLOBAL foreign_key_checks = 0;\nALTER TABLE orders {REF};");
+    assert_answer("comment", &schema, &sql, FAILS_3780);
+    for server in [MYSQL_80, MYSQL_84] {
+        let predictions = predictions_on(server, &schema, &sql);
+        assert!(
+            notes_of(predictions.last().unwrap())
+                .iter()
+                .any(|note| note == CHECKS_ON_GLOBAL_CHANGED),
+            "{server}"
+        );
+    }
+}
+
+#[test]
+fn the_reason_for_a_table_of_unknown_engine_says_a_statement_names_an_engine_it_cannot_follow() {
+    let sql = "SET default_storage_engine = MyISAM;
+               CREATE TABLE t (id INT PRIMARY KEY);
+               ALTER TABLE t ADD COLUMN c INT NULL;";
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(
+            unknown_reason_on(server, "", sql),
+            "kilit cannot tell the engine of t: the input sets default_storage_engine or \
+             default_tmp_storage_engine before creating it, or a statement names an engine \
+             for it that kilit cannot follow",
+            "{server}"
+        );
     }
 }

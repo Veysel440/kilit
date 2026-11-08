@@ -33,6 +33,10 @@ pub struct Schema {
     /// `innodb_strict_mode`, so a table created without `ROW_FORMAT` may
     /// have any row format. Only [`check`](crate::check) sets it.
     default_row_format_changed: bool,
+    /// By lowercase name, what a `CREATE TEMPORARY TABLE` of this session
+    /// hides: the table of that name as it was, if any. A new session sees
+    /// it again.
+    hidden_by_temporary: BTreeMap<String, Option<Entry>>,
 }
 
 // Most tables are known; a lost one is rare, so its smaller size saves little.
@@ -117,6 +121,28 @@ impl Schema {
         self.default_row_format_changed = true;
     }
 
+    /// The session ends: its temporary tables are gone, and the tables they
+    /// hid are seen again as they were.
+    pub(crate) fn session_ends(&mut self) {
+        for (name, hidden) in std::mem::take(&mut self.hidden_by_temporary) {
+            match hidden {
+                Some(entry) => self.tables.insert(name, entry),
+                None => self.tables.remove(&name),
+            };
+        }
+    }
+
+    /// kilit stops trusting what it knew about the table `name`.
+    pub(crate) fn lose_table(
+        &mut self,
+        name: &str,
+        reason: String,
+        engine: Option<Engine>,
+        row_format_unclear: bool,
+    ) {
+        self.lose(name, reason, engine, row_format_unclear);
+    }
+
     /// Whether a foreign key may point at the table `name`. If not, none does.
     pub(crate) fn may_be_pointed_at(&self, name: &str) -> bool {
         self.pointed_at.contains(&key(name))
@@ -141,6 +167,21 @@ impl Schema {
     /// Follows one statement: tables are created, changed, renamed and
     /// dropped as the statement says.
     pub fn apply(&mut self, statement: &Statement) {
+        if creates_temporary(&statement.sql) {
+            let name = match &statement.kind {
+                StatementKind::CreateTable { table, .. } => Some(&table.name),
+                StatementKind::Unparsed {
+                    table: Some(name), ..
+                } => Some(name),
+                _ => None,
+            };
+            if let Some(name) = name
+                && !self.hidden_by_temporary.contains_key(&key(name))
+            {
+                let hidden = self.tables.remove(&key(name));
+                self.hidden_by_temporary.insert(key(name), hidden);
+            }
+        }
         match &statement.kind {
             StatementKind::CreateTable {
                 table,
@@ -288,10 +329,39 @@ impl Schema {
         }
     }
 
+    /// Follows an `ALTER TABLE` that writes ENGINE, ROW_FORMAT or
+    /// KEY_BLOCK_SIZE on a table kilit does not know: the table is lost,
+    /// with the engine written, and a row format that may not be the
+    /// server's default.
+    fn options_of_unknown_table(&mut self, line: usize, alter: &Alter) {
+        for operation in &alter.operations {
+            let Operation::ChangeTableOptions(options) = operation else {
+                continue;
+            };
+            let writes_row_format =
+                options.row_format.is_some() || options.key_block_size.is_some();
+            if options.engine.is_none() && !writes_row_format {
+                continue;
+            }
+            let engine = match &options.engine {
+                Some(engine) => Some(engine.clone()),
+                None => self.engine_of(&alter.table).cloned(),
+            };
+            let unclear = writes_row_format || self.row_format_unclear_of(&alter.table);
+            let reason = match self.tables.get(&key(&alter.table)) {
+                Some(Entry::Lost { reason, .. }) => reason.clone(),
+                _ => format!("line {line}: changes the options of a table kilit does not know"),
+            };
+            self.lose(&alter.table, reason, engine, unclear);
+        }
+    }
+
     fn alter(&mut self, statement: &Statement, alter: &Alter) {
         let line = statement.line;
-        // A missing table stays missing, and a lost one stays lost.
+        // A missing table stays missing, and a lost one stays lost, with
+        // what kilit can tell of a new engine or row format.
         let Some(Entry::Known(table)) = self.tables.get_mut(&key(&alter.table)) else {
+            self.options_of_unknown_table(line, alter);
             return;
         };
         // The table changes in place: an operation kilit cannot follow loses
@@ -302,6 +372,23 @@ impl Schema {
                 Operation::RenameTable { new_name: name } => {
                     new_name = Some(name);
                     Ok(())
+                }
+                // MySQL keeps no foreign key on a table of another engine,
+                // and refuses to change it in some cases; kilit has measured
+                // none of them.
+                Operation::ChangeTableOptions(options)
+                    if options
+                        .engine
+                        .as_ref()
+                        .is_some_and(|engine| *engine != Engine::InnoDb)
+                        && (!table.foreign_keys.is_empty()
+                            || self.pointed_at.contains(&key(&alter.table))) =>
+                {
+                    Err(
+                        "changes the engine of a table with foreign keys, which kilit does not \
+                         follow"
+                            .to_owned(),
+                    )
                 }
                 // MySQL names a MyISAM key's index after `FOREIGN KEY name`
                 // too, which kilit does not keep.
@@ -314,7 +401,13 @@ impl Schema {
                 other => change(table, other),
             };
             if let Err(reason) = changed {
-                let engine = table.engine.clone();
+                // The engine may have changed, or not.
+                let engine = match operation {
+                    Operation::ChangeTableOptions(options) if options.engine.is_some() => {
+                        Some(Engine::Unknown)
+                    }
+                    _ => table.engine.clone(),
+                };
                 let unclear = row_format_unclear(table);
                 self.lose(
                     &alter.table,
@@ -346,6 +439,19 @@ fn key(name: &str) -> String {
 /// cannot follow it.
 fn change(table: &mut Table, operation: &Operation) -> Result<(), String> {
     match operation {
+        // Each option written replaces the table's; the others stay, as
+        // MySQL keeps them. kilit does not keep the comment.
+        Operation::ChangeTableOptions(options) => {
+            if let Some(engine) = &options.engine {
+                table.engine = Some(engine.clone());
+            }
+            if let Some(row_format) = &options.row_format {
+                table.row_format = Some(row_format.clone());
+            }
+            if let Some(size) = &options.key_block_size {
+                table.key_block_size = Some(size.clone());
+            }
+        }
         Operation::AddColumn { column, position } => {
             if table.position_of(&column.name).is_some() {
                 return Err(format!("adds {}, which the table already has", column.name));
@@ -843,6 +949,17 @@ fn like_source(sql: &str) -> Option<&str> {
 }
 
 /// Whether the statement starts with `CREATE`.
+fn creates_temporary(sql: &str) -> bool {
+    let mut words = sql.split_whitespace();
+    creates(sql)
+        && words
+            .next()
+            .is_some_and(|word| word.eq_ignore_ascii_case("CREATE"))
+        && words
+            .next()
+            .is_some_and(|word| word.eq_ignore_ascii_case("TEMPORARY"))
+}
+
 fn creates(sql: &str) -> bool {
     sql.trim_start()
         .get(..6)
@@ -1749,7 +1866,7 @@ ALTER TABLE t ADD CONSTRAINT C CHECK (a > 1);",
     fn a_lost_table_keeps_the_engine_kilit_last_knew() {
         let schema = from_sql(
             "CREATE TABLE m (id INT) ENGINE=MyISAM;
-             ALTER TABLE m ENGINE=InnoDB;
+             ALTER TABLE m ENGINE=InnoDB, AUTO_INCREMENT=5;
              CREATE TABLE i (id INT) ENGINE=InnoDB;
              ALTER TABLE i ENGINE = 'MyISAM';
              CREATE TABLE q (id INT) ENGINE='MyISAM';
@@ -1757,7 +1874,7 @@ ALTER TABLE t ADD CONSTRAINT C CHECK (a > 1);",
              ALTER TABLE k ADD COLUMN engine INT, ALGORITHM=SOMETHING;
              CREATE TABLE x (id INT) ENGINE=MyISAM;
              ALTER TABLE x COMMENT = 'nothing', ALGORITHM=SOMETHING;
-             ALTER TABLE missing ENGINE=MyISAM;",
+             ALTER TABLE missing ENGINE=MyISAM, AUTO_INCREMENT=5;",
         );
         assert_eq!(engine_of_lost(&schema, "m"), Some(Engine::InnoDb));
         assert_eq!(engine_of_lost(&schema, "i"), Some(Engine::MyIsam));
@@ -1769,6 +1886,76 @@ ALTER TABLE t ADD CONSTRAINT C CHECK (a > 1);",
         );
         assert_eq!(engine_of_lost(&schema, "x"), Some(Engine::MyIsam));
         assert_eq!(engine_of_lost(&schema, "missing"), Some(Engine::MyIsam));
+    }
+
+    #[test]
+    fn table_options_change_a_known_table_and_keep_the_others() {
+        let schema = from_sql(
+            "CREATE TABLE t (id INT) ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8;
+             ALTER TABLE t ROW_FORMAT=DEFAULT;
+             CREATE TABLE m (id INT);
+             ALTER TABLE m COMMENT = 'ENGINE=MEMORY', ENGINE=MyISAM;
+             CREATE TABLE c (id INT);
+             ALTER TABLE c COMMENT = 'x';",
+        );
+        let t = known(&schema, "t");
+        assert_eq!(t.row_format, Some(RowFormat::Default));
+        assert_eq!(t.key_block_size.as_deref(), Some("8"));
+        assert_eq!(known(&schema, "m").engine, Some(Engine::MyIsam));
+        assert_eq!(
+            known(&schema, "c"),
+            known(&from_sql("CREATE TABLE c (id INT);"), "c")
+        );
+    }
+
+    #[test]
+    fn another_engine_on_a_table_with_foreign_keys_loses_it() {
+        let schema = from_sql(
+            "CREATE TABLE users (id INT PRIMARY KEY);
+             CREATE TABLE orders (id INT, user_id INT, FOREIGN KEY (user_id) REFERENCES users (id));
+             CREATE TABLE kept (id INT, user_id INT, FOREIGN KEY (user_id) REFERENCES users (id));
+             ALTER TABLE orders ENGINE=MyISAM;
+             ALTER TABLE users ENGINE=MEMORY;
+             ALTER TABLE kept ENGINE=InnoDB;",
+        );
+        assert_eq!(engine_of_lost(&schema, "orders"), Some(Engine::Unknown));
+        assert_eq!(engine_of_lost(&schema, "users"), Some(Engine::Unknown));
+        assert_eq!(known(&schema, "kept").engine, Some(Engine::InnoDb));
+    }
+
+    #[test]
+    fn table_options_on_a_table_kilit_does_not_know_lose_it_with_what_they_write() {
+        let schema = from_sql(
+            "ALTER TABLE e ENGINE=MyISAM;
+             ALTER TABLE r ROW_FORMAT=COMPRESSED;
+             ALTER TABLE c COMMENT = 'x';",
+        );
+        assert_eq!(engine_of_lost(&schema, "e"), Some(Engine::MyIsam));
+        assert!(row_format_unclear_of_lost(&schema, "r"));
+        assert_eq!(schema.table("c"), TableState::Missing);
+    }
+
+    #[test]
+    fn a_temporary_table_hides_its_name_until_the_session_ends() {
+        let mut schema = from_sql(
+            "CREATE TABLE orders (id INT, note TEXT);
+             CREATE TEMPORARY TABLE orders (id INT);
+             CREATE TEMPORARY TABLE scratch (id INT);
+             CREATE TEMPORARY TABLE copy LIKE orders;",
+        );
+        assert_eq!(known(&schema, "orders").columns.len(), 1);
+        schema.session_ends();
+        assert_eq!(known(&schema, "orders").columns.len(), 2);
+        assert_eq!(schema.table("scratch"), TableState::Missing);
+        assert_eq!(schema.table("copy"), TableState::Missing);
+        // A temporary table dropped in its session hides nothing after it.
+        let mut schema = from_sql(
+            "CREATE TABLE orders (id INT, note TEXT);
+             CREATE TEMPORARY TABLE orders (id INT);
+             DROP TEMPORARY TABLE orders;",
+        );
+        schema.session_ends();
+        assert_eq!(known(&schema, "orders").columns.len(), 2);
     }
 
     #[test]
@@ -1859,12 +2046,12 @@ ALTER TABLE t ADD CONSTRAINT C CHECK (a > 1);",
              CREATE TABLE sized (id INT) KEY_BLOCK_SIZE=8;
              CREATE TABLE unsized (id INT) KEY_BLOCK_SIZE=0;
              CREATE TABLE rewritten (id INT);
-             ALTER TABLE plain ENGINE=InnoDB;
-             ALTER TABLE dynamic ENGINE=InnoDB;
-             ALTER TABLE compact ENGINE=InnoDB;
-             ALTER TABLE sized ENGINE=InnoDB;
-             ALTER TABLE unsized ENGINE=InnoDB;
-             ALTER TABLE rewritten ROW_FORMAT=DYNAMIC;
+             ALTER TABLE plain ENGINE=InnoDB, AUTO_INCREMENT=5;
+             ALTER TABLE dynamic ENGINE=InnoDB, AUTO_INCREMENT=5;
+             ALTER TABLE compact ENGINE=InnoDB, AUTO_INCREMENT=5;
+             ALTER TABLE sized ENGINE=InnoDB, AUTO_INCREMENT=5;
+             ALTER TABLE unsized ENGINE=InnoDB, AUTO_INCREMENT=5;
+             ALTER TABLE rewritten ROW_FORMAT=DYNAMIC, AUTO_INCREMENT=5;
              CREATE TABLE copy LIKE compact;
              CREATE TABLE other_copy LIKE plain;",
         );

@@ -266,11 +266,26 @@ pub enum Operation {
     RenameTable {
         new_name: String,
     },
+    /// Table options written as the statement's only changes, such as
+    /// `COMMENT = 'Orders'` or `ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8`.
+    ChangeTableOptions(TableOptions),
     /// A change the parser read but kilit does not understand yet, as the
     /// parser prints it. Rules must report it as unknown, never as safe.
     Other {
         sql: String,
     },
+}
+
+/// The table options an `ALTER TABLE` writes; `None` for each one it does
+/// not write. When one is written twice, MySQL takes the last.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TableOptions {
+    /// `COMMENT = '...'`, the text without its quotes.
+    pub comment: Option<String>,
+    pub engine: Option<Engine>,
+    pub row_format: Option<RowFormat>,
+    /// As written: `8`.
+    pub key_block_size: Option<String>,
 }
 
 /// Where `FIRST` or `AFTER` puts a column.
@@ -537,8 +552,29 @@ impl fmt::Display for Operation {
             Operation::AddCheck(check) => write!(f, "add {check}"),
             Operation::DropConstraint { name } => write!(f, "drop constraint {name}"),
             Operation::RenameTable { new_name } => write!(f, "rename table to {new_name}"),
+            Operation::ChangeTableOptions(options) => write!(f, "change table options {options}"),
             Operation::Other { sql } => write!(f, "not understood: {sql}"),
         }
+    }
+}
+
+/// The options written, in MySQL's words: `COMMENT = 'Orders', ENGINE = InnoDB`.
+impl fmt::Display for TableOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut written = Vec::new();
+        if let Some(comment) = &self.comment {
+            written.push(format!("COMMENT = '{}'", comment.replace('\'', "''")));
+        }
+        if let Some(engine) = &self.engine {
+            written.push(format!("ENGINE = {engine}"));
+        }
+        if let Some(row_format) = &self.row_format {
+            written.push(format!("ROW_FORMAT = {row_format}"));
+        }
+        if let Some(size) = &self.key_block_size {
+            written.push(format!("KEY_BLOCK_SIZE = {size}"));
+        }
+        f.write_str(&written.join(", "))
     }
 }
 

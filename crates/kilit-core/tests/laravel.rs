@@ -3042,3 +3042,282 @@ fn the_insert_between_a_create_and_a_key_is_one_statement_of_the_migration() {
         assert_eq!(pretend.migrations[0].first_read, None);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Step 11b: `$table->comment('...')`. Laravel 12.71.0 and 13.40.0 print
+// `alter table `t` comment = '...'` as a statement of its own, after the
+// create table in Schema::create and alone in Schema::table; a quote in the
+// comment is doubled. The two versions print the same bytes in a terminal; the
+// short form is what Laravel 13.40.0 prints where it detects an automated
+// environment. Migrations that only set the engine, the charset or the
+// collation of the table print nothing (E).
+//
+//   a: Schema::create('notes', ... $table->comment('Notes kept by staff'))
+//   b: Schema::table('notes', fn ($t) => $t->comment('Notes kept by staff'))
+//   c: Schema::table('notes', fn ($t) => $t->comment("It's a note"))
+//   d: Schema::table('notes', fn ($t) => { $t->string('extra')->nullable();
+//                                          $t->comment('x'); })
+//   e: three migrations that set only ->engine, ->charset and ->collation
+// ---------------------------------------------------------------------------
+
+const COMMENT_A_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_04_01_000001_a_create_notes_comment ...................................  \n",
+    "  \u{21c2} create table `notes` (`id` bigint unsigned not null auto_increment primary key, `body` varchar(255) not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'  \n",
+    "  \u{21c2} alter table `notes` comment = 'Notes kept by staff'  \n",
+    "\n",
+);
+
+const COMMENT_A_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_04_01_000001_a_create_notes_comment .. \n",
+    " \u{21c2} create table `notes` (`id` bigint unsigned not null auto_increment primary key, `body` varchar(255) not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' \n",
+    " \u{21c2} alter table `notes` comment = 'Notes kept by staff' \n",
+    "\n",
+);
+
+const COMMENT_B_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_04_01_000002_b_table_comment ..........................................  \n",
+    "  \u{21c2} alter table `notes` comment = 'Notes kept by staff'  \n",
+    "\n",
+);
+
+const COMMENT_B_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_04_01_000002_b_table_comment .. \n",
+    " \u{21c2} alter table `notes` comment = 'Notes kept by staff' \n",
+    "\n",
+);
+
+const COMMENT_C_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_04_01_000003_c_table_comment_quote ....................................  \n",
+    "  \u{21c2} alter table `notes` comment = 'It''s a note'  \n",
+    "\n",
+);
+
+const COMMENT_C_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_04_01_000003_c_table_comment_quote .. \n",
+    " \u{21c2} alter table `notes` comment = 'It''s a note' \n",
+    "\n",
+);
+
+const COMMENT_D_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_04_01_000004_d_column_and_comment .....................................  \n",
+    "  \u{21c2} alter table `notes` add `extra` varchar(255) null  \n",
+    "  \u{21c2} alter table `notes` comment = 'x'  \n",
+    "\n",
+);
+
+const COMMENT_D_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_04_01_000004_d_column_and_comment .. \n",
+    " \u{21c2} alter table `notes` add `extra` varchar(255) null \n",
+    " \u{21c2} alter table `notes` comment = 'x' \n",
+    "\n",
+);
+
+const COMMENT_E_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_04_01_000005_e1_engine ................................................  \n",
+    "\n",
+    "  2026_04_01_000006_e2_charset ...............................................  \n",
+    "\n",
+    "  2026_04_01_000007_e3_collation .............................................  \n",
+    "\n",
+    "\n",
+);
+
+const COMMENT_E_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_04_01_000005_e1_engine .. \n",
+    "\n",
+    " 2026_04_01_000006_e2_charset .. \n",
+    "\n",
+    " 2026_04_01_000007_e3_collation .. \n",
+    "\n",
+    "\n",
+);
+
+const NOTES: &str = "create table `notes` (`id` bigint unsigned not null auto_increment, \
+    `body` varchar(255) not null, primary key (`id`)) engine=InnoDB default charset=utf8mb4 \
+    collate=utf8mb4_unicode_ci;\n";
+
+const COMMENT_ON_NOTES: &str = "alter table `notes` comment = 'Notes kept by staff'";
+const CREATE_NOTES: &str = "create table `notes` (`id` bigint unsigned not null auto_increment primary key, `body` varchar(255) not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'";
+
+/// The five outputs in both forms: (label, output, migration, statements).
+fn comment_outputs() -> Vec<(&'static str, &'static str, &'static str, Vec<&'static str>)> {
+    vec![
+        (
+            "a long",
+            COMMENT_A_LONG,
+            "2026_04_01_000001_a_create_notes_comment",
+            vec![CREATE_NOTES, COMMENT_ON_NOTES],
+        ),
+        (
+            "a short",
+            COMMENT_A_SHORT,
+            "2026_04_01_000001_a_create_notes_comment",
+            vec![CREATE_NOTES, COMMENT_ON_NOTES],
+        ),
+        (
+            "b long",
+            COMMENT_B_LONG,
+            "2026_04_01_000002_b_table_comment",
+            vec![COMMENT_ON_NOTES],
+        ),
+        (
+            "b short",
+            COMMENT_B_SHORT,
+            "2026_04_01_000002_b_table_comment",
+            vec![COMMENT_ON_NOTES],
+        ),
+        (
+            "c long",
+            COMMENT_C_LONG,
+            "2026_04_01_000003_c_table_comment_quote",
+            vec!["alter table `notes` comment = 'It''s a note'"],
+        ),
+        (
+            "c short",
+            COMMENT_C_SHORT,
+            "2026_04_01_000003_c_table_comment_quote",
+            vec!["alter table `notes` comment = 'It''s a note'"],
+        ),
+        (
+            "d long",
+            COMMENT_D_LONG,
+            "2026_04_01_000004_d_column_and_comment",
+            vec![
+                "alter table `notes` add `extra` varchar(255) null",
+                "alter table `notes` comment = 'x'",
+            ],
+        ),
+        (
+            "d short",
+            COMMENT_D_SHORT,
+            "2026_04_01_000004_d_column_and_comment",
+            vec![
+                "alter table `notes` add `extra` varchar(255) null",
+                "alter table `notes` comment = 'x'",
+            ],
+        ),
+    ]
+}
+
+#[test]
+fn laravel_s_table_comment_statements_are_read_as_the_statements_of_their_migration() {
+    for (label, output, migration, statements) in comment_outputs() {
+        let pretend = pretend_of(output);
+        assert!(pretend.unreadable.is_empty(), "{label}");
+        assert_eq!(migration_names(&pretend), [migration], "{label}");
+        assert_eq!(sql_of(&pretend.migrations[0]), statements, "{label}");
+        assert_eq!(pretend.migrations[0].first_read, None, "{label}");
+    }
+}
+
+#[test]
+fn laravel_s_table_comment_gets_the_measured_answer_on_both_servers_in_both_forms() {
+    for (label, output, _, statements) in comment_outputs() {
+        // The table comes with the schema unless the migration creates it.
+        let schema = if statements[0] == CREATE_NOTES {
+            ""
+        } else {
+            NOTES
+        };
+        let expected: Vec<&str> = statements
+            .iter()
+            .map(|sql| {
+                if sql.starts_with("create table") {
+                    NOT_CHECKED
+                } else if sql.contains("comment =") {
+                    INPLACE
+                } else {
+                    INSTANT
+                }
+            })
+            .collect();
+        for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+            assert_eq!(
+                answers(server, schema, output),
+                expected,
+                "{label} on {server}"
+            );
+        }
+    }
+}
+
+#[test]
+fn laravel_s_table_comment_leaves_the_table_known() {
+    // Before step 11b the comment was an unreadable statement: the table was
+    // lost, and the next ADD COLUMN carried the note about a FULLTEXT index
+    // kilit could not see.
+    let next = "alter table `notes` add `extra` varchar(255) null";
+    for output in [
+        long_form(&[(
+            "2026_04_01_000002_b_table_comment",
+            &[COMMENT_ON_NOTES, next],
+        )]),
+        short_form(&[(
+            "2026_04_01_000002_b_table_comment",
+            &[COMMENT_ON_NOTES, next],
+        )]),
+    ] {
+        for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+            let notes = notes_by_statement(server, NOTES, &output);
+            assert_eq!(notes.len(), 2);
+            assert!(
+                !notes[1].iter().any(|note| note.contains("FULLTEXT")),
+                "{server}: {:?}",
+                notes[1]
+            );
+        }
+    }
+}
+
+#[test]
+fn migrations_that_only_set_the_engine_the_charset_or_the_collation_print_no_statement() {
+    for (label, output) in [("long", COMMENT_E_LONG), ("short", COMMENT_E_SHORT)] {
+        let pretend = pretend_of(output);
+        assert!(pretend.unreadable.is_empty(), "{label}");
+        assert_eq!(
+            pretend
+                .migrations
+                .iter()
+                .map(|m| m.statements.len())
+                .sum::<usize>(),
+            0,
+            "{label}"
+        );
+        for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+            assert!(
+                answers(server, NOTES, output).is_empty(),
+                "{label} on {server}"
+            );
+        }
+    }
+}

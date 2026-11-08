@@ -4,8 +4,8 @@ use std::fmt::Write as _;
 
 use kilit_core::{
     Algorithm, Impact, PRETEND_READ_NOTE, Prediction, Schema, ServerResults, Statement,
-    StatementKind, Verdict, Writes, check, depends_on_rows, impacts, metadata_lock_warning,
-    on_empty_tables, on_new_tables, only_reads,
+    StatementKind, Verdict, Writes, check_sessions, depends_on_rows, impacts,
+    metadata_lock_warning, on_empty_tables, on_new_tables, only_reads,
 };
 use serde::Serialize;
 
@@ -54,7 +54,8 @@ struct Checked<'a> {
 
 impl<'a> Report<'a> {
     /// Checks every statement of `input` as one migration, in order,
-    /// starting from the tables in `schema`.
+    /// starting from the tables in `schema`. Each input runs in a session
+    /// of its own.
     pub fn new(
         results: &ServerResults,
         schema: Option<&(String, Schema)>,
@@ -67,7 +68,26 @@ impl<'a> Report<'a> {
             .collect();
         let no_tables = Schema::new();
         let tables = schema.map_or(&no_tables, |(_, schema)| schema);
-        let findings = check(&statements, tables, results);
+        // How many statements each session has, in order.
+        let mut lengths: Vec<(usize, usize)> = Vec::new();
+        for source in &input.sources {
+            match lengths.last_mut() {
+                Some((session, len)) if *session == source.session => {
+                    *len += source.statements.len();
+                }
+                _ => lengths.push((source.session, source.statements.len())),
+            }
+        }
+        let mut rest = statements.as_slice();
+        let sessions: Vec<&[Statement]> = lengths
+            .into_iter()
+            .map(|(_, len)| {
+                let (session, after) = rest.split_at(len);
+                rest = after;
+                session
+            })
+            .collect();
+        let findings = check_sessions(&sessions, tables, results);
         let impacts = impacts(&statements, &findings);
         let on_new_tables = on_new_tables(&statements);
         // Rows may come from lines kilit could not read, or from a statement

@@ -432,7 +432,7 @@ fn a_table_created_here_is_never_in_the_metadata_lock_warning() {
 }
 
 #[test]
-fn files_are_checked_in_order_as_one_migration() {
+fn files_are_checked_in_order_and_the_tables_carry_over_from_one_file_to_the_next() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("files_in_order");
     std::fs::create_dir_all(&dir).unwrap();
     let create = dir.join("1_create.sql");
@@ -3041,19 +3041,32 @@ fn set_persist_only_before_dropping_a_foreign_key_column_keeps_the_old_words() {
 
 #[test]
 fn a_session_default_after_a_global_set_does_not_claim_the_global_value_changed_this_session() {
-    // SET foreign_key_checks = DEFAULT is an open question: only the claim
-    // that the global value does not reach this session is ruled out.
+    // Step 11b: SET foreign_key_checks = DEFAULT leaves the session's checks
+    // unknown (hand tests: off on both servers), so the key is unknown, with
+    // the line of the SET, and the claim about the global value is gone.
     let input = format!(
         "SET GLOBAL foreign_key_checks = 0;\nSET foreign_key_checks = DEFAULT;\n\
          {NEW_TABLES}{ADD_CHILDREN_KEY}\n"
     );
-    let (text, json, _) = text_and_json(&[], &input);
+    let (text, json, code) = text_and_json(&[], &input);
     assert!(!text.contains("changes its global value"), "{text}");
     assert!(
         !last_notes(&json)
             .iter()
             .any(|note| note.contains("changes its global value"))
     );
+    let statement = json["sources"][0]["statements"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(statement["impact"], "unknown");
+    assert_eq!(
+        statement["reason"],
+        "line 2 sets foreign_key_checks to DEFAULT, which the lab has not measured"
+    );
+    assert_eq!(code, Some(0));
 }
 
 const ROWS_IN_EV: &str = "create table `ev` (`id` int not null, `n` int null);\n";
@@ -3207,4 +3220,761 @@ fn an_alter_kilit_reads_but_does_not_model_keeps_the_row_notes_of_the_next_alter
             "{alter}: {text}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Step 11b: table-option ALTERs, and one session per input file.
+// ---------------------------------------------------------------------------
+
+/// The statements of source number `source` in `json`.
+fn statements_of(json: &serde_json::Value, source: usize) -> Vec<serde_json::Value> {
+    json["sources"][source]["statements"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+/// kilit's JSON for `sql` against the example's tables, and the exit status.
+fn option_check(server: &str, strict: bool, sql: &str) -> (serde_json::Value, Option<i32>) {
+    json_check(Some(server), strict, sql)
+}
+
+#[test]
+fn a_table_comment_is_inplace_in_json_and_exits_with_0_with_and_without_strict() {
+    // $table->comment('Orders placed by users');
+    let sql = "alter table `orders` comment = 'Orders placed by users';";
+    for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+        for strict in [false, true] {
+            let (json, code) = option_check(server, strict, sql);
+            let statement = &statements_of(&json, 0)[0];
+            assert_eq!(statement["impact"], "writes_continue", "{server}");
+            assert_eq!(statement["case"], "set-table-comment", "{server}");
+            assert_eq!(statement["algorithm"], "INPLACE", "{server}");
+            assert_eq!(statement["rebuilds_table"], false, "{server}");
+            assert_eq!(statement["copies_rows"], false, "{server}");
+            assert_eq!(json["exit_code"], 0, "{server}");
+            assert_eq!(code, Some(0), "{server} strict={strict}");
+        }
+    }
+    let schema = example("mysql-schema.sql");
+    let output = kilit(&["check", "--schema", schema.to_str().unwrap()], sql);
+    let text = stdout(&output);
+    assert!(
+        text.contains(
+            "  line 1: alter table `orders` comment = 'Orders placed by users'\n    INPLACE, no rebuild, writes continue\n"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_forced_algorithm_on_a_table_comment_changes_the_impact_and_the_exit_code() {
+    for (clause, impact, code) in [
+        (", algorithm=inplace", "writes_continue", 0),
+        (", algorithm=inplace, lock=none", "writes_continue", 0),
+        (", lock=none", "writes_continue", 0),
+        (", algorithm=copy", "unknown", 0),
+        (", algorithm=instant", "fails", 1),
+    ] {
+        let sql = format!("alter table `orders` comment = 'x'{clause};");
+        for strict in [false, true] {
+            let (json, status) = option_check("mysql-8.4.13", strict, &sql);
+            let statement = &statements_of(&json, 0)[0];
+            assert_eq!(statement["impact"], impact, "{clause}");
+            if impact == "fails" {
+                assert_eq!(statement["error"], 1845, "{clause}");
+            }
+            // Unknown makes only --strict exit with 1.
+            let code = if strict && impact == "unknown" {
+                1
+            } else {
+                code
+            };
+            assert_eq!(json["exit_code"], code, "{clause}");
+            assert_eq!(status, Some(code), "{clause} strict={strict}");
+        }
+    }
+}
+
+#[test]
+fn an_engine_or_row_format_change_is_unknown_with_its_reason_and_only_strict_exits_with_1() {
+    for (sql, reason) in [
+        (
+            "alter table `orders` engine = InnoDB;",
+            "changing a table's ENGINE has not been measured yet",
+        ),
+        (
+            "alter table `orders` row_format = dynamic;",
+            "changing a table's ROW_FORMAT has not been measured yet",
+        ),
+        (
+            "alter table `orders` row_format = compressed key_block_size = 8;",
+            "changing a table's ROW_FORMAT and KEY_BLOCK_SIZE has not been measured yet",
+        ),
+    ] {
+        let (json, code) = option_check("mysql-8.4.13", false, sql);
+        let statement = &statements_of(&json, 0)[0];
+        assert_eq!(statement["impact"], "unknown", "{sql}");
+        assert_eq!(statement["reason"], reason, "{sql}");
+        assert_eq!(code, Some(0), "{sql}");
+        let (json, code) = option_check("mysql-8.4.13", true, sql);
+        assert_eq!(json["exit_code"], 1, "{sql}");
+        assert_eq!(code, Some(1), "{sql}");
+    }
+}
+
+#[test]
+fn a_compressed_table_made_by_an_alter_gets_the_compressed_answer_afterwards() {
+    let sql = "alter table `orders` row_format = compressed;
+               alter table `orders` add `coupon` varchar(255) null;";
+    let (json, code) = option_check("mysql-8.4.13", false, sql);
+    let statements = statements_of(&json, 0);
+    assert_eq!(statements[0]["impact"], "unknown");
+    assert_eq!(statements[1]["impact"], "writes_continue");
+    assert_eq!(statements[1]["algorithm"], "INPLACE");
+    assert_eq!(statements[1]["rebuilds_table"], true);
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn laravel_s_table_comment_is_read_from_standard_input_in_both_forms() {
+    // Schema::create('notes', ... $table->comment('...')) and
+    // Schema::table('shops', fn ($table) => $table->comment('...')).
+    let create = "create table `notes` (`id` bigint unsigned not null auto_increment primary key, `body` varchar(255) not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'";
+    let comment = "alter table `notes` comment = 'Notes kept by staff'";
+    let shops = "alter table `shops` comment = 'It''s a shop'";
+    for (form, input) in [
+        (
+            "long",
+            pretend_long(&[
+                (
+                    "2026_04_01_000001_a_create_notes_comment",
+                    &[create, comment],
+                ),
+                ("2026_04_01_000002_b_table_comment", &[shops]),
+            ]),
+        ),
+        (
+            "short",
+            pretend_short(&[
+                (
+                    "2026_04_01_000001_a_create_notes_comment",
+                    &[create, comment],
+                ),
+                ("2026_04_01_000002_b_table_comment", &[shops]),
+            ]),
+        ),
+    ] {
+        let schema = example("mysql-schema.sql");
+        let output = kilit(
+            &[
+                "check",
+                "--schema",
+                schema.to_str().unwrap(),
+                "--format",
+                "json",
+            ],
+            &input,
+        );
+        let json = json_of(&output);
+        let first = statements_of(&json, 0);
+        assert_eq!(first[0]["impact"], "not_checked", "{form}");
+        assert_eq!(first[1]["impact"], "new_table", "{form}");
+        assert_eq!(first[1]["case"], "set-table-comment", "{form}");
+        let second = statements_of(&json, 1);
+        assert_eq!(second[0]["impact"], "writes_continue", "{form}");
+        assert_eq!(second[0]["algorithm"], "INPLACE", "{form}");
+        assert_eq!(output.status.code(), Some(0), "{form}");
+    }
+}
+
+// Each input is a session of its own. `kilit check a.sql b.sql` runs like
+// `mysql < a.sql` and `mysql < b.sql`: a session SET in a.sql does not reach
+// b.sql, and a SET GLOBAL in a.sql is b.sql's starting value. The tables
+// carry over: DDL is not per session. One --pretend output is one `artisan
+// migrate`, so one session for all its migrations.
+
+const FILE_CHECKS_NOTE: &str = "assumes foreign_key_checks is ON, the MySQL default: an earlier \
+     file sets it, but each file runs in a new session, and nothing in this one sets it before \
+     this statement";
+const FILE_CHECKS_GLOBAL: &str = "an earlier file sets foreign_key_checks globally, and each \
+     file runs in a new session, which starts with the global value";
+const FILE_OLD_ALTER_NOTE: &str = "assumes old_alter_table is OFF, the MySQL default: an earlier \
+     file sets it, but each file runs in a new session, and nothing in this one sets it before \
+     this statement";
+const FILE_OLD_ALTER_REASON: &str = "an earlier file sets old_alter_table globally or in a form \
+     kilit cannot read, and each file runs in a new session, which starts with the global \
+     value; with it ON MySQL copies the table";
+const FILE_BINARY_LOG_NOTE: &str = "assumes the binary log is on with binlog_format = ROW, the \
+     MySQL default: an earlier file sets sql_log_bin, but each file runs in a new session, and \
+     nothing in this one sets it before this statement";
+const FILE_BINARY_LOG_REASON: &str = "a statement before this one sets sql_log_bin globally in \
+     an earlier file, and the lab has measured expression defaults only with the binary log on";
+
+/// A column of the wrong type for a key to `users`, and the key.
+const ADD_REFUND_REF: &str = "alter table orders add refund_ref int not null;";
+const ADD_REFUND_KEY: &str = "alter table orders add constraint orders_refund_ref_foreign \
+     foreign key (refund_ref) references users (id);";
+
+/// Writes the files into a folder of their own and returns their paths.
+fn session_files(folder: &str, files: &[(&str, &str)]) -> Vec<PathBuf> {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(folder);
+    std::fs::create_dir_all(&dir).unwrap();
+    files
+        .iter()
+        .map(|(name, content)| {
+            let path = dir.join(name);
+            std::fs::write(&path, content).unwrap();
+            path
+        })
+        .collect()
+}
+
+/// kilit's JSON for `files` against the example's tables, and the exit status.
+fn files_json(files: &[PathBuf], extra: &[&str], stdin: &str) -> (serde_json::Value, Option<i32>) {
+    let schema = example("mysql-schema.sql");
+    let mut args = vec![
+        "check",
+        "--schema",
+        schema.to_str().unwrap(),
+        "--format",
+        "json",
+    ];
+    args.extend(extra);
+    args.extend(files.iter().map(|path| path.to_str().unwrap()));
+    let output = kilit(&args, stdin);
+    (json_of(&output), output.status.code())
+}
+
+/// The last statement of source `source`.
+fn last_of(json: &serde_json::Value, source: usize) -> serde_json::Value {
+    statements_of(json, source).pop().unwrap()
+}
+
+#[test]
+fn a_session_set_in_one_file_does_not_reach_the_next_file() {
+    let files = session_files(
+        "session_checks_off",
+        &[
+            (
+                "a.sql",
+                &format!("SET foreign_key_checks = 0;\n{ADD_REFUND_REF}\n"),
+            ),
+            ("b.sql", &format!("{ADD_REFUND_KEY}\n")),
+        ],
+    );
+    // The key is checked with the checks on, as MySQL does in the new
+    // session; the tables carried over (refund_ref is an int).
+    for strict in [false, true] {
+        let extra: &[&str] = if strict { &["--strict"] } else { &[] };
+        let (json, code) = files_json(&files, extra, "");
+        let key = last_of(&json, 1);
+        assert_eq!(key["impact"], "fails");
+        assert_eq!(key["error"], 3780);
+        assert!(
+            notes_of(&key).contains(&FILE_CHECKS_NOTE.to_owned()),
+            "{key}"
+        );
+        assert!(
+            !notes_of(&key).iter().any(|note| note == ASSUMES_CHECKS_ON),
+            "{key}"
+        );
+        assert_eq!(json["exit_code"], 1);
+        assert_eq!(code, Some(1));
+    }
+    let mut args = vec!["check", "--schema"];
+    let schema = example("mysql-schema.sql");
+    args.push(schema.to_str().unwrap());
+    args.extend(files.iter().map(|path| path.to_str().unwrap()));
+    let text = stdout(&kilit(&args, ""));
+    assert!(
+        text.contains(&format!("    - {FILE_CHECKS_NOTE}\n")),
+        "{text}"
+    );
+    // The same two files joined into one are one session: the checks are off,
+    // the key's mismatch is something kilit can see, and the answer is unknown.
+    let joined = session_files(
+        "session_checks_off_joined",
+        &[(
+            "ab.sql",
+            &format!("SET foreign_key_checks = 0;\n{ADD_REFUND_REF}\n{ADD_REFUND_KEY}\n"),
+        )],
+    );
+    let (json, _) = files_json(&joined, &[], "");
+    let key = last_of(&json, 0);
+    assert_eq!(key["impact"], "unknown");
+    assert!(
+        !notes_of(&key).contains(&FILE_CHECKS_NOTE.to_owned()),
+        "{key}"
+    );
+}
+
+#[test]
+fn a_set_at_the_very_end_of_a_file_does_not_reach_the_next_file() {
+    let files = session_files(
+        "session_checks_off_at_the_end",
+        &[
+            (
+                "a.sql",
+                &format!("{ADD_REFUND_REF}\nSET foreign_key_checks = 0"),
+            ),
+            ("b.sql", &format!("{ADD_REFUND_KEY}\n")),
+        ],
+    );
+    let (json, _) = files_json(&files, &[], "");
+    let key = last_of(&json, 1);
+    assert_eq!(key["error"], 3780);
+    assert!(
+        notes_of(&key).contains(&FILE_CHECKS_NOTE.to_owned()),
+        "{key}"
+    );
+}
+
+#[test]
+fn a_file_that_sets_the_checks_again_is_as_before() {
+    let files = session_files(
+        "session_checks_set_again",
+        &[
+            (
+                "a.sql",
+                &format!("SET foreign_key_checks = 0;\n{ADD_REFUND_REF}\n"),
+            ),
+            (
+                "b.sql",
+                &format!("SET foreign_key_checks = 1;\n{ADD_REFUND_KEY}\n"),
+            ),
+        ],
+    );
+    let (json, _) = files_json(&files, &[], "");
+    let key = last_of(&json, 1);
+    assert_eq!(key["error"], 3780);
+    // Nothing is assumed: this file sets them itself.
+    assert!(
+        !notes_of(&key)
+            .iter()
+            .any(|note| note.contains("assumes foreign_key_checks")),
+        "{key}"
+    );
+}
+
+#[test]
+fn a_global_foreign_key_checks_in_one_file_makes_the_checks_unknown_in_every_later_file() {
+    for set in [
+        "SET GLOBAL foreign_key_checks = 0",
+        "SET PERSIST foreign_key_checks = 0",
+        "SET @@global.foreign_key_checks = 0",
+    ] {
+        let files = session_files(
+            "session_checks_global",
+            &[
+                ("a.sql", &format!("{set};\n{ADD_REFUND_REF}\n")),
+                ("b.sql", &format!("{ADD_REFUND_KEY}\n")),
+                (
+                    "c.sql",
+                    "alter table orders add other_ref int not null;
+                     alter table orders add constraint orders_other_ref_foreign \
+                     foreign key (other_ref) references users (id);\n",
+                ),
+                (
+                    "d.sql",
+                    "SET foreign_key_checks = 1;\nalter table orders add constraint \
+                     orders_refund_ref_again foreign key (refund_ref) references users (id);\n",
+                ),
+            ],
+        );
+        for strict in [false, true] {
+            let extra: &[&str] = if strict { &["--strict"] } else { &[] };
+            let (json, code) = files_json(&files, extra, "");
+            for source in [1, 2] {
+                let key = last_of(&json, source);
+                assert_eq!(key["impact"], "unknown", "{set}: file {source}");
+                assert_eq!(key["reason"], FILE_CHECKS_GLOBAL, "{set}: file {source}");
+            }
+            // A session SET in the file brings the measured answer back.
+            let key = last_of(&json, 3);
+            assert_eq!(key["impact"], "fails", "{set}");
+            assert_eq!(key["error"], 3780, "{set}");
+            assert_eq!(code, Some(1), "{set}");
+        }
+    }
+    // Nothing fails: only unknown, and only strict exits with 1.
+    let files = session_files(
+        "session_checks_global_only_unknown",
+        &[
+            (
+                "a.sql",
+                &format!("SET GLOBAL foreign_key_checks = 0;\n{ADD_REFUND_REF}\n"),
+            ),
+            (
+                "b.sql",
+                "alter table orders add constraint orders_refund_ref_foreign foreign key \
+                 (user_id) references users (id);\n",
+            ),
+        ],
+    );
+    let (json, code) = files_json(&files, &[], "");
+    assert_eq!(last_of(&json, 1)["impact"], "unknown");
+    assert_eq!(code, Some(0));
+    let (_, code) = files_json(&files, &["--strict"], "");
+    assert_eq!(code, Some(1));
+}
+
+#[test]
+fn old_alter_table_on_in_one_file_is_off_in_the_next_and_the_note_says_so() {
+    let files = session_files(
+        "session_old_alter_table",
+        &[
+            ("a.sql", "SET old_alter_table = ON;\n"),
+            (
+                "b.sql",
+                "alter table orders add coupon varchar(255) null;
+                 alter table orders add coupon2 varchar(255) null, algorithm=instant;\n",
+            ),
+        ],
+    );
+    let (json, code) = files_json(&files, &[], "");
+    let statements = statements_of(&json, 1);
+    // The normal answer, with a note.
+    assert_eq!(statements[0]["impact"], "writes_continue");
+    assert_eq!(statements[0]["algorithm"], "INSTANT");
+    assert!(
+        notes_of(&statements[0]).contains(&FILE_OLD_ALTER_NOTE.to_owned()),
+        "{}",
+        statements[0]
+    );
+    // A written ALGORITHM wins over the setting: no note.
+    assert_eq!(statements[1]["algorithm"], "INSTANT");
+    assert!(
+        !notes_of(&statements[1])
+            .iter()
+            .any(|note| note.contains("old_alter_table")),
+        "{}",
+        statements[1]
+    );
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn old_alter_table_set_globally_or_unreadably_in_one_file_is_unknown_in_the_next() {
+    for set in [
+        "SET GLOBAL old_alter_table = ON",
+        "SET PERSIST old_alter_table = ON",
+        "SET @@global.old_alter_table = ON",
+    ] {
+        let files = session_files(
+            "session_old_alter_table_global",
+            &[
+                ("a.sql", &format!("{set};\n")),
+                (
+                    "b.sql",
+                    "alter table orders add coupon varchar(255) null;\n",
+                ),
+            ],
+        );
+        let (json, code) = files_json(&files, &[], "");
+        let statement = last_of(&json, 1);
+        assert_eq!(statement["impact"], "unknown", "{set}");
+        assert_eq!(statement["reason"], FILE_OLD_ALTER_REASON, "{set}");
+        assert_eq!(code, Some(0), "{set}");
+        let (_, code) = files_json(&files, &["--strict"], "");
+        assert_eq!(code, Some(1), "{set}");
+    }
+}
+
+#[test]
+fn sql_log_bin_set_in_one_file_changes_the_binary_log_note_of_the_next() {
+    let default = "alter table orders add token char(36) not null default (UUID());\n";
+    let files = session_files(
+        "session_sql_log_bin",
+        &[("a.sql", "SET sql_log_bin = 0;\n"), ("b.sql", default)],
+    );
+    let (json, code) = files_json(&files, &[], "");
+    let statement = last_of(&json, 1);
+    assert_eq!(statement["impact"], "fails");
+    assert_eq!(statement["error"], 1674);
+    assert!(
+        notes_of(&statement).contains(&FILE_BINARY_LOG_NOTE.to_owned()),
+        "{statement}"
+    );
+    assert!(
+        !notes_of(&statement).contains(&ASSUMES_BINARY_LOG.to_owned()),
+        "{statement}"
+    );
+    assert_eq!(code, Some(1));
+    // Without an earlier file's SET, the plain note.
+    let (json, _) = files_json(
+        &session_files("session_sql_log_bin_plain", &[("b.sql", default)]),
+        &[],
+        "",
+    );
+    assert!(
+        notes_of(&last_of(&json, 0)).contains(&ASSUMES_BINARY_LOG.to_owned()),
+        "{json}"
+    );
+    // A GLOBAL one makes the expression default unknown in the next file.
+    let files = session_files(
+        "session_sql_log_bin_global",
+        &[
+            ("a.sql", "SET GLOBAL sql_log_bin = 1;\n"),
+            ("b.sql", default),
+        ],
+    );
+    let (json, code) = files_json(&files, &[], "");
+    let statement = last_of(&json, 1);
+    assert_eq!(statement["impact"], "unknown");
+    assert_eq!(statement["reason"], FILE_BINARY_LOG_REASON);
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn settings_that_are_scanned_anywhere_earlier_keep_looking_across_files() {
+    let uuid = "alter table orders add token char(36) not null default (UUID());\n";
+    // binlog_format: the lab measured the expression defaults with ROW.
+    let files = session_files(
+        "session_binlog_format",
+        &[
+            ("a.sql", "SET binlog_format = 'STATEMENT';\n"),
+            ("b.sql", uuid),
+        ],
+    );
+    let (json, _) = files_json(&files, &[], "");
+    let statement = last_of(&json, 1);
+    assert_eq!(statement["impact"], "unknown");
+    assert!(
+        statement["reason"]
+            .as_str()
+            .unwrap()
+            .contains("binlog_format"),
+        "{statement}"
+    );
+    // restrict_fk_on_non_standard_key: the index rules are unknown.
+    let files = session_files(
+        "session_restrict_fk",
+        &[
+            ("a.sql", "SET restrict_fk_on_non_standard_key = OFF;\n"),
+            ("b.sql", FOREIGN_KEY_TO_NAME),
+        ],
+    );
+    let (json, _) = files_json(&files, &[], "");
+    assert_eq!(last_of(&json, 1)["impact"], "unknown");
+    // innodb_default_row_format: a table without a row format is unknown.
+    let files = session_files(
+        "session_row_format",
+        &[
+            ("a.sql", "SET GLOBAL innodb_default_row_format = COMPACT;\n"),
+            (
+                "b.sql",
+                "alter table orders add coupon varchar(255) null;\n",
+            ),
+        ],
+    );
+    let (json, _) = files_json(&files, &[], "");
+    assert_eq!(last_of(&json, 1)["impact"], "unknown");
+}
+
+#[test]
+fn standard_input_after_a_file_is_a_session_of_its_own() {
+    let files = session_files(
+        "session_stdin",
+        &[(
+            "a.sql",
+            &format!("SET foreign_key_checks = 0;\n{ADD_REFUND_REF}\n"),
+        )],
+    );
+    let mut all = files.clone();
+    all.push(PathBuf::from("-"));
+    let (json, _) = files_json(&all, &[], &format!("{ADD_REFUND_KEY}\n"));
+    assert_eq!(json["sources"].as_array().unwrap().len(), 2);
+    let key = last_of(&json, 1);
+    assert_eq!(key["error"], 3780);
+    assert!(
+        notes_of(&key).contains(&FILE_CHECKS_NOTE.to_owned()),
+        "{key}"
+    );
+}
+
+#[test]
+fn a_pretend_file_and_a_sql_file_are_two_sessions() {
+    let pretend = pretend_long(&[(
+        "2026_04_02_000001_add_refund_ref_to_orders_table",
+        &[
+            "SET FOREIGN_KEY_CHECKS=0;",
+            "alter table `orders` add `refund_ref` int not null",
+        ],
+    )]);
+    let files = session_files(
+        "session_pretend_then_sql",
+        &[
+            ("1_pretend.txt", &pretend),
+            ("2_key.sql", &format!("{ADD_REFUND_KEY}\n")),
+        ],
+    );
+    let (json, _) = files_json(&files, &[], "");
+    let key = last_of(&json, 1);
+    assert_eq!(key["error"], 3780);
+    assert!(
+        notes_of(&key).contains(&FILE_CHECKS_NOTE.to_owned()),
+        "{key}"
+    );
+    // And the other way round: a SQL file, then Laravel's output.
+    let pretend_key = pretend_long(&[(
+        "2026_04_02_000002_add_refund_key_to_orders_table",
+        &[
+            "alter table `orders` add constraint `orders_refund_ref_foreign` foreign key (`refund_ref`) references `users` (`id`)",
+        ],
+    )]);
+    let files = session_files(
+        "session_sql_then_pretend",
+        &[
+            (
+                "1_set.sql",
+                &format!("SET foreign_key_checks = 0;\n{ADD_REFUND_REF}\n"),
+            ),
+            ("2_pretend.txt", &pretend_key),
+        ],
+    );
+    let (json, _) = files_json(&files, &[], "");
+    let key = last_of(&json, 1);
+    assert_eq!(key["error"], 3780);
+    assert!(
+        notes_of(&key).contains(&FILE_CHECKS_NOTE.to_owned()),
+        "{key}"
+    );
+}
+
+#[test]
+fn two_migrations_in_one_pretend_file_are_one_session() {
+    // Schema::disableForeignKeyConstraints() in the first migration is still
+    // in force in the second: one `artisan migrate`, one connection.
+    let pretend = pretend_long(&[
+        (
+            "2026_04_02_000001_add_refund_ref_to_orders_table",
+            &[
+                "SET FOREIGN_KEY_CHECKS=0;",
+                "alter table `orders` add `refund_ref` int not null",
+            ],
+        ),
+        (
+            "2026_04_02_000002_add_refund_key_to_orders_table",
+            &[
+                "alter table `orders` add constraint `orders_refund_ref_foreign` foreign key (`refund_ref`) references `users` (`id`)",
+            ],
+        ),
+    ]);
+    let files = session_files("session_pretend_two_migrations", &[("p.txt", &pretend)]);
+    let (json, _) = files_json(&files, &[], "");
+    let key = last_of(&json, 1);
+    // The checks are off and the mismatch is visible: unknown, not a failure,
+    // and no note about an earlier file.
+    assert_eq!(key["impact"], "unknown");
+    assert!(
+        !notes_of(&key).contains(&FILE_CHECKS_NOTE.to_owned()),
+        "{key}"
+    );
+}
+
+#[test]
+fn the_tables_carry_over_from_one_file_to_the_next() {
+    let files = session_files(
+        "session_tables_carry_over",
+        &[
+            (
+                "a.sql",
+                "create table refunds (id bigint unsigned not null auto_increment primary key, \
+                 order_ref int not null);\n",
+            ),
+            (
+                "b.sql",
+                "alter table refunds add constraint refunds_order_ref_foreign foreign key \
+                 (order_ref) references orders (id);\n",
+            ),
+        ],
+    );
+    let (json, code) = files_json(&files, &[], "");
+    let key = last_of(&json, 1);
+    assert_eq!(key["impact"], "fails");
+    assert_eq!(key["error"], 3780);
+    assert_eq!(code, Some(1));
+}
+
+#[test]
+fn the_help_of_check_says_each_file_runs_in_a_session_of_its_own() {
+    let output = kilit(&["check", "--help"], "");
+    let help = stdout(&output)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(help.contains("in a session of its own"), "{help}");
+    assert_eq!(output.status.code(), Some(0));
+}
+
+// Regression tests for what the step 11b review found.
+
+#[test]
+fn a_global_set_with_a_comment_after_set_still_reaches_the_next_file() {
+    let files = session_files(
+        "session_checks_global_comment",
+        &[
+            (
+                "a.sql",
+                &format!("SET/**/GLOBAL foreign_key_checks = 0;\n{ADD_REFUND_REF}\n"),
+            ),
+            ("b.sql", &format!("{ADD_REFUND_KEY}\n")),
+        ],
+    );
+    let (json, _) = files_json(&files, &[], "");
+    let key = last_of(&json, 1);
+    assert_eq!(key["impact"], "unknown");
+    assert_eq!(key["reason"], FILE_CHECKS_GLOBAL);
+}
+
+#[test]
+fn a_temporary_table_ends_with_its_file_s_session() {
+    let schema = session_files(
+        "temporary_schema",
+        &[(
+            "schema.sql",
+            "CREATE TABLE users (
+    id   BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE orders (
+    id      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT UNSIGNED NOT NULL,
+    amount  INT NOT NULL,
+    email   VARCHAR(255) NULL,
+    note    VARCHAR(50) NULL,
+    CONSTRAINT orders_user FOREIGN KEY (user_id) REFERENCES users (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+",
+        )],
+    );
+    let create = "CREATE TEMPORARY TABLE orders (id INT PRIMARY KEY, v INT) ENGINE=InnoDB;\n";
+    let drop = "ALTER TABLE orders DROP COLUMN user_id;\n";
+    let run = |folder: &str, files: &[(&str, &str)]| {
+        let paths = session_files(folder, files);
+        let mut args = vec!["check", "--format", "json", "--schema"];
+        args.push(schema[0].to_str().unwrap());
+        args.extend(paths.iter().map(|path| path.to_str().unwrap()));
+        json_of(&kilit(&args, ""))
+    };
+    // td.sql alone, and after tc.sql: the real orders, 1828.
+    let alone = run("temporary_alone", &[("td.sql", drop)]);
+    let after = run(
+        "temporary_two_files",
+        &[("tc.sql", create), ("td.sql", drop)],
+    );
+    for (json, source) in [(&alone, 0), (&after, 1)] {
+        let statement = last_of(json, source);
+        assert_eq!(statement["impact"], "fails", "{statement}");
+        assert_eq!(statement["error"], 1828, "{statement}");
+        assert_eq!(statement["case"], "drop-column", "{statement}");
+    }
+    // In one file the temporary table still hides the real one.
+    let one = run(
+        "temporary_one_file",
+        &[("t.sql", &format!("{create}{drop}"))],
+    );
+    let statement = last_of(&one, 0);
+    assert_ne!(statement["error"], 1828, "{statement}");
 }

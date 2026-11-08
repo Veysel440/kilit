@@ -19,6 +19,8 @@ pub struct Input {
     /// Some input holds a `/*! ... */` comment, which MySQL runs. kilit does
     /// not see a statement made of one alone.
     pub runs_comments: bool,
+    /// How many inputs were read: files, or standard input.
+    sessions: usize,
 }
 
 /// Statements that belong together: one Laravel migration, or one SQL file.
@@ -30,6 +32,10 @@ pub struct Source {
     /// Which of `statements` is the first that asks the database something,
     /// in a Laravel migration.
     pub first_read: Option<usize>,
+    /// The input it comes from, counting from 0: each SQL file runs in a
+    /// session of its own, and so does each `migrate --pretend` output, as
+    /// one `artisan migrate` uses one connection.
+    pub session: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
@@ -58,6 +64,7 @@ impl Input {
             from_laravel: false,
             laravel_errors: Vec::new(),
             runs_comments: false,
+            sessions: 0,
         };
         let mut stdin_read = false;
         for file in files {
@@ -79,6 +86,8 @@ impl Input {
     }
 
     fn add(&mut self, name: String, text: &str) {
+        let session = self.sessions;
+        self.sessions += 1;
         self.runs_comments |= text.contains("/*!");
         match read_pretend(text) {
             Some(pretend) => {
@@ -89,6 +98,7 @@ impl Input {
                         kind: SourceKind::LaravelMigration,
                         statements: migration.statements,
                         first_read: migration.first_read,
+                        session,
                     });
                 }
                 for line in pretend.unreadable {
@@ -106,6 +116,7 @@ impl Input {
                 kind: SourceKind::Sql,
                 statements: parse(text),
                 first_read: None,
+                session,
             }),
         }
     }

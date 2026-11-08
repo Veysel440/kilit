@@ -1,0 +1,2 @@
+title = "Set the table comment"
+operation = "COMMENT = 'Orders placed by users'"
