@@ -171,10 +171,11 @@ impl<'a> Report<'a> {
         // Rows may come from lines kilit could not read, or from a statement
         // inside a `/*! */` comment, which kilit does not see.
         let rows_unseen = !input.unreadable.is_empty() || input.runs_comments;
-        let on_empty_tables = on_empty_tables(&statements)
+        let on_empty_tables = on_empty_tables(&statements, &findings)
             .into_iter()
             .map(|on_empty_table| on_empty_table && !rows_unseen);
 
+        let locked_in_order = locked_tables_of(&statements, &findings);
         let mut checked = findings
             .into_iter()
             .zip(impacts)
@@ -213,13 +214,11 @@ impl<'a> Report<'a> {
 
         // No transaction can be using a table the input created, whatever
         // kilit says about the statement; a DROP TABLE waits although kilit
-        // does not check it.
+        // does not check it. Names compare exactly: `orders` and `ORDERS`
+        // may be two tables.
         let mut locked_tables: Vec<String> = Vec::new();
-        for table in locked_tables_of(&statements).into_iter().flatten() {
-            if !locked_tables
-                .iter()
-                .any(|known| known.eq_ignore_ascii_case(&table))
-            {
+        for table in locked_in_order.into_iter().flatten() {
+            if !locked_tables.contains(&table) {
                 locked_tables.push(table);
             }
         }

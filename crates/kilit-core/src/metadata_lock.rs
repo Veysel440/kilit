@@ -8,7 +8,8 @@
 //! server it measures, with one ALTER per algorithm and one statement of
 //! each kind in [`STATEMENTS_THAT_WAIT`] (`crates/kilit-lab/src/facts.rs`).
 
-use crate::impact::{follow, key};
+use crate::check::Finding;
+use crate::impact::{as_followed, follow, key};
 use crate::parse::{
     alters_named_table, drops_temporary_table, parse, truncated_table, with_table_for_tables,
 };
@@ -85,21 +86,25 @@ pub fn metadata_lock_warning() -> String {
 /// For each of `statements`, in the same order, the tables whose metadata
 /// lock it waits for and that may exist before the input: every table it
 /// names that no earlier statement of `statements` created, as
-/// [`crate::on_new_tables`] follows them. An ALTER TABLE (also `CREATE
+/// [`crate::on_new_tables`] follows them from `findings`, what
+/// [`check`](crate::check) gave for `statements`. An ALTER TABLE (also `CREATE
 /// INDEX` and `DROP INDEX`) names its table, also when kilit could not read
 /// the rest; a DROP TABLE (also `DROP TABLES`) each table, unless it is
 /// `DROP TEMPORARY`; a RENAME TABLE (also `RENAME TABLES`) each old name; a
 /// TRUNCATE TABLE its table. Other statements name none.
-pub fn locked_tables(statements: &[Statement]) -> Vec<Vec<String>> {
+pub fn locked_tables(statements: &[Statement], findings: &[Finding]) -> Vec<Vec<String>> {
     let mut new_tables: Vec<String> = Vec::new();
     statements
         .iter()
-        .map(|statement| {
+        .zip(findings)
+        .map(|(statement, finding)| {
             let tables = named_tables(&statement.kind, &statement.sql)
                 .into_iter()
                 .filter(|table| !new_tables.contains(&key(table)))
                 .collect();
-            follow(statement, &mut new_tables);
+            if let Some(followed) = as_followed(statement, finding) {
+                follow(&followed, &mut new_tables);
+            }
             tables
         })
         .collect()
@@ -179,7 +184,36 @@ mod tests {
     }
 
     fn locked(sql: &str) -> Vec<Vec<String>> {
-        locked_tables(&parse(sql))
+        let statements = parse(sql);
+        let results = crate::Knowledge::built_in().server("mysql-8.4.13").unwrap();
+        let findings = crate::check(&statements, &crate::Schema::new(), results);
+        locked_tables(&statements, &findings)
+    }
+
+    #[test]
+    fn a_table_named_in_another_letter_case_than_a_new_one_may_exist() {
+        // ALTER TABLE T1 fails with 0, so the migration goes on with 1 or 2,
+        // where T1 is the new t1; kilit still names T1. RENAME TABLE t1 TO
+        // T1 fails with 1 (1050), so it goes on with 0: T1 is the new table,
+        // and t1 is a name no new table has.
+        assert_eq!(
+            locked(
+                "CREATE TABLE t1 (id INT);
+                 ALTER TABLE T1 ADD COLUMN a INT;
+                 ALTER TABLE t1 ADD COLUMN b INT;
+                 RENAME TABLE t1 TO T1;
+                 ALTER TABLE T1 ADD COLUMN c INT;
+                 ALTER TABLE t1 ADD COLUMN d INT;"
+            ),
+            [
+                vec![],
+                vec!["T1".to_owned()],
+                vec![],
+                vec![],
+                vec![],
+                vec!["t1".to_owned()]
+            ]
+        );
     }
 
     #[test]

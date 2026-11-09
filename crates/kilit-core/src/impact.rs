@@ -4,8 +4,11 @@
 
 use serde::Serialize;
 
-use crate::check::{Finding, Prediction};
+use std::borrow::Cow;
+
+use crate::check::{Finding, LetterCase, Prediction};
 use crate::results::{Verdict, Writes};
+use crate::schema::{folded, with_table_renamed};
 use crate::statement::{Operation, Statement, StatementKind};
 
 /// What a statement means for the application while it runs.
@@ -38,7 +41,7 @@ pub enum Impact {
 /// cannot tell stays [`Impact::Unknown`] there too: nothing waits for a new
 /// table, but the statement may still fail.
 pub fn impacts(statements: &[Statement], findings: &[Finding]) -> Vec<Impact> {
-    on_new_tables(statements)
+    on_new_tables(statements, findings)
         .into_iter()
         .zip(findings)
         .map(|(on_new_table, finding)| match &finding.prediction {
@@ -70,22 +73,31 @@ pub fn impacts(statements: &[Statement], findings: &[Finding]) -> Vec<Impact> {
 /// `CREATE TABLE IF NOT EXISTS` does nothing when the table is already there,
 /// so it does not count; neither does `CREATE TABLE ... LIKE` or
 /// `... AS SELECT`, which kilit does not read yet. Names compare without
-/// quotes and in any case, as the schema compares them; `shop.orders` and
-/// `orders` are different names.
+/// quotes and exactly, as the schema compares them; `shop.orders` and
+/// `orders` are different names, and so are `orders` and `ORDERS`. A
+/// statement that names a table in another letter case (see
+/// [`Finding::letter_case`]) is on no new table: with lower_case_table_names
+/// = 1 or 2 its table may be one that exists. It is followed as it runs
+/// under the setting the migration goes on with, if kilit can tell which.
 ///
 /// Only `ALTER TABLE` (with `CREATE INDEX` and `DROP INDEX`), `RENAME TABLE`,
 /// and a statement kilit cannot read that names a table count as changing
 /// one. Any other statement, such as the `CREATE TABLE` itself, a
 /// `DROP TABLE` or an `INSERT`, gives `false`.
-pub fn on_new_tables(statements: &[Statement]) -> Vec<bool> {
+/// `findings` are what [`check`](crate::check) gave for `statements`.
+pub fn on_new_tables(statements: &[Statement], findings: &[Finding]) -> Vec<bool> {
     let mut new_tables: Vec<String> = Vec::new();
     statements
         .iter()
-        .map(|statement| {
+        .zip(findings)
+        .map(|(statement, finding)| {
             let changed = changed_tables(statement);
-            let on_new_table =
-                !changed.is_empty() && changed.iter().all(|table| new_tables.contains(&key(table)));
-            follow(statement, &mut new_tables);
+            let on_new_table = finding.letter_case.is_none()
+                && !changed.is_empty()
+                && changed.iter().all(|table| new_tables.contains(&key(table)));
+            if let Some(followed) = as_followed(statement, finding) {
+                follow(&followed, &mut new_tables);
+            }
             on_new_table
         })
         .collect()
@@ -97,19 +109,25 @@ pub fn on_new_tables(statements: &[Statement]) -> Vec<bool> {
 /// only, if its text names the table, as INSERT, UPDATE and LOAD DATA do.
 /// CALL and EXECUTE run statements kilit does not see, which may put rows
 /// in any table; so may any such statement after one that names a trigger,
-/// a function, a procedure or an event, which may have created one.
-pub fn on_empty_tables(statements: &[Statement]) -> Vec<bool> {
+/// a function, a procedure or an event, which may have created one. A
+/// statement that names a table in another letter case makes no table
+/// empty, as for [`on_new_tables`]; the text of one that may put rows in
+/// names a table in any letter case.
+pub fn on_empty_tables(statements: &[Statement], findings: &[Finding]) -> Vec<bool> {
     let mut empty_tables: Vec<String> = Vec::new();
     let mut runs_hidden_code = false;
     statements
         .iter()
-        .map(|statement| {
+        .zip(findings)
+        .map(|(statement, finding)| {
             let on_empty_table = match &statement.kind {
-                StatementKind::Alter(alter) => empty_tables.contains(&key(&alter.table)),
+                StatementKind::Alter(alter) if finding.letter_case.is_none() => {
+                    empty_tables.contains(&key(&alter.table))
+                }
                 _ => false,
             };
             if may_add_rows(statement) {
-                let sql = statement.sql.to_lowercase();
+                let sql = folded(&statement.sql);
                 if runs_hidden_code || runs_unseen_statements(&sql) {
                     empty_tables.clear();
                 }
@@ -120,10 +138,12 @@ pub fn on_empty_tables(statements: &[Statement]) -> Vec<bool> {
                 // `shop.orders` and `orders` both name orders.
                 empty_tables.retain(|table| {
                     let name = table.rsplit('.').next().unwrap_or(table);
-                    !sql.contains(name)
+                    !sql.contains(&folded(name))
                 });
             }
-            follow(statement, &mut empty_tables);
+            if let Some(followed) = as_followed(statement, finding) {
+                follow(&followed, &mut empty_tables);
+            }
             on_empty_table
         })
         .collect()
@@ -169,6 +189,22 @@ fn changed_tables(statement: &Statement) -> Vec<&str> {
     }
 }
 
+/// `statement` as kilit follows it for `finding`: under the setting of
+/// lower_case_table_names the migration goes on with, when it names a
+/// table in another letter case. `None` when kilit cannot tell which.
+pub(crate) fn as_followed<'s>(
+    statement: &'s Statement,
+    finding: &Finding,
+) -> Option<Cow<'s, Statement>> {
+    match &finding.letter_case {
+        None | Some(LetterCase::AsWritten) => Some(Cow::Borrowed(statement)),
+        Some(LetterCase::SameTable { written, known }) => {
+            Some(Cow::Owned(with_table_renamed(statement, written, known)))
+        }
+        Some(LetterCase::Unclear) => None,
+    }
+}
+
 /// Keeps `new_tables` up to date with what `statement` creates, renames and
 /// drops.
 pub(crate) fn follow(statement: &Statement, new_tables: &mut Vec<String>) {
@@ -201,9 +237,9 @@ pub(crate) fn follow(statement: &Statement, new_tables: &mut Vec<String>) {
     }
 }
 
-/// Table names in any case, as the schema compares them.
+/// Table names as written, as the schema compares them.
 pub(crate) fn key(name: &str) -> String {
-    name.to_lowercase()
+    name.to_owned()
 }
 
 #[cfg(test)]
@@ -268,7 +304,7 @@ mod tests {
                  RENAME TABLE drafts TO notes;
                  ALTER TABLE notes ADD FULLTEXT (note);
                  ALTER TABLE notes RENAME TO memos;
-                 ALTER TABLE MEMOS ADD FULLTEXT (note);
+                 ALTER TABLE memos ADD FULLTEXT (note);
                  DROP TABLE memos;
                  CREATE TABLE IF NOT EXISTS memos (id INT PRIMARY KEY, note TEXT);
                  ALTER TABLE memos ADD FULLTEXT (note);"
@@ -341,8 +377,15 @@ mod tests {
         }
     }
 
+    /// The findings for `statements` on a database kilit knows nothing of.
+    fn findings_of(statements: &[Statement]) -> Vec<Finding> {
+        let results = Knowledge::built_in().server("mysql-8.4.13").unwrap();
+        check(statements, &Schema::new(), results)
+    }
+
     fn on_new_tables_of(sql: &str) -> Vec<bool> {
-        on_new_tables(&parse(sql))
+        let statements = parse(sql);
+        on_new_tables(&statements, &findings_of(&statements))
     }
 
     #[test]
@@ -391,20 +434,89 @@ mod tests {
     }
 
     #[test]
-    fn table_names_compare_without_quotes_and_in_any_case() {
-        // On Linux, MySQL keeps `Events` and `events` apart by default
-        // (lower_case_table_names = 0). kilit does not, here or in the schema.
+    fn table_names_compare_without_quotes_and_exactly() {
+        // With lower_case_table_names = 0, the default on Linux, `events`
+        // is another table than `Events`; with 1 or 2 the same one. A name
+        // in another letter case is never on a new table.
         assert_eq!(
             on_new_tables_of(
                 "CREATE TABLE `Events` (id INT PRIMARY KEY);
-                 ALTER TABLE events ADD COLUMN a INT;
-                 ALTER TABLE `EVENTS` ADD COLUMN b INT;
+                 ALTER TABLE Events ADD COLUMN a INT;
+                 ALTER TABLE events ADD COLUMN b INT;
+                 ALTER TABLE `EVENTS` ADD COLUMN c INT;
+                 ALTER TABLE `Events` ADD COLUMN d INT;
                  CREATE TABLE app.logs (id INT PRIMARY KEY);
-                 ALTER TABLE `app`.`LOGS` ADD COLUMN a INT;
-                 ALTER TABLE logs ADD COLUMN b INT;"
+                 ALTER TABLE `app`.`logs` ADD COLUMN a INT;
+                 ALTER TABLE `app`.`LOGS` ADD COLUMN b INT;
+                 ALTER TABLE logs ADD COLUMN c INT;"
             ),
-            [false, true, true, false, true, false]
+            [false, true, false, false, true, false, true, false, false]
         );
+    }
+
+    #[test]
+    fn a_table_created_or_renamed_in_another_letter_case_is_new_where_the_migration_goes_on() {
+        // With 1 or 2, CREATE TABLE T1 fails on t1 (1050), and so does
+        // RENAME TABLE t2 TO T2: the migration goes on only with 0, where
+        // T1 is a new table of its own and t2 is renamed T2. The statement
+        // itself is on no new table.
+        assert_eq!(
+            on_new_tables_of(
+                "CREATE TABLE t1 (id INT PRIMARY KEY);
+                 CREATE TABLE T1 (id INT PRIMARY KEY);
+                 ALTER TABLE t1 ADD COLUMN a INT;
+                 ALTER TABLE T1 ADD COLUMN a INT;
+                 ALTER TABLE t1 ADD COLUMN b INT;
+                 CREATE TABLE t2 (id INT PRIMARY KEY);
+                 RENAME TABLE t2 TO T2;
+                 ALTER TABLE T2 ADD COLUMN a INT;"
+            ),
+            [false, false, true, true, true, false, false, true]
+        );
+        assert_eq!(
+            on_empty_tables_of(
+                "CREATE TABLE t1 (id INT PRIMARY KEY);
+                 CREATE TABLE T1 (id INT PRIMARY KEY);
+                 ALTER TABLE t1 ADD COLUMN a INT;
+                 ALTER TABLE T1 ADD COLUMN a INT;
+                 ALTER TABLE t1 ADD COLUMN b INT;"
+            ),
+            [false, false, true, true, true]
+        );
+        // DROP TABLE IF EXISTS T3 runs with both settings and leaves t3 or
+        // not: kilit cannot tell, and t3 stays new as before.
+        assert_eq!(
+            on_new_tables_of(
+                "CREATE TABLE t3 (id INT PRIMARY KEY);
+                 DROP TABLE IF EXISTS T3;
+                 ALTER TABLE t3 ADD COLUMN a INT;"
+            ),
+            [false, false, true]
+        );
+    }
+
+    #[test]
+    fn rows_put_in_a_table_named_in_any_letter_case_count() {
+        // With 1 or 2, INSERT INTO T1 fills t1; ÇİZELGE is çizelge.
+        for insert in [
+            "INSERT INTO T1 VALUES (1)",
+            "INSERT INTO ÇİZELGE VALUES (1)",
+        ] {
+            let table = if insert.contains("T1") {
+                "t1"
+            } else {
+                "çizelge"
+            };
+            assert_eq!(
+                on_empty_tables_of(&format!(
+                    "CREATE TABLE {table} (id INT PRIMARY KEY);
+                     {insert};
+                     ALTER TABLE {table} ADD COLUMN a INT;"
+                )),
+                [false, false, false],
+                "{insert}"
+            );
+        }
     }
 
     #[test]
@@ -435,7 +547,8 @@ mod tests {
     }
 
     fn on_empty_tables_of(sql: &str) -> Vec<bool> {
-        on_empty_tables(&parse(sql))
+        let statements = parse(sql);
+        on_empty_tables(&statements, &findings_of(&statements))
     }
 
     #[test]

@@ -6117,10 +6117,10 @@ fn several_tables_in_one_drop_are_each_named_in_the_order_they_appear() {
 }
 
 #[test]
-fn a_table_named_twice_in_different_letter_case_is_named_once() {
+fn a_table_named_twice_is_named_once() {
     let (text, json, _) = lock_run(
         &[],
-        "truncate table orders; drop table if exists users, ORDERS;",
+        "truncate table orders; drop table if exists users, orders;",
     );
     assert_locked(&text, &json, &["orders", "users"]);
 }
@@ -6771,4 +6771,348 @@ fn a_check_clause_of_a_name_that_is_no_check_is_unknown_and_exits_with_3_only_wi
     assert_eq!(code, Some(0), "{text}");
     let (text, _, code) = text_and_json(&["--schema", schema, "--strict"], sql);
     assert_eq!(code, Some(3), "{text}");
+}
+
+// Step 14: a table name that differs from a known table only in letter case.
+// With lower_case_table_names = 0 (the default on Linux) it is another
+// table, with 1 or 2 the same one; kilit does not know the setting.
+
+const CASE_SCHEMA: &str = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `note` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  FULLTEXT KEY `ft_note` (`note`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+
+const CASE_REASON_ORDERS: &str = "kilit knows this table as orders. With lower_case_table_names = 0, \
+    the default on Linux, ORDERS is another table, and MySQL 8.0.46 and 8.4.13 refuse the \
+    statement when no table has that exact name; with 1 or 2, the defaults on Windows and \
+    macOS, it is the same table. With 0 the statement fails and the migration stops there, \
+    so kilit goes on as with 1 or 2, where ORDERS is orders.";
+
+#[test]
+fn a_table_name_in_another_letter_case_is_unknown_in_text_and_the_exit_status_stays_0() {
+    let schema = write_schema("step14_case_schema_text.sql", CASE_SCHEMA);
+    let schema = schema.to_str().unwrap();
+    // The exact name: the FULLTEXT index makes writes wait, exit 1.
+    let output = kilit(
+        &["check", "--schema", schema],
+        "alter table orders add coupon int null;",
+    );
+    let text = stdout(&output);
+    assert!(
+        text.contains("COPY, copies every row, writes wait"),
+        "{text}"
+    );
+    assert_eq!(output.status.code(), Some(1), "{text}");
+
+    // The name in capitals: no answer, and so no wait to fail on.
+    let sql = "alter table ORDERS add coupon int null;";
+    let output = kilit(&["check", "--schema", schema], sql);
+    let text = stdout(&output);
+    assert!(
+        text.contains(&format!(
+            "  line 1: alter table ORDERS add coupon int null\n    UNKNOWN: {CASE_REASON_ORDERS}\n"
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("COPY"), "{text}");
+    assert!(
+        text.contains("1 unknown statement is not counted in the exit status"),
+        "{text}"
+    );
+    assert_eq!(output.status.code(), Some(0), "{text}");
+    let output = kilit(&["check", "--schema", schema, "--strict"], sql);
+    assert_eq!(output.status.code(), Some(3), "{}", stdout(&output));
+}
+
+#[test]
+fn a_table_name_in_another_letter_case_is_unknown_in_json_and_only_strict_exits_with_3() {
+    let schema = write_schema("step14_case_schema_json.sql", CASE_SCHEMA);
+    let schema = schema.to_str().unwrap();
+    let exact = "alter table orders add coupon int null;";
+    let (_, json, code) = text_and_json(&["--schema", schema], exact);
+    assert_eq!(impacts_of(&json), ["writes_wait"]);
+    assert_eq!(code, Some(1));
+    assert_eq!(json["exit_code"], 1);
+
+    let sql = "alter table ORDERS add coupon int null;";
+    let (text, json, code) = text_and_json(&["--schema", schema], sql);
+    let statement = &json["sources"][0]["statements"][0];
+    assert_eq!(statement["impact"], "unknown", "{text}");
+    assert_eq!(statement["reason"], CASE_REASON_ORDERS, "{text}");
+    assert!(
+        statement.get("algorithm").is_none_or(|a| a.is_null()),
+        "{statement}"
+    );
+    assert_eq!(json["summary"]["unknown"], 1, "{text}");
+    assert_eq!(json["summary"]["writes_wait"], 0, "{text}");
+    assert_eq!(json["exit_code"], 0);
+    assert_eq!(code, Some(0), "{text}");
+
+    let (text, json, code) = text_and_json(&["--schema", schema, "--strict"], sql);
+    assert_eq!(json["exit_code"], 3);
+    assert_eq!(code, Some(3), "{text}");
+    assert_eq!(json["summary"]["unknown"], 1);
+}
+
+#[test]
+fn the_metadata_lock_warning_names_a_table_in_the_case_it_is_written() {
+    // Raw SQL: the name is ORDERS, so the warning says ORDERS.
+    let (text, json, code) = lock_run(&[], "alter table ORDERS add coupon int null;");
+    assert_locked(&text, &json, &["ORDERS"]);
+    assert_eq!(impacts_of(&json), ["unknown"], "{text}");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn the_metadata_lock_warning_names_both_spellings_when_both_are_written() {
+    let (text, json, _) = lock_run(
+        &[],
+        "alter table orders add coupon int null; alter table ORDERS add stock int null;",
+    );
+    assert_locked(&text, &json, &["orders", "ORDERS"]);
+    let (text, json, _) = lock_run(
+        &[],
+        "truncate table orders; drop table if exists users, ORDERS;",
+    );
+    assert_locked(&text, &json, &["orders", "users", "ORDERS"]);
+}
+
+#[test]
+fn a_table_created_in_the_input_is_still_named_in_the_warning_for_a_name_in_another_case() {
+    // t1 is new, T1 may be another table that exists: not "a new table".
+    let (text, json, code) = lock_run(
+        &[],
+        "create table t1 (id int primary key); alter table t1 add a int null; \
+         alter table T1 add b int null;",
+    );
+    assert_eq!(
+        impacts_of(&json),
+        ["not_checked", "new_table", "unknown"],
+        "{text}"
+    );
+    assert_locked(&text, &json, &["T1"]);
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn a_create_table_in_another_letter_case_is_unknown_and_the_next_alter_is_on_a_new_table() {
+    // orders is in the schema; CREATE TABLE ORDERS fails with 1 (1050), so
+    // kilit goes on as with 0: ORDERS is a table of its own, and the ALTER
+    // after it is on a new table, which no transaction can have used.
+    let (text, json, code) = lock_run(
+        &[],
+        "create table ORDERS (id int primary key); alter table ORDERS add a int null;",
+    );
+    assert_eq!(impacts_of(&json), ["unknown", "new_table"], "{text}");
+    assert_not_locked(&text, &json);
+    assert_eq!(code, Some(0));
+    // With IF NOT EXISTS both settings go on, with different tables: the
+    // ALTER stays unknown and the warning names the written name.
+    let (text, json, code) = lock_run(
+        &[],
+        "create table if not exists ORDERS (id int primary key); alter table ORDERS add a int null;",
+    );
+    assert_eq!(impacts_of(&json), ["unknown", "unknown"], "{text}");
+    assert_locked(&text, &json, &["ORDERS"]);
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn a_table_name_in_another_letter_case_without_a_schema_file_is_unknown_when_the_input_made_it() {
+    let sql = "create table t1 (id int primary key); alter table T1 add a int null;";
+    let (text, json, code) = text_and_json(&[], sql);
+    assert_eq!(impacts_of(&json), ["not_checked", "unknown"], "{text}");
+    assert_eq!(code, Some(0), "{text}");
+    let (_, json, code) = text_and_json(&["--strict"], sql);
+    assert_eq!(json["exit_code"], 3);
+    assert_eq!(code, Some(3));
+}
+
+#[test]
+fn laravel_dropping_and_creating_a_table_in_another_letter_case_exits_with_0_and_with_strict_3() {
+    // Schema::dropIfExists('ORDERS'); Schema::create('ORDERS', ...);
+    // $table->fullText('note'): the dump spells the table orders. The first
+    // two statements are unknown, and so is the third: the DROP IF EXISTS
+    // loses orders, so the CREATE is not certain to fail with 1.
+    let schema = write_schema("step14_case_schema_laravel.sql", CASE_SCHEMA);
+    let schema = schema.to_str().unwrap();
+    let sql = "drop table if exists ORDERS;
+create table ORDERS (id int primary key, note text);
+alter table ORDERS add fulltext (note);";
+    let (text, json, code) = text_and_json(&["--schema", schema], sql);
+    assert_eq!(
+        impacts_of(&json),
+        ["unknown", "unknown", "unknown"],
+        "{text}"
+    );
+    assert_eq!(json["summary"]["unknown"], 3, "{text}");
+    assert_eq!(json["exit_code"], 0, "{text}");
+    assert_eq!(code, Some(0), "{text}");
+    let (text, json, code) = text_and_json(&["--schema", schema, "--strict"], sql);
+    assert_eq!(json["exit_code"], 3, "{text}");
+    assert_eq!(code, Some(3), "{text}");
+}
+
+#[test]
+fn a_second_spelling_of_a_table_made_in_the_input_is_unknown_and_exits_with_0() {
+    let sql = "create table posts (id int primary key, body text);
+create table Posts (id int primary key, body text);
+alter table Posts add fulltext (body);";
+    let (text, json, code) = text_and_json(&[], sql);
+    // The second CREATE fails with 1 (1050), so Posts is a table of its own
+    // and the third statement is on a new table.
+    assert_eq!(
+        impacts_of(&json),
+        ["not_checked", "unknown", "new_table"],
+        "{text}"
+    );
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(json["exit_code"], 0);
+    let (_, json, code) = text_and_json(&["--strict"], sql);
+    assert_eq!(json["summary"]["unknown"], 1);
+    assert_eq!(json["exit_code"], 3);
+    assert_eq!(code, Some(3));
+}
+
+#[test]
+fn a_temporary_table_in_another_letter_case_does_not_hide_the_table_in_the_next_file() {
+    // a.sql: CREATE TEMPORARY TABLE Orders, DROP TEMPORARY TABLE Orders. The
+    // session ends with the file; in b.sql orders is the schema's table again,
+    // and its FULLTEXT index makes the new column copy it.
+    let schema = write_schema("step14_case_schema_files.sql", CASE_SCHEMA);
+    let files = session_files(
+        "step14_temporary_files",
+        &[
+            (
+                "a.sql",
+                "create temporary table Orders (id int);\ndrop temporary table Orders;\n",
+            ),
+            ("b.sql", "alter table orders add column z int null;\n"),
+        ],
+    );
+    let mut args = vec![
+        "check",
+        "--schema",
+        schema.to_str().unwrap(),
+        "--format",
+        "json",
+    ];
+    args.extend(files.iter().map(|path| path.to_str().unwrap()));
+    let output = kilit(&args, "");
+    let json = json_of(&output);
+    let last = last_of(&json, 1);
+    assert_eq!(last["impact"], "writes_wait", "{json}");
+    assert_eq!(last["algorithm"], "COPY", "{json}");
+    assert_eq!(output.status.code(), Some(1));
+}
+
+/// users and orders with a foreign key on user_id and the index MySQL gave
+/// it, as mysqldump writes them.
+const CASE_SCHEMA_KEYED: &str = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `email` varchar(255) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `fk_x` (`user_id`),
+  CONSTRAINT `fk_x` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+
+#[test]
+fn a_foreign_key_in_another_case_with_the_checks_off_still_fails_the_next_drop_of_its_column() {
+    // The key is added (hand test 10: both settings accept it with the checks
+    // off), so dropping its column fails with 1828 and exit 1.
+    let schema = write_schema("step14_case_schema_keyed_fk.sql", CASE_SCHEMA_KEYED);
+    let schema = schema.to_str().unwrap();
+    let sql = "set foreign_key_checks = 0;
+alter table orders add constraint fk_u2 foreign key (user_id) references USERS (id);
+set foreign_key_checks = 1;
+alter table orders drop column user_id;";
+    let (text, json, code) = text_and_json(&["--schema", schema], sql);
+    let statements = json["sources"][0]["statements"].as_array().unwrap();
+    assert_eq!(statements[1]["impact"], "unknown", "{text}");
+    assert_eq!(statements[3]["impact"], "fails", "{text}");
+    assert_eq!(statements[3]["error"], 1828, "{text}");
+    assert_eq!(json["exit_code"], 1, "{text}");
+    assert_eq!(code, Some(1), "{text}");
+}
+
+#[test]
+fn creating_an_index_in_another_case_then_dropping_the_only_index_of_a_foreign_key_fails_with_1553()
+{
+    // CREATE INDEX i9 ON ORDERS fails with 1146 with 0, so kilit goes on as
+    // with 1 or 2 with orders known; dropping fk_x then fails.
+    let schema = write_schema("step14_case_schema_keyed_index.sql", CASE_SCHEMA_KEYED);
+    let schema = schema.to_str().unwrap();
+    let sql = "create index i9 on ORDERS (email);
+alter table orders drop index fk_x;";
+    let (text, json, code) = text_and_json(&["--schema", schema], sql);
+    let statements = json["sources"][0]["statements"].as_array().unwrap();
+    assert_eq!(statements[0]["impact"], "unknown", "{text}");
+    assert_eq!(statements[1]["impact"], "fails", "{text}");
+    assert_eq!(statements[1]["error"], 1553, "{text}");
+    assert_eq!(json["exit_code"], 1, "{text}");
+    assert_eq!(code, Some(1), "{text}");
+    // Where the two settings part ways the table is lost, and nothing fails.
+    let sql = "drop table if exists ORDERS;
+alter table orders drop index fk_x;";
+    let (text, json, code) = text_and_json(&["--schema", schema], sql);
+    assert_eq!(impacts_of(&json), ["unknown", "writes_continue"], "{text}");
+    assert_eq!(code, Some(0), "{text}");
+}
+
+#[test]
+fn a_case_only_statement_after_one_kilit_could_not_read_leaves_the_table_lost_and_exits_with_0() {
+    // RENAME TABLES is unreadable; the FULLTEXT index goes on ORDERS with 0
+    // and the rename fails with 1. kilit cannot tell: the ALTER is unknown, and
+    // orders gets the answer of a table kilit cannot see.
+    let schema = write_schema(
+        "step14_case_schema_unreadable.sql",
+        "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `note` text,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `archive` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `note` text,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+",
+    );
+    let schema = schema.to_str().unwrap();
+    let sql = "rename tables archive to ORDERS;
+alter table ORDERS add fulltext ft (note);
+alter table orders add column x int null;";
+    let (text, json, code) = text_and_json(&["--schema", schema], sql);
+    assert_eq!(
+        impacts_of(&json),
+        ["unknown", "unknown", "writes_continue"],
+        "{text}"
+    );
+    let reason = json["sources"][0]["statements"][1]["reason"]
+        .as_str()
+        .unwrap();
+    assert!(
+        reason.ends_with(
+            "kilit cannot tell which setting the migration goes on with, so it stops trusting \
+             the tables the statement may change."
+        ),
+        "{reason}"
+    );
+    assert_eq!(code, Some(0), "{text}");
 }

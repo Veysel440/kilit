@@ -6,10 +6,11 @@
 //! statement changes a table in a way kilit cannot follow, kilit stops
 //! trusting what it knew about that table instead of guessing.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::charset::{Charset, canonical};
-use crate::parse::parse;
+use crate::parse::{parse, truncated_table};
 use crate::statement::{
     Alter, Check, CheckColumns, Column, Engine, ForeignKey, Index, IndexKind, Operation, Position,
     RowFormat, Statement, StatementKind, Table,
@@ -18,11 +19,15 @@ use crate::statement::{
 /// The tables kilit knows at one point of the input.
 #[derive(Clone, Debug, Default)]
 pub struct Schema {
-    /// By lowercase name.
+    /// By name, as written.
     tables: BTreeMap<String, Entry>,
-    /// The lowercase name of every table a foreign key has pointed at. It may
-    /// hold more than the keys of today, never less: it only saves looking
-    /// through every table for a key that points at one.
+    /// The names of `tables`, by [`folded`] name: the ones that may be the
+    /// same table in another letter case.
+    by_fold: HashMap<String, Vec<String>>,
+    /// The name of every table a foreign key has pointed at, in
+    /// [`folded`] form. It may hold more than the keys of today, never
+    /// less: it only saves looking through every table for a key that
+    /// points at one.
     pointed_at: BTreeSet<String>,
     /// A statement before this point names `default_storage_engine`, so a
     /// table created without `ENGINE` may have any engine. Only
@@ -33,7 +38,10 @@ pub struct Schema {
     /// `innodb_strict_mode`, so a table created without `ROW_FORMAT` may
     /// have any row format. Only [`check`](crate::check) sets it.
     default_row_format_changed: bool,
-    /// By lowercase name, what a `CREATE TEMPORARY TABLE` of this session
+    /// A statement kilit could not read, and that names no table it could
+    /// tell, may have created tables kilit does not see.
+    may_hold_unseen_tables: bool,
+    /// By name, what a `CREATE TEMPORARY TABLE` of this session
     /// hides: the table of that name as it was, if any. A new session sees
     /// it again.
     hidden_by_temporary: BTreeMap<String, Option<Entry>>,
@@ -52,6 +60,9 @@ enum Entry {
         engine: Option<Engine>,
         /// See [`TableState::Lost`].
         row_format_unclear: bool,
+        /// A statement that names a table in another letter case lost it:
+        /// another table kilit knows in another letter case may be this one.
+        in_another_case: bool,
     },
 }
 
@@ -93,7 +104,10 @@ impl Schema {
         schema
     }
 
-    /// What kilit knows about the table `name`, in any case.
+    /// What kilit knows about the table `name`, written exactly so: with
+    /// lower_case_table_names = 0, the default on Linux, MySQL keeps
+    /// `orders` and `ORDERS` apart, and with 1 or 2 it takes them as one
+    /// table. See [`Schema::in_another_case`].
     pub fn table(&self, name: &str) -> TableState<'_> {
         match self.tables.get(&key(name)) {
             Some(Entry::Known(table)) => TableState::Known(table),
@@ -101,6 +115,7 @@ impl Schema {
                 reason,
                 engine,
                 row_format_unclear,
+                ..
             }) => TableState::Lost {
                 reason,
                 engine: engine.as_ref(),
@@ -126,9 +141,11 @@ impl Schema {
     pub(crate) fn session_ends(&mut self) {
         for (name, hidden) in std::mem::take(&mut self.hidden_by_temporary) {
             match hidden {
-                Some(entry) => self.tables.insert(name, entry),
-                None => self.tables.remove(&name),
-            };
+                Some(entry) => self.put(name, entry),
+                None => {
+                    self.take(&name);
+                }
+            }
         }
     }
 
@@ -143,9 +160,212 @@ impl Schema {
         self.lose(name, reason, engine, row_format_unclear);
     }
 
+    /// Whether no table kilit knows, or lost, has the name `name` in any
+    /// letter case.
+    pub(crate) fn no_table_in_any_case(&self, name: &str) -> bool {
+        !self.tables.contains_key(name) && !self.by_fold.contains_key(&folded(name))
+    }
+
     /// Whether a foreign key may point at the table `name`. If not, none does.
+    /// A key that points at the table in another letter case counts.
     pub(crate) fn may_be_pointed_at(&self, name: &str) -> bool {
-        self.pointed_at.contains(&key(name))
+        self.pointed_at.contains(&folded(name))
+    }
+
+    /// The first table name of `statement` that matches a table kilit knows
+    /// (or knew, and lost) only in another letter case, or another name the
+    /// statement wrote before it. Whether they are one table depends on the
+    /// server's lower_case_table_names, which kilit does not know. A name
+    /// kilit knows written exactly so is never one, and neither is a name
+    /// that matches nothing.
+    pub(crate) fn in_another_case(&self, statement: &Statement) -> Option<InAnotherCase> {
+        let names = named_tables(statement);
+        let mut found: Option<InAnotherCase> = None;
+        for (at, (written, role)) in names.iter().enumerate() {
+            // A name kilit lost to a statement in another letter case may
+            // still be the table of another case.
+            let lost_in_another_case = match self.tables.get(written.as_ref()) {
+                None => false,
+                Some(Entry::Lost {
+                    in_another_case: true,
+                    ..
+                }) => true,
+                Some(_) => continue,
+            };
+            let known = self
+                .by_fold
+                .get(&folded(written))
+                .into_iter()
+                .flatten()
+                .map(String::as_str)
+                .find(|known| known != written)
+                .or_else(|| {
+                    names[..at]
+                        .iter()
+                        .map(|(name, _)| name.as_ref())
+                        .find(|known| known != written && same_in_any_case(known, written))
+                });
+            if let Some(known) = known {
+                match &mut found {
+                    Some(first) => {
+                        first.alone = false;
+                        break;
+                    }
+                    None => {
+                        // A table kilit lost to such a statement may be gone.
+                        let known_unclear = matches!(
+                            self.tables.get(known),
+                            Some(Entry::Lost {
+                                in_another_case: true,
+                                ..
+                            })
+                        );
+                        // `shop.ORDERS` is ORDERS when the session uses shop.
+                        let last = |name: &str| name.rsplit('.').next().unwrap_or(name).to_owned();
+                        let elsewhere = self
+                            .tables
+                            .keys()
+                            .any(|name| name != written.as_ref() && last(name) == last(written));
+                        found = Some(InAnotherCase {
+                            written: written.clone().into_owned(),
+                            known: known.to_owned(),
+                            role: *role,
+                            alone: !lost_in_another_case
+                                && !known_unclear
+                                && !self.may_hold_unseen_tables
+                                && !elsewhere,
+                            known_temporary: self.hidden_by_temporary.contains_key(known),
+                        });
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// Follows a statement that names a table in another letter case (see
+    /// [`Schema::in_another_case`]): kilit stops trusting every table the
+    /// statement may change on one setting of lower_case_table_names or the
+    /// other, and every name it may create. A table it may only point a
+    /// foreign key at, or empty, stays as it is.
+    pub(crate) fn follow_in_another_case(&mut self, statement: &Statement) {
+        let reason = format!(
+            "line {}: names a table in another letter case, so whether it changed this one \
+             depends on lower_case_table_names",
+            statement.line
+        );
+        let names = named_tables(statement);
+        let temporary = creates_temporary(&statement.sql);
+        // The engine and the row format the statement may give a table.
+        let (engine, writes_format) = match &statement.kind {
+            StatementKind::Alter(alter) => {
+                let mut engine = None;
+                let mut writes_format = false;
+                for operation in &alter.operations {
+                    if let Operation::ChangeTableOptions(options) = operation {
+                        if options.engine.is_some() {
+                            engine = Some(Engine::Unknown);
+                        }
+                        writes_format |=
+                            options.row_format.is_some() || options.key_block_size.is_some();
+                    }
+                }
+                (engine, writes_format)
+            }
+            StatementKind::CreateTable { table, .. } => {
+                let engine = match &table.engine {
+                    None if self.default_engine_changed => Some(Engine::Unknown),
+                    None => Some(Engine::InnoDb),
+                    written => written.clone(),
+                };
+                let format = row_format_unclear(table)
+                    || (table.row_format.is_none() && self.default_row_format_changed);
+                (engine, format)
+            }
+            StatementKind::Unparsed { .. } => (
+                written_engine(&statement.sql),
+                writes_row_format(&statement.sql),
+            ),
+            _ => (None, false),
+        };
+        // A statement kilit could not read loses the table of its name,
+        // when it may create one; one it names in another letter case is
+        // lost below.
+        if matches!(statement.kind, StatementKind::Unparsed { .. }) && creates(&statement.sql) {
+            self.apply(statement);
+            if let StatementKind::Unparsed {
+                table: Some(name), ..
+            } = &statement.kind
+                && let Some(Entry::Lost {
+                    in_another_case, ..
+                }) = self.tables.get_mut(name.as_str())
+            {
+                *in_another_case = true;
+            }
+        }
+        for (written, role) in &names {
+            let (written, role) = (written.as_ref(), *role);
+            let matching: Vec<String> = self
+                .by_fold
+                .get(&folded(written))
+                .cloned()
+                .unwrap_or_default();
+            // A CREATE kilit could not read gives its name to a table, as
+            // CREATE TABLE does; it lost that name above.
+            let names_one =
+                role == Role::Names || (role == Role::Unread && creates(&statement.sql));
+            let changes = match role {
+                Role::Changes | Role::DropsIfExists => true,
+                // A temporary table hides the table of its name.
+                Role::Names => temporary,
+                Role::Unread => !names_one || temporary,
+                Role::PointsAt => {
+                    self.pointed_at.insert(folded(written));
+                    false
+                }
+                Role::Empties => false,
+            };
+            if changes {
+                for name in matching
+                    .iter()
+                    .filter(|name| !(names_one && *name == written))
+                {
+                    // Until the session ends: a temporary table only hides
+                    // the table of its name.
+                    if names_one && !self.hidden_by_temporary.contains_key(name) {
+                        let hidden = self.tables.get(name).cloned();
+                        self.hidden_by_temporary.insert(name.clone(), hidden);
+                    }
+                    let lost_engine = merged(self.engine_of(name).cloned(), engine.clone());
+                    let unclear = writes_format || self.row_format_unclear_of(name);
+                    self.lose_in_another_case(name, reason.clone(), lost_engine, unclear);
+                }
+            }
+            if role == Role::Names {
+                // The table of the new name: the one the statement creates
+                // or renames, or one kilit knows in another letter case.
+                let mut lost_engine = match &statement.kind {
+                    StatementKind::RenameTable { renames } => renames
+                        .iter()
+                        .find(|rename| rename.to == written)
+                        .and_then(|rename| self.engine_of(&rename.from).cloned()),
+                    StatementKind::Alter(alter) => {
+                        merged(self.engine_of(&alter.table).cloned(), engine.clone())
+                    }
+                    _ => engine.clone(),
+                };
+                let mut unclear = writes_format;
+                for name in matching.iter().filter(|name| *name != written) {
+                    lost_engine = merged(lost_engine, self.engine_of(name).cloned());
+                    unclear |= self.row_format_unclear_of(name);
+                }
+                if temporary && !self.hidden_by_temporary.contains_key(written) {
+                    let hidden = self.take(written);
+                    self.hidden_by_temporary.insert(written.to_owned(), hidden);
+                }
+                self.lose_in_another_case(written, reason.clone(), lost_engine, unclear);
+            }
+        }
     }
 
     /// The tables kilit knows, by name.
@@ -156,7 +376,7 @@ impl Schema {
         })
     }
 
-    /// The tables kilit lost track of, by lowercase name, with the reason.
+    /// The tables kilit lost track of, by name, with the reason.
     pub fn lost(&self) -> impl Iterator<Item = (&str, &str)> {
         self.tables.iter().filter_map(|(name, entry)| match entry {
             Entry::Lost { reason, .. } => Some((name.as_str(), reason.as_str())),
@@ -178,7 +398,7 @@ impl Schema {
             if let Some(name) = name
                 && !self.hidden_by_temporary.contains_key(&key(name))
             {
-                let hidden = self.tables.remove(&key(name));
+                let hidden = self.take(&key(name));
                 self.hidden_by_temporary.insert(key(name), hidden);
             }
         }
@@ -220,14 +440,15 @@ impl Schema {
                 }
                 for foreign_key in table.foreign_keys.clone() {
                     index_foreign_key(&mut table, &foreign_key);
-                    self.pointed_at.insert(key(&foreign_key.referenced_table));
+                    self.pointed_at
+                        .insert(folded(&foreign_key.referenced_table));
                 }
                 name_new_checks(&mut table);
-                self.tables.insert(key(&table.name), Entry::Known(table));
+                self.put(key(&table.name), Entry::Known(table));
             }
             StatementKind::DropTable { tables } => {
                 for name in tables {
-                    self.tables.remove(&key(name));
+                    self.take(&key(name));
                 }
             }
             StatementKind::RenameTable { renames } => {
@@ -275,19 +496,26 @@ impl Schema {
                     unclear,
                 );
             }
-            StatementKind::Unparsed { table: None, .. }
-            | StatementKind::Set { .. }
-            | StatementKind::Other => {}
+            StatementKind::Unparsed { table: None, .. } => {
+                let first = statement.sql.split_whitespace().next().unwrap_or_default();
+                if !["TRUNCATE", "LOCK", "UNLOCK"]
+                    .iter()
+                    .any(|word| first.eq_ignore_ascii_case(word))
+                {
+                    self.may_hold_unseen_tables = true;
+                }
+            }
+            StatementKind::Set { .. } | StatementKind::Other => {}
         }
     }
 
     fn rename(&mut self, from: &str, to: &str) {
-        if let Some(mut entry) = self.tables.remove(&key(from)) {
+        if let Some(mut entry) = self.take(&key(from)) {
             if let Entry::Known(table) = &mut entry {
                 rename_generated_checks(table, to);
                 to.clone_into(&mut table.name);
             }
-            self.tables.insert(key(to), entry);
+            self.put(key(to), entry);
         }
     }
 
@@ -298,14 +526,62 @@ impl Schema {
         engine: Option<Engine>,
         row_format_unclear: bool,
     ) {
-        self.tables.insert(
+        self.put(
             key(name),
             Entry::Lost {
                 reason,
                 engine,
                 row_format_unclear,
+                in_another_case: false,
             },
         );
+    }
+
+    fn lose_in_another_case(
+        &mut self,
+        name: &str,
+        reason: String,
+        engine: Option<Engine>,
+        row_format_unclear: bool,
+    ) {
+        self.put(
+            key(name),
+            Entry::Lost {
+                reason,
+                engine,
+                row_format_unclear,
+                in_another_case: true,
+            },
+        );
+    }
+
+    /// Sets the entry of the table `name`, keeping [`Schema::by_fold`].
+    fn put(&mut self, name: String, entry: Entry) {
+        match self.tables.entry(name) {
+            std::collections::btree_map::Entry::Occupied(mut known) => {
+                known.insert(entry);
+            }
+            std::collections::btree_map::Entry::Vacant(new) => {
+                self.by_fold
+                    .entry(folded(new.key()))
+                    .or_default()
+                    .push(new.key().clone());
+                new.insert(entry);
+            }
+        }
+    }
+
+    /// Removes the entry of the table `name`, keeping [`Schema::by_fold`].
+    fn take(&mut self, name: &str) -> Option<Entry> {
+        let entry = self.tables.remove(name)?;
+        let fold = folded(name);
+        if let Some(names) = self.by_fold.get_mut(&fold) {
+            names.retain(|known| known != name);
+            if names.is_empty() {
+                self.by_fold.remove(&fold);
+            }
+        }
+        Some(entry)
     }
 
     /// Whether the table `name` may have a row format other than the
@@ -382,7 +658,7 @@ impl Schema {
                         .as_ref()
                         .is_some_and(|engine| *engine != Engine::InnoDb)
                         && (!table.foreign_keys.is_empty()
-                            || self.pointed_at.contains(&key(&alter.table))) =>
+                            || self.pointed_at.contains(&folded(&alter.table))) =>
                 {
                     Err(
                         "changes the engine of a table with foreign keys, which kilit does not \
@@ -420,7 +696,8 @@ impl Schema {
             if let Operation::AddForeignKey(foreign_key) = operation
                 && table.engine != Some(Engine::MyIsam)
             {
-                self.pointed_at.insert(key(&foreign_key.referenced_table));
+                self.pointed_at
+                    .insert(folded(&foreign_key.referenced_table));
             }
         }
         if let Some(name) = new_name {
@@ -429,10 +706,200 @@ impl Schema {
     }
 }
 
-/// Table names are compared in lowercase, which is how MySQL stores them
-/// on Windows and macOS and how Laravel writes them everywhere.
+/// Table names are kept as written: MySQL compares them so with
+/// lower_case_table_names = 0, the default on Linux. A name that differs
+/// only in letter case is the same table with 1 or 2, the defaults on
+/// Windows and macOS; [`Schema::in_another_case`] finds those.
 fn key(name: &str) -> String {
-    name.to_lowercase()
+    name.to_owned()
+}
+
+/// What a statement does to a table it names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Role {
+    /// It changes, drops or renames the table: an ALTER TABLE (also CREATE
+    /// INDEX and DROP INDEX), a DROP TABLE, the old name of a RENAME.
+    Changes,
+    /// `DROP TABLE IF EXISTS`.
+    DropsIfExists,
+    /// It gives the name to a table: CREATE TABLE, the new name of a RENAME.
+    Names,
+    /// A foreign key points at it.
+    PointsAt,
+    /// TRUNCATE TABLE: the rows go, the definition stays.
+    Empties,
+    /// A statement kilit could not read names it.
+    Unread,
+}
+
+/// A table name that a statement writes in another letter case than a
+/// table kilit knows, or than another name of the same statement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InAnotherCase {
+    pub written: String,
+    pub known: String,
+    pub role: Role,
+    /// No other name of the statement matches in another letter case,
+    /// neither the written name nor the one it matches was lost to such a
+    /// statement, no statement kilit could not read may have created a
+    /// table kilit does not see, and no table of another database has the
+    /// written name.
+    pub alone: bool,
+    /// The table it matches was created TEMPORARY in this session.
+    pub known_temporary: bool,
+}
+
+/// `statement` with the table `written` named `known`, wherever it names a
+/// table: what it does when the two are one table.
+pub(crate) fn with_table_renamed(statement: &Statement, written: &str, known: &str) -> Statement {
+    let mut renamed = statement.clone();
+    let rename = |name: &mut String| {
+        if name == written {
+            known.clone_into(name);
+        }
+    };
+    match &mut renamed.kind {
+        StatementKind::Alter(alter) => {
+            rename(&mut alter.table);
+            for operation in &mut alter.operations {
+                match operation {
+                    Operation::RenameTable { new_name } => rename(new_name),
+                    Operation::AddForeignKey(key) => rename(&mut key.referenced_table),
+                    _ => {}
+                }
+            }
+        }
+        StatementKind::CreateTable { table, .. } => {
+            rename(&mut table.name);
+            for key in &mut table.foreign_keys {
+                rename(&mut key.referenced_table);
+            }
+        }
+        StatementKind::DropTable { tables } => tables.iter_mut().for_each(rename),
+        StatementKind::RenameTable { renames } => {
+            for one in renames {
+                rename(&mut one.from);
+                rename(&mut one.to);
+            }
+        }
+        StatementKind::Unparsed {
+            table: Some(name), ..
+        } => rename(name),
+        StatementKind::Unparsed { table: None, .. }
+        | StatementKind::Set { .. }
+        | StatementKind::Other => {}
+    }
+    renamed
+}
+
+/// The tables `statement` names, in order, with what it does to each.
+fn named_tables(statement: &Statement) -> Vec<(Cow<'_, str>, Role)> {
+    fn named(name: &str, role: Role) -> (Cow<'_, str>, Role) {
+        (Cow::Borrowed(name), role)
+    }
+    match &statement.kind {
+        StatementKind::Alter(alter) => {
+            let mut names = vec![named(&alter.table, Role::Changes)];
+            for operation in &alter.operations {
+                match operation {
+                    Operation::RenameTable { new_name } => {
+                        names.push(named(new_name, Role::Names));
+                    }
+                    Operation::AddForeignKey(key) => {
+                        names.push(named(&key.referenced_table, Role::PointsAt));
+                    }
+                    _ => {}
+                }
+            }
+            names
+        }
+        StatementKind::CreateTable { table, .. } => {
+            std::iter::once(named(&table.name, Role::Names))
+                .chain(
+                    table
+                        .foreign_keys
+                        .iter()
+                        .map(|key| named(&key.referenced_table, Role::PointsAt)),
+                )
+                .collect()
+        }
+        StatementKind::DropTable { tables } => {
+            let role = if drops_if_exists(&statement.sql) {
+                Role::DropsIfExists
+            } else {
+                Role::Changes
+            };
+            tables.iter().map(|name| named(name, role)).collect()
+        }
+        StatementKind::RenameTable { renames } => renames
+            .iter()
+            .flat_map(|rename| {
+                [
+                    named(&rename.from, Role::Changes),
+                    named(&rename.to, Role::Names),
+                ]
+            })
+            .collect(),
+        StatementKind::Unparsed {
+            table: Some(name), ..
+        } => vec![named(name, Role::Unread)],
+        StatementKind::Unparsed { table: None, .. } => truncated_table(&statement.sql)
+            .map(|name| (Cow::Owned(name), Role::Empties))
+            .into_iter()
+            .collect(),
+        StatementKind::Set { .. } | StatementKind::Other => Vec::new(),
+    }
+}
+
+/// Whether a DROP TABLE has `IF EXISTS`, outside quotes.
+fn drops_if_exists(sql: &str) -> bool {
+    let masked = outside_quotes(sql);
+    word_starts(sql, "IF").any(|start| masked[start + 2..].trim_start().starts_with("EXISTS"))
+}
+
+/// Whether two table names are the same in any letter case, as MySQL
+/// compares them with lower_case_table_names = 1 or 2, or may: by hand
+/// with 1, `ÇİZELGE` and `ÇIZELGE` both reach `çizelge`. kilit errs on the
+/// side of a match: `ı`, `ß` and other letters MySQL may fold otherwise
+/// match too.
+pub(crate) fn same_in_any_case(a: &str, b: &str) -> bool {
+    if a.is_ascii() && b.is_ascii() {
+        return a.eq_ignore_ascii_case(b);
+    }
+    folding(a).eq(folding(b))
+}
+
+fn folding(name: &str) -> impl Iterator<Item = char> + '_ {
+    name.chars().flat_map(|c| {
+        let c = if matches!(c, 'İ' | 'ı') { 'i' } else { c };
+        c.to_uppercase().flat_map(char::to_lowercase)
+    })
+}
+
+/// `name` as [`same_in_any_case`] compares it.
+pub(crate) fn folded(name: &str) -> String {
+    if name.is_ascii() {
+        return name.to_ascii_lowercase();
+    }
+    folding(name).collect()
+}
+
+/// The engine of a table that may be either of two, as far as kilit knows:
+/// `None` (no engine written) for InnoDB.
+fn merged(a: Option<Engine>, b: Option<Engine>) -> Option<Engine> {
+    let innodb = |engine: &Option<Engine>| engine.clone().unwrap_or(Engine::InnoDb);
+    match (a, b) {
+        (a, None) => a,
+        (None, b) => {
+            if innodb(&b) == Engine::InnoDb {
+                None
+            } else {
+                Some(Engine::Unknown)
+            }
+        }
+        (a, b) if innodb(&a) == innodb(&b) => a,
+        _ => Some(Engine::Unknown),
+    }
 }
 
 /// Changes `table` as one `ALTER TABLE` operation does, or says why kilit
@@ -982,8 +1449,8 @@ fn like_source(sql: &str) -> Option<&str> {
     None
 }
 
-/// Whether the statement starts with `CREATE`.
-fn creates_temporary(sql: &str) -> bool {
+/// Whether the statement starts with `CREATE TEMPORARY`.
+pub(crate) fn creates_temporary(sql: &str) -> bool {
     let mut words = sql.split_whitespace();
     creates(sql)
         && words
@@ -1292,7 +1759,7 @@ mod tests {
         assert_eq!(names, ["migrations", "orders", "shops", "users"]);
         assert_eq!(schema.lost().count(), 0);
 
-        let orders = known(&schema, "ORDERS");
+        let orders = known(&schema, "orders");
         assert_eq!(
             orders.column("note").unwrap().data_type,
             DataType::VarChar { length: 50 }
@@ -1963,14 +2430,263 @@ ALTER TABLE t ADD CONSTRAINT C CHECK (a > 1);",
     }
 
     #[test]
-    fn a_table_name_in_another_case_is_the_same_table() {
-        // Pinned as it is: kilit compares table names in lowercase, as MySQL
-        // does with lower_case_table_names = 1 or 2. With 0, the default on
-        // Linux, MySQL 8.0.46 and 8.4.13 refuse ALTER TABLE ORDERS on orders
-        // with error 1146 (run by hand). Table name case is a later step.
-        let schema = after("ALTER TABLE ORDERS ADD COLUMN coupon INT NULL");
-        assert!(known(&schema, "orders").column("coupon").is_some());
-        assert!(matches!(schema.table("Orders"), TableState::Known(_)));
+    fn a_table_is_found_only_by_its_exact_name() {
+        // With lower_case_table_names = 0, the default on Linux, MySQL
+        // 8.0.46 and 8.4.13 refuse ALTER TABLE ORDERS while only orders
+        // exists (1146, by hand); with 1 it is orders. kilit does not know
+        // the setting, so another letter case is never the table.
+        let schema = Schema::from_sql(DUMP);
+        assert!(matches!(schema.table("orders"), TableState::Known(_)));
+        assert_eq!(schema.table("ORDERS"), TableState::Missing);
+        assert_eq!(schema.table("Orders"), TableState::Missing);
+        // A dump of a server with 0 may hold both.
+        let schema = Schema::from_sql(
+            "CREATE TABLE orders (id INT PRIMARY KEY);
+             CREATE TABLE ORDERS (id INT PRIMARY KEY, note TEXT);",
+        );
+        assert!(known(&schema, "orders").column("note").is_none());
+        assert!(known(&schema, "ORDERS").column("note").is_some());
+    }
+
+    fn found_in_another_case(sql: &str) -> Option<(String, String, Role)> {
+        let schema = Schema::from_sql(DUMP);
+        let statements = parse(sql);
+        let [statement] = statements.as_slice() else {
+            panic!("{sql}");
+        };
+        schema
+            .in_another_case(statement)
+            .map(|found| (found.written, found.known, found.role))
+    }
+
+    #[test]
+    fn a_name_that_differs_only_in_letter_case_is_found_wherever_a_statement_names_a_table() {
+        let found =
+            |written: &str, known: &str, role| Some((written.to_owned(), known.to_owned(), role));
+        for (sql, expected) in [
+            (
+                "ALTER TABLE ORDERS ADD COLUMN c INT NULL",
+                found("ORDERS", "orders", Role::Changes),
+            ),
+            (
+                "ALTER TABLE `Orders` ADD COLUMN c INT NULL",
+                found("Orders", "orders", Role::Changes),
+            ),
+            (
+                "CREATE INDEX i ON ORDERS (amount)",
+                found("ORDERS", "orders", Role::Changes),
+            ),
+            (
+                "DROP INDEX i ON ORDERS",
+                found("ORDERS", "orders", Role::Changes),
+            ),
+            (
+                "RENAME TABLE ORDERS TO o2",
+                found("ORDERS", "orders", Role::Changes),
+            ),
+            (
+                "RENAME TABLE orders TO ORDERS",
+                found("ORDERS", "orders", Role::Names),
+            ),
+            (
+                "ALTER TABLE orders RENAME TO ORDERS",
+                found("ORDERS", "orders", Role::Names),
+            ),
+            (
+                "RENAME TABLE a TO b, B TO c",
+                found("B", "b", Role::Changes),
+            ),
+            (
+                "DROP TABLE ORDERS",
+                found("ORDERS", "orders", Role::Changes),
+            ),
+            (
+                "DROP TABLE IF EXISTS ORDERS",
+                found("ORDERS", "orders", Role::DropsIfExists),
+            ),
+            (
+                "DROP TABLE users, ORDERS",
+                found("ORDERS", "orders", Role::Changes),
+            ),
+            (
+                "TRUNCATE TABLE ORDERS",
+                found("ORDERS", "orders", Role::Empties),
+            ),
+            (
+                "CREATE TABLE ORDERS (id INT PRIMARY KEY)",
+                found("ORDERS", "orders", Role::Names),
+            ),
+            (
+                "ALTER TABLE orders ADD CONSTRAINT k FOREIGN KEY (user_id) REFERENCES USERS (id)",
+                found("USERS", "users", Role::PointsAt),
+            ),
+            (
+                "CREATE TABLE t (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES T (id))",
+                found("T", "t", Role::PointsAt),
+            ),
+            (
+                "ALTER TABLE ORDERS FROBNICATE",
+                found("ORDERS", "orders", Role::Unread),
+            ),
+            // Exact names, and names kilit does not know in any case.
+            ("ALTER TABLE orders ADD COLUMN c INT NULL", None),
+            ("ALTER TABLE orders ADD INDEX i (AMOUNT)", None),
+            (
+                "ALTER TABLE orders DROP FOREIGN KEY ORDERS_USER_ID_FOREIGN",
+                None,
+            ),
+            ("ALTER TABLE invoices ADD COLUMN c INT NULL", None),
+            ("ALTER TABLE shop.ORDERS ADD COLUMN c INT NULL", None),
+            ("DROP TABLE IF EXISTS invoices", None),
+            ("CREATE TABLE invoices (id INT PRIMARY KEY)", None),
+            ("TRUNCATE TABLE orders", None),
+        ] {
+            assert_eq!(found_in_another_case(sql), expected, "{sql}");
+        }
+    }
+
+    #[test]
+    fn letter_case_is_compared_as_mysql_may_compare_it() {
+        // By hand with lower_case_table_names = 1: ÇİZELGE, ÇIZELGE and
+        // Çizelge all reach çizelge.
+        for name in ["ÇİZELGE", "ÇIZELGE", "Çizelge", "çızelge"] {
+            assert!(same_in_any_case(name, "çizelge"), "{name}");
+        }
+        assert!(same_in_any_case("Shop.Orders", "shop.orders"));
+        assert!(!same_in_any_case("shop.orders", "orders"));
+        assert!(!same_in_any_case("orders", "order"));
+    }
+
+    #[test]
+    fn a_statement_in_another_letter_case_loses_what_it_may_change() {
+        let follow = |sql: &str| {
+            let mut schema = Schema::from_sql(DUMP);
+            for statement in parse(sql) {
+                if schema.in_another_case(&statement).is_some() {
+                    schema.follow_in_another_case(&statement);
+                } else {
+                    schema.apply(&statement);
+                }
+            }
+            schema
+        };
+        let state = |schema: &Schema, name: &str| match schema.table(name) {
+            TableState::Known(_) => "known",
+            TableState::Lost { .. } => "lost",
+            TableState::Missing => "missing",
+        };
+        for (sql, expected) in [
+            (
+                "ALTER TABLE ORDERS ADD COLUMN c INT NULL",
+                [
+                    ("orders", "lost"),
+                    ("ORDERS", "missing"),
+                    ("users", "known"),
+                ],
+            ),
+            (
+                "DROP TABLE ORDERS, users",
+                [("orders", "lost"), ("ORDERS", "missing"), ("users", "lost")],
+            ),
+            (
+                "RENAME TABLE orders TO ORDERS",
+                [("orders", "lost"), ("ORDERS", "lost"), ("users", "known")],
+            ),
+            (
+                "CREATE TABLE ORDERS (id INT PRIMARY KEY)",
+                [("orders", "known"), ("ORDERS", "lost"), ("users", "known")],
+            ),
+            (
+                "TRUNCATE TABLE ORDERS",
+                [
+                    ("orders", "known"),
+                    ("ORDERS", "missing"),
+                    ("users", "known"),
+                ],
+            ),
+            (
+                "ALTER TABLE orders ADD CONSTRAINT k FOREIGN KEY (user_id) REFERENCES USERS (id)",
+                [("orders", "lost"), ("USERS", "missing"), ("users", "known")],
+            ),
+            (
+                "ALTER TABLE ORDERS FROBNICATE",
+                [
+                    ("orders", "lost"),
+                    ("ORDERS", "missing"),
+                    ("users", "known"),
+                ],
+            ),
+            (
+                "CREATE TABLE ORDERS LIKE users",
+                [("orders", "known"), ("ORDERS", "lost"), ("users", "known")],
+            ),
+        ] {
+            let schema = follow(sql);
+            for (name, expected) in expected {
+                assert_eq!(state(&schema, name), expected, "{sql}: {name}");
+            }
+        }
+        // A foreign key in another case may point at users.
+        assert!(
+            follow(
+                "ALTER TABLE orders ADD CONSTRAINT k FOREIGN KEY (user_id) REFERENCES USERS (id)"
+            )
+            .may_be_pointed_at("users")
+        );
+        // A temporary table hides the table it may be until the session
+        // ends, and changes no other table: the table is seen again.
+        let mut schema = follow(
+            "CREATE TEMPORARY TABLE ORDERS (id INT);
+             ALTER TABLE orders ADD COLUMN c INT NULL;",
+        );
+        assert_eq!(state(&schema, "orders"), "lost");
+        assert_eq!(state(&schema, "ORDERS"), "lost");
+        schema.session_ends();
+        assert_eq!(state(&schema, "ORDERS"), "missing");
+        assert!(known(&schema, "orders").column("c").is_none());
+    }
+
+    #[test]
+    fn a_name_lost_in_another_letter_case_stays_unclear_while_its_other_case_is_known() {
+        // CREATE TABLE IF NOT EXISTS ORDERS with orders there: with 0 a new
+        // table, with 1 or 2 nothing happens and ORDERS is orders.
+        let mut schema = Schema::from_sql(DUMP);
+        let statements = parse(
+            "CREATE TABLE IF NOT EXISTS ORDERS (id INT PRIMARY KEY);
+             ALTER TABLE ORDERS ADD COLUMN c INT NULL;
+             ALTER TABLE orders ADD COLUMN c INT NULL;
+             ALTER TABLE ORDERS ADD COLUMN d INT NULL;",
+        );
+        let mut found = Vec::new();
+        for statement in &statements {
+            let named = schema.in_another_case(statement);
+            found.push(named.as_ref().map(|named| named.known.clone()));
+            if named.is_some() {
+                schema.follow_in_another_case(statement);
+            } else {
+                schema.apply(statement);
+            }
+        }
+        // orders is known exactly until a statement in another letter case
+        // may change it; from then on both names are unclear.
+        assert_eq!(
+            found,
+            [
+                Some("orders".to_owned()),
+                Some("orders".to_owned()),
+                Some("ORDERS".to_owned()),
+                Some("orders".to_owned()),
+            ]
+        );
+        // A table lost alone keeps the lost answer for its exact name.
+        let mut schema = Schema::from_sql(DUMP);
+        let statements = parse(
+            "ALTER TABLE ORDERS ADD COLUMN c INT NULL;
+             ALTER TABLE orders ADD COLUMN d INT NULL;",
+        );
+        assert!(schema.in_another_case(&statements[0]).is_some());
+        schema.follow_in_another_case(&statements[0]);
+        assert!(schema.in_another_case(&statements[1]).is_none());
     }
 
     fn engine_of_lost(schema: &Schema, name: &str) -> Option<Engine> {

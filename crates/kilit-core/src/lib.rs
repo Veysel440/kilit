@@ -39,8 +39,9 @@ mod statement;
 
 pub use charset::{CHARSETS, Charset};
 pub use check::{
-    CASES, Case, Condition, Exception, Finding, KeyProblem, MYISAM_CASES, OLD_ALTER_TABLE_CASES,
-    OLD_ALTER_TABLE_TWINS, Prediction, ROW_FORMAT_CASES, check, check_sessions, depends_on_rows,
+    CASES, Case, Condition, Exception, Finding, KeyProblem, LetterCase, MYISAM_CASES,
+    OLD_ALTER_TABLE_CASES, OLD_ALTER_TABLE_TWINS, Prediction, ROW_FORMAT_CASES, check,
+    check_sessions, depends_on_rows,
 };
 pub use impact::{Impact, impacts, on_empty_tables, on_new_tables};
 pub use knowledge::{DEFAULT_SERIES, Knowledge, ScenarioResult, ServerResults};

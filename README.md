@@ -306,6 +306,11 @@ meets first:
 - A statement with several changes is `UNKNOWN`, and so is a type change other
   than between integer types: the lab measured single changes only.
 - Only MySQL 8.0.46 and 8.4.13 are measured. MariaDB is not supported.
+- kilit does not know `lower_case_table_names`. A table name that differs from a
+  known table only in letter case (`ORDERS` after `orders`) is `UNKNOWN`: it is
+  another table on Linux (setting 0) and the same table on Windows and macOS.
+  Afterwards kilit goes on as the setting under which the migration continues,
+  where the hand tests show it; otherwise it stops trusting the tables involved.
 - InnoDB is measured, and MyISAM for some changes. A table with no `ENGINE` is
   InnoDB; any other engine is `UNKNOWN`.
 - Some forms, such as `CONVERT TO CHARACTER SET`, are `UNKNOWN`: kilit cannot

@@ -1256,7 +1256,7 @@ fn int_display_widths_letter_case_and_backticks_do_not_make_a_mismatch() {
     let schema = format!("{users}\n{orders}");
     for foreign_key in [
         "foreign key (`ref`) references `users` (`id`)",
-        "FOREIGN KEY (REF) REFERENCES USERS (ID)",
+        "FOREIGN KEY (REF) REFERENCES users (ID)",
         "foreign key (`code_ref`) references `users` (`code`)",
         "foreign key (`wide_ref`) references `users` (`code`)",
     ] {
@@ -2139,7 +2139,7 @@ fn indexes_are_found_by_column_name_whatever_their_spelling() {
     };
     let sql = "SET foreign_key_checks = 1;
         ALTER TABLE `orders` ADD CONSTRAINT `fk_orders_user_name` \
-        FOREIGN KEY (`USER_NAME`) REFERENCES `Users` (`NAME`);";
+        FOREIGN KEY (`USER_NAME`) REFERENCES `users` (`NAME`);";
     for key in [
         "UNIQUE KEY `uq` (`NAME`)",
         "UNIQUE KEY `uq` (`Name` DESC)",
@@ -8788,4 +8788,1417 @@ CREATE TABLE `rw` (
             assert_eq!(verdict, answer, "{server}: {statement}");
         }
     }
+}
+
+// Step 14: table names that differ only in letter case. With
+// lower_case_table_names = 0 (the default on Linux) `orders` and `ORDERS` are
+// two tables, with 1 (Windows) or 2 (macOS) they are one. MySQL 8.0.46 and
+// 8.4.13 were run by hand with 0 and with 1 (hand tests of step 14). The
+// statement that names a table in another case is unknown, since kilit does
+// not know the setting. What follows depends on what the hand tests found:
+//   A) the statement fails with 0 (1146, 1051, 1824) and the migration stops
+//      there, so kilit goes on as with 1 or 2: the known table stays known
+//      and the statement is applied to it;
+//   B) it fails with 1 (1050: CREATE TABLE ORDERS next to orders, RENAME
+//      orders TO ORDERS), so kilit goes on as with 0: ORDERS is a table of
+//      its own;
+//   B') a foreign key with the checks off is accepted by both settings: the
+//      child keeps the key;
+//   C) everything else leaves different tables under the two settings: the
+//      tables the statement may change are no longer trusted, and the new
+//      name stays ambiguous next to the table it matches.
+// Column, index, foreign key and CHECK names are compared without case on
+// every setting, and kilit keeps doing so.
+
+const FULLTEXT_KEY: &str = ",\n  FULLTEXT KEY `ft_note` (`note`)";
+
+/// Laravel's two tables as mysqldump writes them, and a table with a
+/// non-ASCII name. `users_key` and `orders_key` end the definitions of
+/// `users` and `orders`.
+fn case_tables(users_key: &str, orders_key: &str) -> String {
+    format!(
+        "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`){users_key}
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  `email` varchar(255) DEFAULT NULL,
+  `note` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ix` (`amount`),
+  KEY `fk_x` (`user_id`),
+  CONSTRAINT `fk_x` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`),
+  CONSTRAINT `ck_a` CHECK ((`amount` >= 0)){orders_key}
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `çizelge` (
+  `id` int NOT NULL,
+  `n` int DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+"
+    )
+}
+
+/// `users` and `orders` without a FULLTEXT index.
+fn case_plain() -> String {
+    case_tables("", "")
+}
+
+/// `users` and `orders` with a FULLTEXT index each: a new column on either
+/// copies the table while kilit knows it, and is INSTANT where it does not.
+fn case_fulltext() -> String {
+    case_tables(",\n  FULLTEXT KEY `ft_name` (`name`)", FULLTEXT_KEY)
+}
+
+/// What MySQL 8.0.46 and 8.4.13 do, as the reason names it.
+const CASE_REFUSE: &str = "refuse the statement when no table has that exact name";
+const CASE_SKIP: &str = "skip it with a note when no table has that exact name";
+const CASE_NEW_NAME: &str = "take it as a new name";
+const CASE_FOREIGN_KEY: &str =
+    "refuse the foreign key when foreign_key_checks is on and no table has that exact name";
+
+/// The reason kilit gives for a name in another letter case.
+fn case_sentence(known: &str, written: &str, effect: &str) -> String {
+    format!(
+        "kilit knows this table as {known}. With lower_case_table_names = 0, the default on \
+         Linux, {written} is another table, and MySQL 8.0.46 and 8.4.13 {effect}; with 1 or 2, \
+         the defaults on Windows and macOS, it is the same table."
+    )
+}
+
+/// The sentence a reason ends with when kilit goes on as with 1 or 2 (A).
+fn case_ending_a(known: &str, written: &str) -> String {
+    format!(
+        "With 0 the statement fails and the migration stops there, so kilit goes on as with 1 or \
+         2, where {written} is {known}."
+    )
+}
+
+/// The sentence a reason ends with when kilit goes on as with 0 (B).
+fn case_ending_b(written: &str) -> String {
+    format!(
+        "With 1 or 2 the statement fails and the migration stops there, so kilit goes on as with \
+         0, where {written} is a table of its own."
+    )
+}
+
+/// The sentence of a foreign key with the checks off (B').
+const CASE_ENDING_CHECKS_OFF: &str =
+    "With the checks off both settings add the foreign key, so kilit goes on with it as written.";
+
+/// The sentence of a foreign key when the checks may be off (B').
+const CASE_ENDING_CHECKS_MAYBE_OFF: &str = "The checks may be off, and then both settings add the foreign key, so kilit goes on with \
+     it as written.";
+
+/// The sentence of a statement that fails under 1 or 2 too (A, a measured
+/// failure).
+fn case_ending_a_failure(known: &str, written: &str) -> String {
+    format!(
+        "With 0 the statement fails, and with 1 or 2, where {written} is {known}, the lab's \
+         answer for it is a failure too, so the migration stops here and kilit leaves the \
+         tables as they are."
+    )
+}
+
+/// The sentence of every other case (C).
+const CASE_ENDING_LOST: &str = "kilit cannot tell which setting the migration goes on with, so it \
+     stops trusting the tables the statement may change.";
+
+/// What kilit says about each statement of `sql`: the same on both servers.
+fn case_answers(schema: &str, sql: &str) -> Vec<String> {
+    let on_80 = on_mysql_80(schema, sql);
+    let on_84 = on_mysql_84(schema, sql);
+    assert_eq!(on_80, on_84, "{sql}");
+    on_84
+}
+
+/// What kilit says about the last statement of `sql`: the same on both
+/// servers.
+fn case_last_answer(schema: &str, sql: &str) -> String {
+    case_answers(schema, sql).pop().unwrap()
+}
+
+/// The reason for the last statement of `sql`, which has no answer: the same
+/// on both servers.
+fn case_reason(schema: &str, sql: &str) -> String {
+    let reason = unknown_reason_on(MYSQL_84, schema, sql);
+    assert_eq!(reason, unknown_reason_on(MYSQL_80, schema, sql), "{sql}");
+    reason
+}
+
+/// Asserts that the last statement of `sql` is unknown for a name in
+/// another letter case: the reason says lower_case_table_names = 0, names
+/// the table kilit knows and the name written.
+fn assert_case_unknown(schema: &str, sql: &str, known: &str, written: &str) -> String {
+    let reason = case_reason(schema, sql);
+    assert!(
+        reason.contains("lower_case_table_names = 0"),
+        "{sql}\n    {reason}"
+    );
+    assert!(
+        reason.contains(&format!("kilit knows this table as {known}.")),
+        "{sql}\n    {reason}"
+    );
+    assert!(
+        reason.contains(&format!("{written} is another table")),
+        "{sql}\n    {reason}"
+    );
+    reason
+}
+
+#[test]
+fn a_table_name_written_as_kilit_knows_it_keeps_its_answers() {
+    let plain = case_plain();
+    for (sql, answer) in [
+        ("ALTER TABLE orders ADD COLUMN x INT NULL", INSTANT),
+        ("ALTER TABLE `orders` ADD COLUMN x INT NULL", INSTANT),
+        ("ALTER TABLE orders DROP COLUMN user_id", FAILS_1828),
+        ("CREATE INDEX i3 ON orders (note)", INPLACE),
+        ("DROP INDEX ix ON orders", INPLACE),
+        ("ALTER TABLE `çizelge` ADD COLUMN x INT NULL", INSTANT),
+        ("ALTER TABLE users ADD COLUMN x INT NULL", INSTANT),
+    ] {
+        assert_eq!(case_last_answer(&plain, sql), answer, "{sql}");
+    }
+    assert_eq!(
+        case_last_answer(&case_fulltext(), "ALTER TABLE orders ADD COLUMN x INT NULL"),
+        COPY
+    );
+    // Not measured today, and not because of the name.
+    assert_eq!(case_last_answer(&plain, "DROP TABLE orders"), "not checked");
+    for sql in ["RENAME TABLE orders TO o2", "TRUNCATE TABLE orders"] {
+        let reason = case_reason(&plain, sql);
+        assert!(reason.contains("has not been measured yet"), "{reason}");
+    }
+}
+
+#[test]
+fn altering_a_table_in_another_letter_case_is_unknown_where_the_exact_name_copies() {
+    // The old answer was orders': COPY, writes wait.
+    let schema = case_fulltext();
+    assert_eq!(
+        case_last_answer(&schema, "ALTER TABLE orders ADD COLUMN x INT NULL"),
+        COPY
+    );
+    for written in ["ORDERS", "Orders", "oRDERS", "`ORDERS`", "`Orders`"] {
+        let sql = format!("ALTER TABLE {written} ADD COLUMN x INT NULL");
+        assert_eq!(case_last_answer(&schema, &sql), UNKNOWN, "{sql}");
+        assert_case_unknown(&schema, &sql, "orders", written.trim_matches('`'));
+    }
+}
+
+#[test]
+fn the_reason_for_a_name_in_another_letter_case_says_what_each_setting_does() {
+    let reason = case_reason(&case_plain(), "ALTER TABLE ORDERS ADD COLUMN x INT NULL");
+    assert_eq!(
+        reason,
+        format!(
+            "{} {}",
+            case_sentence("orders", "ORDERS", CASE_REFUSE),
+            case_ending_a("orders", "ORDERS")
+        )
+    );
+    assert_eq!(
+        reason,
+        "kilit knows this table as orders. With lower_case_table_names = 0, the default on \
+         Linux, ORDERS is another table, and MySQL 8.0.46 and 8.4.13 refuse the statement \
+         when no table has that exact name; with 1 or 2, the defaults on Windows and macOS, \
+         it is the same table. With 0 the statement fails and the migration stops there, so \
+         kilit goes on as with 1 or 2, where ORDERS is orders."
+    );
+}
+
+#[test]
+fn the_reason_of_a_statement_that_fails_with_1_ends_with_the_sentence_for_going_on_as_with_0() {
+    // CREATE TABLE ORDERS next to orders is 1050 with 1 or 2 (hand test 9).
+    let reason = case_reason(&case_plain(), "CREATE TABLE ORDERS (id INT PRIMARY KEY)");
+    assert_eq!(
+        reason,
+        "kilit knows this table as orders. With lower_case_table_names = 0, the default on \
+         Linux, ORDERS is another table, and MySQL 8.0.46 and 8.4.13 take it as a new name; \
+         with 1 or 2, the defaults on Windows and macOS, it is the same table. With 1 or 2 \
+         the statement fails and the migration stops there, so kilit goes on as with 0, \
+         where ORDERS is a table of its own."
+    );
+}
+
+#[test]
+fn the_reason_of_a_foreign_key_with_the_checks_off_ends_with_the_sentence_for_the_key_as_written() {
+    // Hand test 10: both settings accept it with foreign_key_checks = 0.
+    let sql = "SET foreign_key_checks = 0;
+        ALTER TABLE orders ADD CONSTRAINT fk_u2 FOREIGN KEY (user_id) REFERENCES USERS (id)";
+    let reason = case_reason(&case_plain(), sql);
+    assert_eq!(
+        reason,
+        format!(
+            "{} {CASE_ENDING_CHECKS_OFF}",
+            case_sentence("users", "USERS", CASE_FOREIGN_KEY)
+        )
+    );
+    assert_eq!(
+        reason,
+        "kilit knows this table as users. With lower_case_table_names = 0, the default on \
+         Linux, USERS is another table, and MySQL 8.0.46 and 8.4.13 refuse the foreign key \
+         when foreign_key_checks is on and no table has that exact name; with 1 or 2, the \
+         defaults on Windows and macOS, it is the same table. With the checks off both \
+         settings add the foreign key, so kilit goes on with it as written."
+    );
+}
+
+#[test]
+fn the_reason_of_a_statement_whose_two_settings_part_ways_ends_with_the_sentence_for_not_trusting()
+{
+    // DROP TABLE IF EXISTS ORDERS: a note with 0, the drop of orders with 1.
+    let reason = case_reason(&case_plain(), "DROP TABLE IF EXISTS ORDERS");
+    assert_eq!(
+        reason,
+        "kilit knows this table as orders. With lower_case_table_names = 0, the default on \
+         Linux, ORDERS is another table, and MySQL 8.0.46 and 8.4.13 skip it with a note \
+         when no table has that exact name; with 1 or 2, the defaults on Windows and macOS, \
+         it is the same table. kilit cannot tell which setting the migration goes on with, \
+         so it stops trusting the tables the statement may change."
+    );
+}
+
+#[test]
+fn a_name_that_matches_no_table_in_any_case_gets_the_answer_it_got_before() {
+    // Missing: a note, never a failure, and the letter case changes nothing.
+    let schema = case_plain();
+    for table in ["ghosts", "GHOSTS", "Ghosts", "orders_old", "ORDERS_OLD"] {
+        let sql = format!("ALTER TABLE {table} ADD COLUMN x INT NULL");
+        assert_eq!(case_last_answer(&schema, &sql), INSTANT, "{sql}");
+    }
+    // A database in front of a name makes another name, as before.
+    assert_eq!(
+        case_last_answer(
+            &schema,
+            "ALTER TABLE kilit_lab.orders ADD COLUMN x INT NULL"
+        ),
+        INSTANT
+    );
+    // A table that was dropped is Missing, in either case.
+    for table in ["orders", "ORDERS"] {
+        let sql = format!("DROP TABLE orders; ALTER TABLE {table} ADD COLUMN x INT NULL");
+        assert_eq!(case_last_answer(&schema, &sql), INSTANT, "{sql}");
+    }
+}
+
+#[test]
+fn every_place_that_looks_up_a_table_says_what_mysql_does_with_the_name_in_another_case() {
+    // (statement, the table kilit knows, the name written, what MySQL does,
+    // the world kilit goes on in: A, B or C).
+    // MySQL's answers with lower_case_table_names = 0: ALTER TABLE, CREATE
+    // INDEX, DROP INDEX, RENAME TABLE, DROP TABLE, TRUNCATE TABLE: 1146 or
+    // 1051; DROP TABLE IF EXISTS: a note; CREATE TABLE and RENAME ... TO: a
+    // new table; REFERENCES with the checks on: 1824.
+    let self_reference = "ALTER TABLE orders ADD COLUMN parent_id BIGINT UNSIGNED NULL;\n";
+    let rows: Vec<(String, &str, &str, &str, char)> =
+        vec![
+        ("ALTER TABLE ORDERS ADD COLUMN x INT NULL".into(), "orders", "ORDERS", CASE_REFUSE, 'A'),
+        ("ALTER TABLE `Orders` ADD COLUMN x INT NULL".into(), "orders", "Orders", CASE_REFUSE, 'A'),
+        ("CREATE INDEX i3 ON ORDERS (note)".into(), "orders", "ORDERS", CASE_REFUSE, 'A'),
+        ("DROP INDEX ix ON ORDERS".into(), "orders", "ORDERS", CASE_REFUSE, 'A'),
+        ("RENAME TABLE ORDERS TO o2".into(), "orders", "ORDERS", CASE_REFUSE, 'A'),
+        ("RENAME TABLE orders TO USERS".into(), "users", "USERS", CASE_NEW_NAME, 'C'),
+        ("ALTER TABLE orders RENAME TO USERS".into(), "users", "USERS", CASE_NEW_NAME, 'C'),
+        ("DROP TABLE ORDERS".into(), "orders", "ORDERS", CASE_REFUSE, 'A'),
+        ("DROP TABLE users, ORDERS".into(), "orders", "ORDERS", CASE_REFUSE, 'C'),
+        ("DROP TABLE IF EXISTS ORDERS".into(), "orders", "ORDERS", CASE_SKIP, 'C'),
+        ("TRUNCATE TABLE ORDERS".into(), "orders", "ORDERS", CASE_REFUSE, 'A'),
+        ("CREATE TABLE ORDERS (id INT PRIMARY KEY)".into(), "orders", "ORDERS", CASE_NEW_NAME, 'B'),
+        (
+            "ALTER TABLE orders ADD CONSTRAINT fk_u2 FOREIGN KEY (user_id) REFERENCES USERS (id)"
+                .into(),
+            "users",
+            "USERS",
+            CASE_FOREIGN_KEY,
+            'A',
+        ),
+        (
+            "CREATE TABLE t9 (id INT PRIMARY KEY, user_id BIGINT UNSIGNED, \
+             CONSTRAINT fk9 FOREIGN KEY (user_id) REFERENCES USERS (id))"
+                .into(),
+            "users",
+            "USERS",
+            CASE_FOREIGN_KEY,
+            'C',
+        ),
+        (
+            format!(
+                "{self_reference}ALTER TABLE orders ADD CONSTRAINT fk_p \
+                 FOREIGN KEY (parent_id) REFERENCES ORDERS (id)"
+            ),
+            "orders",
+            "ORDERS",
+            CASE_FOREIGN_KEY,
+            'C',
+        ),
+        (
+            "CREATE TABLE t8 (id INT PRIMARY KEY, parent_id INT, \
+             CONSTRAINT fk8 FOREIGN KEY (parent_id) REFERENCES T8 (id))"
+                .into(),
+            "t8",
+            "T8",
+            CASE_FOREIGN_KEY,
+            'C',
+        ),
+    ];
+    let schema = case_plain();
+    for (sql, known, written, effect, world) in rows {
+        let ending = match world {
+            'A' => case_ending_a(known, written),
+            'B' => case_ending_b(written),
+            _ => CASE_ENDING_LOST.to_owned(),
+        };
+        assert_eq!(case_last_answer(&schema, &sql), UNKNOWN, "{sql}");
+        assert_eq!(
+            case_reason(&schema, &sql),
+            format!("{} {ending}", case_sentence(known, written, effect)),
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn truncating_without_the_word_table_in_another_letter_case_is_unknown_too() {
+    // DB::table('orders')->truncate() prints "truncate table `orders`"; the
+    // short form is MySQL's too.
+    let schema = case_plain();
+    for sql in ["TRUNCATE ORDERS", "truncate `Orders`"] {
+        assert_eq!(case_last_answer(&schema, sql), UNKNOWN, "{sql}");
+        assert!(
+            case_reason(&schema, sql).contains("lower_case_table_names = 0"),
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn a_foreign_key_to_a_parent_in_another_case_is_unknown_with_the_checks_on_or_off() {
+    // Hand test: with the checks on and lower_case_table_names = 0 the
+    // server refuses with 1824; with them off it accepts and the key points
+    // at USERS, a table that does not exist.
+    let schema = case_plain();
+    let add = |parent: &str| {
+        format!(
+            "ALTER TABLE orders ADD CONSTRAINT fk_u2 FOREIGN KEY (user_id) REFERENCES {parent} (id)"
+        )
+    };
+    // Exact name: today's answers.
+    assert_eq!(
+        case_last_answer(
+            &schema,
+            &format!("SET foreign_key_checks = 1;\n{}", add("users"))
+        ),
+        COPY
+    );
+    assert_eq!(
+        case_last_answer(
+            &schema,
+            &format!("SET foreign_key_checks = 0;\n{}", add("`users`"))
+        ),
+        INPLACE
+    );
+    // Another case: unknown, whatever the checks say.
+    for set in [
+        "",
+        "SET foreign_key_checks = 1;\n",
+        "SET foreign_key_checks = 0;\n",
+    ] {
+        for parent in ["USERS", "Users", "`USERS`"] {
+            let sql = format!("{set}{}", add(parent));
+            assert_eq!(case_last_answer(&schema, &sql), UNKNOWN, "{sql}");
+            assert_case_unknown(&schema, &sql, "users", parent.trim_matches('`'));
+        }
+    }
+    // A parent that matches no table in any case: as before.
+    assert_eq!(
+        case_last_answer(
+            &schema,
+            &format!("SET foreign_key_checks = 0;\n{}", add("ghosts"))
+        ),
+        INPLACE
+    );
+}
+
+#[test]
+fn a_column_in_another_case_is_still_the_same_column_of_an_exactly_named_parent() {
+    // Column names are compared without case on every setting.
+    let schema = case_plain();
+    let sql = "SET foreign_key_checks = 1;
+        ALTER TABLE orders ADD CONSTRAINT fk_u2 FOREIGN KEY (USER_ID) REFERENCES users (ID)";
+    assert_eq!(case_last_answer(&schema, sql), COPY);
+}
+
+#[test]
+fn a_create_table_with_a_parent_in_another_case_is_unknown_and_with_the_exact_name_is_not_checked()
+{
+    let schema = case_plain();
+    let create = "CREATE TABLE t9 (id INT PRIMARY KEY, user_id BIGINT UNSIGNED, \
+                  CONSTRAINT fk9 FOREIGN KEY (user_id) REFERENCES USERS (id));\n";
+    assert_eq!(case_last_answer(&schema, create), UNKNOWN);
+    // The same statement with the exact name: a new table, nothing checked.
+    let exact = create.replace("USERS", "users");
+    assert_eq!(case_last_answer(&schema, &exact), "not checked");
+}
+
+#[test]
+fn a_database_in_front_of_a_table_name_in_another_case_is_unknown() {
+    // Hand test: KILIT_HAND_14.orders is 1049 and kilit_hand_14.ORDERS is
+    // 1146 with lower_case_table_names = 0, both accepted with 1.
+    let create = "CREATE TABLE shop.orders (id INT PRIMARY KEY, a INT);\n";
+    let schema = "";
+    assert_eq!(
+        case_last_answer(
+            schema,
+            &format!("{create}ALTER TABLE shop.orders ADD COLUMN x INT NULL")
+        ),
+        INSTANT
+    );
+    assert_eq!(
+        case_last_answer(
+            schema,
+            &format!("{create}ALTER TABLE `shop`.`orders` ADD COLUMN x INT NULL")
+        ),
+        INSTANT
+    );
+    for written in [
+        "Shop.orders",
+        "SHOP.ORDERS",
+        "shop.Orders",
+        "`SHOP`.`orders`",
+    ] {
+        let sql = format!("{create}ALTER TABLE {written} ADD COLUMN x INT NULL");
+        assert_eq!(case_last_answer(schema, &sql), UNKNOWN, "{sql}");
+        let reason = case_reason(schema, &sql);
+        assert!(reason.contains("lower_case_table_names = 0"), "{reason}");
+        assert!(reason.contains("shop.orders"), "{reason}");
+    }
+}
+
+#[test]
+fn a_table_name_with_non_ascii_letters_in_another_case_is_unknown() {
+    // Hand test: ÇİZELGE, ÇIZELGE and Çizelge are all 1146 with
+    // lower_case_table_names = 0 and all reach çizelge with 1.
+    let schema = case_plain();
+    assert_eq!(
+        case_last_answer(&schema, "ALTER TABLE çizelge ADD COLUMN x INT NULL"),
+        INSTANT
+    );
+    for written in ["ÇİZELGE", "ÇIZELGE", "Çizelge", "çİzelge"] {
+        let sql = format!("ALTER TABLE {written} ADD COLUMN x INT NULL");
+        assert_eq!(case_last_answer(&schema, &sql), UNKNOWN, "{sql}");
+        assert_case_unknown(&schema, &sql, "çizelge", written);
+    }
+    // Another name altogether: as before.
+    assert_eq!(
+        case_last_answer(&schema, "ALTER TABLE ÇİZELGE2 ADD COLUMN x INT NULL"),
+        INSTANT
+    );
+}
+
+#[test]
+fn a_temporary_table_name_in_another_case_is_unknown() {
+    // Hand test: ALTER TABLE TMP1 on a temporary tmp1 is 1146 with 0.
+    let create = "CREATE TEMPORARY TABLE tmp1 (id INT);\n";
+    assert_eq!(
+        case_last_answer(
+            "",
+            &format!("{create}ALTER TABLE tmp1 ADD COLUMN a INT NULL")
+        ),
+        INSTANT
+    );
+    let sql = format!("{create}ALTER TABLE TMP1 ADD COLUMN a INT NULL");
+    assert_eq!(case_last_answer("", &sql), UNKNOWN);
+    assert_case_unknown("", &sql, "tmp1", "TMP1");
+}
+
+#[test]
+fn two_names_in_one_statement_that_differ_only_in_case_are_unknown() {
+    // RENAME TABLE a TO b, B TO c: with 0 the second old name is another
+    // table; with 1 it is the table the first pair just renamed.
+    let create = "CREATE TABLE a1 (id INT PRIMARY KEY);\n";
+    let sql = format!("{create}RENAME TABLE a1 TO b1, B1 TO c1");
+    assert_eq!(case_last_answer("", &sql), UNKNOWN);
+    assert_case_unknown("", &sql, "b1", "B1");
+    // Without the second pair it is the unmeasured rename of before.
+    let reason = case_reason("", &format!("{create}RENAME TABLE a1 TO b1, b1 TO c1"));
+    assert!(reason.contains("has not been measured yet"), "{reason}");
+    // A key that points at a table of the same statement in another case.
+    let sql = "CREATE TABLE t (id INT PRIMARY KEY, parent_id INT, \
+               CONSTRAINT f FOREIGN KEY (parent_id) REFERENCES T (id))";
+    assert_eq!(case_last_answer("", sql), UNKNOWN);
+    assert_case_unknown("", sql, "t", "T");
+}
+
+/// "COPY" when `table` is still known after `statements` (a FULLTEXT index
+/// makes a new column copy it), "INSTANT" when kilit stopped trusting it
+/// (the answer of any table kilit cannot see, with the FULLTEXT index as a
+/// note), on the tables of `case_fulltext`.
+fn case_trust_after(statements: &str, table: &str) -> String {
+    case_last_answer(
+        &case_fulltext(),
+        &format!("{statements};\nALTER TABLE {table} ADD COLUMN x INT NULL"),
+    )
+}
+
+#[test]
+fn what_kilit_trusts_after_a_statement_in_another_letter_case_follows_the_hand_tests() {
+    // After each statement: `ALTER TABLE <table> ADD COLUMN x INT NULL` on the
+    // FULLTEXT tables. COPY: the table is known (its FULLTEXT index is
+    // seen). INSTANT: the table is gone or no longer trusted, the answer of a
+    // table kilit cannot see. UNKNOWN: the name is ambiguous next to its twin.
+    // A) the statement fails with 0 and the migration stops: kilit goes on
+    // with the table known (hand tests 1-8, 10, 11, 13, 14).
+    // B) it fails with 1: ORDERS / USERS is the table, renamed, or a table of
+    // its own. C) the tables it may change are lost.
+    let rows: &[(&str, &[(&str, &str)])] = &[
+        // A: applied to the known table, which stays known.
+        (
+            "ALTER TABLE ORDERS ADD COLUMN y INT NULL",
+            &[("orders", COPY), ("users", COPY)],
+        ),
+        (
+            "CREATE INDEX i3 ON ORDERS (note)",
+            &[("orders", COPY), ("users", COPY)],
+        ),
+        (
+            "DROP INDEX ix ON ORDERS",
+            &[("orders", COPY), ("users", COPY)],
+        ),
+        (
+            "TRUNCATE TABLE ORDERS",
+            &[("orders", COPY), ("users", COPY)],
+        ),
+        (
+            "ALTER TABLE orders ADD CONSTRAINT fk_u2 FOREIGN KEY (user_id) REFERENCES USERS (id)",
+            &[("orders", COPY), ("users", COPY)],
+        ),
+        // A: the table is gone (Missing), or has another name and is known.
+        ("DROP TABLE ORDERS", &[("orders", INSTANT), ("users", COPY)]),
+        (
+            "RENAME TABLE ORDERS TO o2",
+            &[("orders", INSTANT), ("o2", COPY), ("users", COPY)],
+        ),
+        // B: the table is renamed to its own name in another case. The old
+        // spelling is Missing, but it matches the known new one without case:
+        // unknown (R2).
+        (
+            "RENAME TABLE users TO USERS",
+            &[("users", UNKNOWN), ("USERS", COPY), ("orders", COPY)],
+        ),
+        (
+            "RENAME TABLE orders TO ORDERS",
+            &[("orders", UNKNOWN), ("ORDERS", COPY), ("users", COPY)],
+        ),
+        // C: the tables the statement may change are lost.
+        (
+            "DROP TABLE IF EXISTS ORDERS",
+            &[("orders", INSTANT), ("users", COPY)],
+        ),
+        (
+            "DROP TABLE ORDERS, users",
+            &[("orders", INSTANT), ("users", INSTANT)],
+        ),
+        (
+            "DROP TABLE users, ORDERS",
+            &[("orders", INSTANT), ("users", INSTANT)],
+        ),
+        (
+            "CREATE TABLE t9 (id INT PRIMARY KEY, user_id BIGINT UNSIGNED, \
+             CONSTRAINT fk9 FOREIGN KEY (user_id) REFERENCES USERS (id))",
+            &[("orders", COPY), ("users", COPY)],
+        ),
+        (
+            "ALTER TABLE users RENAME TO USERS",
+            &[("users", UNKNOWN), ("USERS", UNKNOWN), ("orders", COPY)],
+        ),
+    ];
+    for (statement, tables) in rows {
+        for (table, expected) in *tables {
+            assert_eq!(
+                case_trust_after(statement, table),
+                *expected,
+                "{statement}\n    then ALTER TABLE {table}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_statement_that_fails_with_0_is_applied_to_the_known_table_and_a_measured_failure_changes_nothing()
+ {
+    // A) The statement goes on as with 1 or 2, where ORDERS is orders.
+    let plain = case_plain();
+    // ADD FULLTEXT makes the later new column copy the table; DROP TABLE IF
+    // EXISTS (C) loses the table instead, and the new column is INSTANT.
+    let fulltext = "ALTER TABLE ORDERS ADD FULLTEXT ft_email (email);\n";
+    assert_eq!(
+        case_last_answer(
+            &plain,
+            &format!("{fulltext}ALTER TABLE orders ADD COLUMN x INT NULL")
+        ),
+        COPY
+    );
+    assert_eq!(
+        case_last_answer(
+            &plain,
+            "DROP TABLE IF EXISTS ORDERS;\nALTER TABLE orders ADD COLUMN x INT NULL"
+        ),
+        INSTANT
+    );
+    // The foreign key is dropped by the statement: its column can go.
+    assert_eq!(
+        case_last_answer(
+            &plain,
+            "ALTER TABLE ORDERS DROP FOREIGN KEY fk_x;\nALTER TABLE orders DROP COLUMN user_id"
+        ),
+        "INPLACE, rebuilds the table, writes continue"
+    );
+    // A statement that fails under 1 or 2 changes nothing (1828), so the
+    // column is still in the foreign key.
+    assert_eq!(
+        case_last_answer(
+            &plain,
+            "ALTER TABLE ORDERS DROP COLUMN user_id;\nALTER TABLE orders DROP COLUMN user_id"
+        ),
+        FAILS_1828
+    );
+    // DROP TABLE: orders is gone (Missing), and a table made later under the
+    // name is new.
+    assert_eq!(
+        case_impacts(
+            &plain,
+            "DROP TABLE ORDERS; CREATE TABLE orders (id INT PRIMARY KEY); \
+             ALTER TABLE orders ADD COLUMN x INT NULL;"
+        ),
+        [Impact::Unknown, Impact::NotChecked, Impact::NewTable]
+    );
+    // RENAME: o2 is orders, with its foreign key; orders is gone.
+    assert_eq!(
+        case_last_answer(
+            &plain,
+            "RENAME TABLE ORDERS TO o2;\nALTER TABLE o2 DROP COLUMN user_id"
+        ),
+        FAILS_1828
+    );
+    assert_eq!(
+        case_last_answer(
+            &plain,
+            "RENAME TABLE ORDERS TO o2;\nALTER TABLE orders DROP COLUMN user_id"
+        ),
+        INSTANT
+    );
+}
+
+#[test]
+fn the_foreign_key_of_a_parent_in_another_case_is_added_when_the_checks_are_on_or_off() {
+    // A (checks on or never set) and B' (checks off): the child gets the key
+    // to users, so its column cannot go (1828). A column that does not fit
+    // the parent is a measured failure with the checks on (3780): no key.
+    let plain = case_plain();
+    let column = "ALTER TABLE orders ADD COLUMN ref BIGINT UNSIGNED NULL;\n";
+    let key = "ALTER TABLE orders ADD CONSTRAINT fk_ref FOREIGN KEY (ref) REFERENCES USERS (id);\n";
+    let drop = "ALTER TABLE orders DROP COLUMN ref";
+    for set in [
+        "",
+        "SET foreign_key_checks = 1;\n",
+        "SET foreign_key_checks = 0;\n",
+    ] {
+        let sql = format!("{set}{column}{key}SET foreign_key_checks = 1;\n{drop}");
+        assert_eq!(case_last_answer(&plain, &sql), FAILS_1828, "{sql}");
+    }
+    let mismatch = "ALTER TABLE orders ADD COLUMN ref INT NULL;\n";
+    let sql = format!("{mismatch}{key}{drop}");
+    assert_eq!(
+        case_last_answer(&plain, &sql),
+        INSTANT,
+        "3780 under 1 or 2: no key"
+    );
+    // With the checks off the key is added, then the column of the key
+    // cannot go.
+    let sql = "SET foreign_key_checks = 0;
+        ALTER TABLE orders ADD CONSTRAINT fk_u2 FOREIGN KEY (user_id) REFERENCES USERS (id);
+        SET foreign_key_checks = 1;
+        ALTER TABLE orders DROP COLUMN user_id;";
+    let answers = case_answers(&plain, sql);
+    assert_eq!(answers[3], FAILS_1828);
+    assert_eq!(answers[1], UNKNOWN);
+}
+
+#[test]
+fn creating_an_index_in_another_case_keeps_the_table_known_so_the_foreign_key_index_cannot_go() {
+    // CREATE INDEX i9 ON ORDERS applies to orders (1146 with 0, so kilit goes
+    // on as with 1 or 2), and dropping the only index of the foreign key
+    // fails with 1553.
+    let sql = "CREATE INDEX i9 ON ORDERS (email);\nALTER TABLE orders DROP INDEX fk_x;";
+    let answers = case_answers(&case_plain(), sql);
+    assert_eq!(answers, [UNKNOWN, FAILS_1553]);
+}
+
+#[test]
+fn a_statement_in_another_letter_case_leaves_the_other_tables_alone() {
+    // The table of another name is known as before.
+    for statement in [
+        "ALTER TABLE ORDERS ADD COLUMN y INT NULL",
+        "DROP TABLE ORDERS",
+        "TRUNCATE TABLE ORDERS",
+    ] {
+        let sql = format!("{statement};\nALTER TABLE `çizelge` ADD COLUMN x INT NULL");
+        assert_eq!(case_last_answer(&case_fulltext(), &sql), INSTANT, "{sql}");
+    }
+    // A foreign key column of orders is still known to fail.
+    let sql = "TRUNCATE TABLE ORDERS;\nALTER TABLE orders DROP COLUMN user_id";
+    assert_eq!(case_last_answer(&case_plain(), sql), FAILS_1828);
+    // And after a statement that fails with 0 and applies to orders with 1 or
+    // 2, the table is still known: the foreign key still holds the column.
+    let sql = "ALTER TABLE ORDERS ADD COLUMN y INT NULL;\nALTER TABLE orders DROP COLUMN user_id";
+    assert_eq!(case_last_answer(&case_plain(), sql), FAILS_1828);
+    // Where the two settings part ways the table is lost: no failure from it.
+    let sql = "DROP TABLE IF EXISTS ORDERS;\nALTER TABLE orders DROP COLUMN user_id";
+    assert_eq!(case_last_answer(&case_plain(), sql), INSTANT);
+}
+
+#[test]
+fn a_new_name_in_another_letter_case_is_its_own_table_or_stays_ambiguous_next_to_the_table_it_matches()
+ {
+    let schema = case_fulltext();
+    // B) CREATE TABLE ORDERS next to orders fails with 1 (1050), so kilit goes
+    // on as with 0: ORDERS is a table of its own, with its own answers (no
+    // FULLTEXT index), and orders is unchanged.
+    let create = "CREATE TABLE ORDERS (id INT PRIMARY KEY);\n";
+    assert_eq!(case_last_answer(&schema, create.trim_end()), UNKNOWN);
+    assert_eq!(
+        case_last_answer(
+            &schema,
+            &format!("{create}ALTER TABLE ORDERS ADD COLUMN x INT NULL")
+        ),
+        INSTANT
+    );
+    assert_eq!(
+        case_last_answer(
+            &schema,
+            &format!("{create}ALTER TABLE orders ADD COLUMN x INT NULL")
+        ),
+        COPY
+    );
+    // C) the same with IF NOT EXISTS, TEMPORARY, a foreign key, or a rename
+    // of another table to the name: both settings go on, the new name is lost
+    // and ambiguous next to orders; orders itself stays known.
+    for statement in [
+        "CREATE TABLE IF NOT EXISTS ORDERS (id INT PRIMARY KEY)",
+        "CREATE TABLE ORDERS (id INT PRIMARY KEY, user_id BIGINT UNSIGNED, \
+         CONSTRAINT f FOREIGN KEY (user_id) REFERENCES users (id))",
+        "RENAME TABLE users TO ORDERS",
+        "ALTER TABLE users RENAME TO ORDERS",
+    ] {
+        assert_eq!(
+            case_trust_after(statement, "orders"),
+            COPY,
+            "{statement}: orders"
+        );
+        let sql = format!("{statement};\nALTER TABLE ORDERS ADD COLUMN x INT NULL");
+        assert_eq!(case_last_answer(&schema, &sql), UNKNOWN, "{sql}");
+        assert_case_unknown(&schema, &sql, "orders", "ORDERS");
+    }
+    // B) the table renamed to its own name in another case: ORDERS is the
+    // table (its FULLTEXT index is seen); orders is gone, and the old
+    // spelling matches ORDERS without case, so a statement on it is unknown.
+    let rename = "RENAME TABLE orders TO ORDERS;\n";
+    assert_eq!(
+        case_last_answer(
+            &schema,
+            &format!("{rename}ALTER TABLE ORDERS ADD COLUMN x INT NULL")
+        ),
+        COPY
+    );
+    let sql = format!("{rename}ALTER TABLE orders ADD COLUMN x INT NULL");
+    assert_eq!(case_last_answer(&schema, &sql), UNKNOWN);
+    assert_case_unknown(&schema, &sql, "ORDERS", "orders");
+    // C) ALTER ... RENAME TO is accepted by both settings, with different
+    // tables: both spellings are ambiguous.
+    for (table, other) in [("orders", "ORDERS"), ("ORDERS", "orders")] {
+        let sql = format!(
+            "ALTER TABLE orders RENAME TO ORDERS;\nALTER TABLE {table} ADD COLUMN x INT NULL"
+        );
+        assert_eq!(case_last_answer(&schema, &sql), UNKNOWN, "{sql}");
+        assert_case_unknown(&schema, &sql, other, table);
+    }
+    // Lost without a twin: the lost-table answer.
+    assert_eq!(
+        case_trust_after("DROP TABLE IF EXISTS ORDERS", "orders"),
+        INSTANT
+    );
+}
+
+#[test]
+fn a_create_table_if_not_exists_in_another_letter_case_makes_a_later_alter_of_it_unknown() {
+    // Laravel's Schema::createIfNotExists('ORDERS') against a dump that spells
+    // the table orders: the old answer for ALTER TABLE ORDERS was orders'
+    // COPY (FULLTEXT index).
+    let schema = case_fulltext();
+    let create = "CREATE TABLE IF NOT EXISTS ORDERS (id INT PRIMARY KEY);\n";
+    assert_eq!(
+        case_last_answer(&schema, create.trim_end_matches('\n')),
+        UNKNOWN
+    );
+    let sql = format!("{create}ALTER TABLE ORDERS ADD COLUMN x INT NULL");
+    assert_eq!(case_last_answer(&schema, &sql), UNKNOWN);
+    assert_case_unknown(&schema, &sql, "orders", "ORDERS");
+    let sql = format!("{create}ALTER TABLE orders ADD COLUMN x INT NULL");
+    assert_eq!(case_last_answer(&schema, &sql), COPY);
+}
+
+#[test]
+fn laravel_dropping_and_creating_a_table_in_another_letter_case_is_unknown_all_the_way_but_not_for_a_table_made_here()
+ {
+    // Schema::dropIfExists('ORDERS'); Schema::create('ORDERS', ...); then
+    // $table->fullText('note') against a dump that spells the table orders.
+    // The DROP IF EXISTS loses orders (C), so the CREATE is no longer certain
+    // to fail with 1 and the ALTER stays ambiguous: all three are unknown.
+    let schema = case_plain();
+    let sql = "DROP TABLE IF EXISTS ORDERS;
+        CREATE TABLE ORDERS (id INT PRIMARY KEY, note TEXT);
+        ALTER TABLE ORDERS ADD FULLTEXT (note);";
+    assert_eq!(case_answers(&schema, sql), [UNKNOWN, UNKNOWN, UNKNOWN]);
+    assert_eq!(
+        case_impacts(&schema, sql),
+        [Impact::Unknown, Impact::Unknown, Impact::Unknown]
+    );
+    // With no schema the first spelling is a table made here and known (B):
+    // the second CREATE fails with 1, so Posts is a table of its own, and the
+    // third statement gets the measured answer of ADD FULLTEXT (lab: INPLACE,
+    // rebuilds the table, writes wait) on a new table.
+    let sql = "CREATE TABLE posts (id INT PRIMARY KEY, body TEXT);
+        CREATE TABLE Posts (id INT PRIMARY KEY, body TEXT);
+        ALTER TABLE Posts ADD FULLTEXT (body);";
+    assert_eq!(
+        case_answers("", sql),
+        [
+            "not checked",
+            UNKNOWN,
+            "INPLACE, rebuilds the table, writes wait"
+        ]
+    );
+    assert_eq!(
+        case_impacts("", sql),
+        [Impact::NotChecked, Impact::Unknown, Impact::NewTable]
+    );
+}
+
+#[test]
+fn a_temporary_table_in_another_letter_case_hides_the_known_table_only_inside_the_input_it_is_in() {
+    // CREATE TEMPORARY TABLE Orders: within the file ALTER TABLE orders is
+    // ambiguous (with 1 the temporary Orders hides orders and the statement
+    // hits it, with 0 it hits the base table): unknown, the case reason with
+    // the temporary table as the one kilit knows. The next file starts a new
+    // session and the temporary table is gone, so orders is known again (COPY,
+    // FULLTEXT; the cli test).
+    let schema = case_fulltext();
+    let create = "CREATE TEMPORARY TABLE Orders (id INT);\n";
+    let sql = format!("{create}ALTER TABLE orders ADD COLUMN z INT NULL");
+    assert_eq!(case_last_answer(&schema, &sql), UNKNOWN);
+    assert_case_unknown(&schema, &sql, "Orders", "orders");
+    // Without the temporary table: known.
+    assert_eq!(
+        case_last_answer(&schema, "ALTER TABLE orders ADD COLUMN z INT NULL"),
+        COPY
+    );
+}
+
+#[test]
+fn a_create_table_like_in_another_letter_case_keeps_its_reason_and_the_known_table() {
+    // CREATE TABLE ORDERS LIKE users: kilit cannot read LIKE. It keeps that
+    // reason, loses ORDERS (ambiguous next to orders) and leaves orders known.
+    let schema = case_fulltext();
+    let create = "CREATE TABLE ORDERS LIKE users";
+    assert_eq!(case_last_answer(&schema, create), UNKNOWN);
+    let reason = case_reason(&schema, create);
+    assert!(!reason.contains("lower_case_table_names"), "{reason}");
+    let sql = format!("{create};\nALTER TABLE orders ADD COLUMN x INT NULL");
+    assert_eq!(case_last_answer(&schema, &sql), COPY);
+    // ORDERS is lost, and ambiguous next to orders like the new name of a
+    // readable CREATE TABLE.
+    let sql = format!("{create};\nALTER TABLE ORDERS ADD COLUMN x INT NULL");
+    assert_eq!(case_last_answer(&schema, &sql), UNKNOWN);
+    assert_case_unknown(&schema, &sql, "orders", "ORDERS");
+}
+
+#[test]
+fn a_statement_kilit_cannot_read_keeps_its_own_reason_and_loses_the_table_in_another_case() {
+    let schema = case_fulltext();
+    let sql = "ALTER TABLE ORDERS FROBNICATE x";
+    assert_eq!(case_last_answer(&schema, sql), UNKNOWN);
+    let reason = case_reason(&schema, sql);
+    assert!(
+        reason.starts_with("kilit could not read this statement"),
+        "{reason}"
+    );
+    assert!(!reason.contains("lower_case_table_names"), "{reason}");
+    assert_eq!(case_trust_after(sql, "orders"), INSTANT);
+    assert_eq!(case_trust_after(sql, "users"), COPY);
+    // The same statement on the exact name loses the table the same way.
+    assert_eq!(
+        case_trust_after("ALTER TABLE orders FROBNICATE x", "orders"),
+        INSTANT
+    );
+}
+
+#[test]
+fn a_table_kilit_lost_still_matches_a_name_in_another_case() {
+    // Lost, not Missing: the name in another case is unknown with the same
+    // reason, where a Missing table gets the answer of a table kilit cannot
+    // see.
+    let schema = case_fulltext();
+    let lose = "ALTER TABLE orders FROBNICATE x;\n";
+    let sql = format!("{lose}ALTER TABLE ORDERS ADD COLUMN y INT NULL");
+    assert_eq!(case_last_answer(&schema, &sql), UNKNOWN);
+    assert_case_unknown(&schema, &sql, "orders", "ORDERS");
+    // The exact name of a lost table: no case reason.
+    assert_eq!(
+        case_last_answer(
+            &schema,
+            &format!("{lose}ALTER TABLE orders ADD COLUMN y INT NULL")
+        ),
+        INSTANT
+    );
+}
+
+#[test]
+fn a_table_created_earlier_in_the_input_matches_a_name_in_another_case() {
+    let create = "CREATE TABLE t1 (id INT PRIMARY KEY, a INT);\n";
+    assert_eq!(
+        case_last_answer("", &format!("{create}ALTER TABLE t1 ADD COLUMN b INT NULL")),
+        INSTANT
+    );
+    let sql = format!("{create}ALTER TABLE T1 ADD COLUMN b INT NULL");
+    assert_eq!(case_last_answer("", &sql), UNKNOWN);
+    assert_case_unknown("", &sql, "t1", "T1");
+    // The drop of a table created here, in another case, and after it t1.
+    let sql = format!("{create}DROP TABLE T1");
+    assert_case_unknown("", &sql, "t1", "T1");
+}
+
+#[test]
+fn column_index_foreign_key_and_check_names_in_another_case_keep_their_answers() {
+    // Hand test: ADD INDEX (AMOUNT), DROP INDEX IX, DROP FOREIGN KEY FK_X and
+    // DROP CHECK CK_A all work on the lower-case names, with 0 and with 1.
+    let schema = case_plain();
+    for (sql, answer) in [
+        ("ALTER TABLE orders ADD INDEX i3 (AMOUNT)", INPLACE),
+        ("DROP INDEX IX ON orders", INPLACE),
+        ("ALTER TABLE orders DROP FOREIGN KEY FK_X", INPLACE),
+        ("ALTER TABLE orders DROP CHECK CK_A", INSTANT),
+        ("ALTER TABLE orders ALTER CHECK CK_A NOT ENFORCED", INSTANT),
+        ("ALTER TABLE orders DROP COLUMN USER_ID", FAILS_1828),
+        (
+            "ALTER TABLE orders MODIFY COLUMN NOTE VARCHAR(60) NULL",
+            INPLACE,
+        ),
+    ] {
+        assert_eq!(case_last_answer(&schema, sql), answer, "{sql}");
+    }
+    // The foreign key was found, so its column can go once it is dropped.
+    assert_eq!(
+        case_last_answer(
+            &schema,
+            "ALTER TABLE orders DROP FOREIGN KEY FK_X;\nALTER TABLE orders DROP COLUMN user_id"
+        ),
+        "INPLACE, rebuilds the table, writes continue"
+    );
+}
+
+/// The impact of every statement of `sql` on MySQL 8.4.13, with the tables
+/// of `schema`.
+fn case_impacts(schema: &str, sql: &str) -> Vec<Impact> {
+    let statements = parse(sql);
+    let results = Knowledge::built_in().server(MYSQL_84).unwrap();
+    let findings = check(&statements, &Schema::from_sql(schema), results);
+    impacts(&statements, &findings)
+}
+
+#[test]
+fn a_statement_is_not_on_a_new_table_because_a_name_matches_in_another_case_only() {
+    // Exact name: a table created here, as before.
+    assert_eq!(
+        case_impacts(
+            "",
+            "CREATE TABLE t1 (id INT PRIMARY KEY); ALTER TABLE t1 ADD COLUMN a INT NULL;"
+        ),
+        [Impact::NotChecked, Impact::NewTable]
+    );
+    // Another case: kilit cannot tell, so it is not a new table.
+    assert_eq!(
+        case_impacts(
+            "",
+            "CREATE TABLE t1 (id INT PRIMARY KEY); ALTER TABLE T1 ADD COLUMN a INT NULL;"
+        ),
+        [Impact::NotChecked, Impact::Unknown]
+    );
+    // A table of the schema, and a name in another case: unknown, not a
+    // failure and not a measured answer.
+    let schema = case_fulltext();
+    assert_eq!(
+        case_impacts(&schema, "ALTER TABLE ORDERS ADD COLUMN a INT NULL;"),
+        [Impact::Unknown]
+    );
+    assert_eq!(
+        case_impacts(&schema, "ALTER TABLE orders ADD COLUMN a INT NULL;"),
+        [Impact::WritesWait]
+    );
+}
+
+#[test]
+fn a_create_table_in_another_letter_case_never_makes_the_known_table_new() {
+    // With orders in the schema: CREATE TABLE ORDERS fails with 1 (B), so
+    // kilit goes on as with 0 and ORDERS is a new table of its own. The
+    // statement itself is unknown, and the ALTER after it is on a new table.
+    let schema = case_fulltext();
+    let create = "CREATE TABLE ORDERS (id INT PRIMARY KEY, note TEXT);\n";
+    assert_eq!(
+        case_impacts(
+            &schema,
+            &format!("{create}ALTER TABLE ORDERS ADD FULLTEXT (note);")
+        ),
+        [Impact::Unknown, Impact::NewTable]
+    );
+    // The other spelling keeps the table's own answer.
+    assert_eq!(
+        case_impacts(
+            &schema,
+            &format!("{create}ALTER TABLE orders ADD COLUMN a INT NULL;")
+        )[1],
+        Impact::WritesWait
+    );
+    // C: IF NOT EXISTS leaves the new name ambiguous, never new.
+    assert_eq!(
+        case_impacts(
+            &schema,
+            "CREATE TABLE IF NOT EXISTS ORDERS (id INT PRIMARY KEY);\n\
+             ALTER TABLE ORDERS ADD COLUMN a INT NULL;"
+        ),
+        [Impact::Unknown, Impact::Unknown]
+    );
+    // Without an orders in the schema, ORDERS is just a new table.
+    assert_eq!(
+        case_impacts(
+            "",
+            &format!("{create}ALTER TABLE ORDERS ADD COLUMN a INT NULL;")
+        ),
+        [Impact::NotChecked, Impact::NewTable]
+    );
+}
+
+#[test]
+fn a_table_made_in_the_input_stays_new_after_a_statement_in_another_case_that_fails_with_0() {
+    // A) CREATE TABLE t1; ALTER TABLE T1: t1 is the table (kilit goes on as
+    // with 1 or 2), so the next ALTER of t1 is on a new table; the case-only
+    // statement itself never is.
+    assert_eq!(
+        case_impacts(
+            "",
+            "CREATE TABLE t1 (id INT PRIMARY KEY); ALTER TABLE T1 ADD COLUMN a INT NULL; \
+             ALTER TABLE t1 ADD COLUMN b INT NULL;"
+        ),
+        [Impact::NotChecked, Impact::Unknown, Impact::NewTable]
+    );
+    // The same for a temporary table (hand test 14) and a database in front.
+    assert_eq!(
+        case_impacts(
+            "",
+            "CREATE TEMPORARY TABLE tmp1 (id INT); ALTER TABLE TMP1 ADD COLUMN a INT NULL; \
+             ALTER TABLE tmp1 ADD COLUMN b INT NULL;"
+        ),
+        [Impact::NotChecked, Impact::Unknown, Impact::NewTable]
+    );
+    assert_eq!(
+        case_impacts(
+            "",
+            "CREATE TABLE shop.orders (id INT PRIMARY KEY); ALTER TABLE Shop.orders ADD COLUMN a INT NULL; \
+             ALTER TABLE shop.orders ADD COLUMN b INT NULL;"
+        ),
+        [Impact::NotChecked, Impact::Unknown, Impact::NewTable]
+    );
+}
+
+#[test]
+fn a_rename_to_a_name_in_another_letter_case_does_not_make_the_known_table_new() {
+    let schema = case_fulltext();
+    let impacts = case_impacts(
+        &schema,
+        "RENAME TABLE users TO ORDERS;\nALTER TABLE ORDERS ADD COLUMN a INT NULL;",
+    );
+    assert_eq!(impacts[0], Impact::Unknown);
+    assert_ne!(impacts[1], Impact::NewTable);
+}
+
+#[test]
+fn a_self_reference_written_as_the_table_is_known_keeps_its_answer() {
+    // $table->foreignId('parent_id')->nullable()->constrained('orders'): the
+    // matching key to the primary key, as before; the name in another case
+    // is unknown (every_place_that_looks_up_a_table_says_...).
+    let sql = "ALTER TABLE orders ADD COLUMN parent_id BIGINT UNSIGNED NULL;
+        ALTER TABLE orders ADD CONSTRAINT fk_p FOREIGN KEY (parent_id) REFERENCES orders (id)";
+    assert_eq!(case_last_answer(&case_plain(), sql), COPY);
+    let sql = sql.replace("REFERENCES orders", "REFERENCES `orders`");
+    assert_eq!(case_last_answer(&case_plain(), &sql), COPY);
+}
+
+/// The reason of statement number `at` (from 0) of `sql`, which has no answer.
+fn case_reason_at(schema: &str, sql: &str, at: usize) -> String {
+    match &predictions_on(MYSQL_84, schema, sql)[at] {
+        Prediction::Unknown { reason } => reason.clone(),
+        other => panic!("{sql}\n    statement {at}: {other:?}"),
+    }
+}
+
+/// The notes of the last statement of `sql`, a measured one.
+fn case_last_notes(schema: &str, sql: &str) -> Vec<String> {
+    notes_of(predictions_on(MYSQL_84, schema, sql).last().unwrap()).to_vec()
+}
+
+/// `orders` and `archive`, each with a TEXT column `note`; `orders_key` ends
+/// the definition of `orders`.
+fn case_notes_tables(orders_key: &str) -> String {
+    format!(
+        "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `note` text,
+  PRIMARY KEY (`id`){orders_key}
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `archive` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `note` text,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+"
+    )
+}
+
+#[test]
+fn a_statement_kilit_could_not_read_earlier_makes_a_case_only_statement_unclear() {
+    // RENAME TABLES (plural) is unreadable: with 0 it runs and the FULLTEXT
+    // index goes on ORDERS, which orders does not have; with 1 the rename
+    // fails with 1050. kilit cannot tell, so the table is lost.
+    let schema = case_notes_tables("");
+    let sql = "RENAME TABLES archive TO ORDERS;
+        ALTER TABLE ORDERS ADD FULLTEXT ft (note);
+        ALTER TABLE orders ADD COLUMN x INT NULL;";
+    assert_eq!(case_answers(&schema, sql), [UNKNOWN, UNKNOWN, INSTANT]);
+    let reason = case_reason_at(&schema, sql, 1);
+    assert_eq!(
+        reason,
+        format!(
+            "{} {CASE_ENDING_LOST}",
+            case_sentence("orders", "ORDERS", CASE_REFUSE)
+        )
+    );
+    // The lost table keeps the FULLTEXT index as a note.
+    assert!(
+        case_last_notes(&schema, sql)
+            .iter()
+            .any(|note| note.contains("FULLTEXT")),
+        "{sql}"
+    );
+    // Without the unreadable statement the same ALTER is A: applied to
+    // orders, which then has the FULLTEXT index and copies on a new column.
+    let sql = "ALTER TABLE ORDERS ADD FULLTEXT ft (note);
+        ALTER TABLE orders ADD COLUMN x INT NULL;";
+    assert_eq!(case_answers(&schema, sql), [UNKNOWN, COPY]);
+}
+
+#[test]
+fn a_table_of_another_database_with_the_written_name_makes_a_case_only_statement_unclear() {
+    // shop.ORDERS may be what ORDERS means to the server (a default database
+    // of shop): C, and the lost orders keeps its FULLTEXT index as a note.
+    let schema = case_notes_tables(",\n  FULLTEXT KEY `ft` (`note`)");
+    let sql = "CREATE TABLE shop.ORDERS (id INT PRIMARY KEY, note TEXT, FULLTEXT KEY ft (note));
+        ALTER TABLE ORDERS DROP INDEX ft;
+        ALTER TABLE orders ADD COLUMN x INT NULL;";
+    assert_eq!(
+        case_answers(&schema, sql),
+        ["not checked", UNKNOWN, INSTANT]
+    );
+    assert!(
+        case_reason_at(&schema, sql, 1).ends_with(CASE_ENDING_LOST),
+        "{sql}"
+    );
+    assert!(
+        case_last_notes(&schema, sql)
+            .iter()
+            .any(|note| note.contains("FULLTEXT")),
+        "{sql}"
+    );
+    // Without that table the DROP INDEX is A: applied to orders, which no
+    // longer has the index, so no FULLTEXT note.
+    let sql = "ALTER TABLE ORDERS DROP INDEX ft;
+        ALTER TABLE orders ADD COLUMN x INT NULL;";
+    assert_eq!(case_answers(&schema, sql), [UNKNOWN, INSTANT]);
+    assert!(
+        case_last_notes(&schema, sql)
+            .iter()
+            .all(|note| !note.contains("FULLTEXT")),
+        "{sql}"
+    );
+}
+
+#[test]
+fn a_create_table_next_to_a_temporary_table_of_the_same_name_is_unclear() {
+    // MySQL lets a base table share the name of a temporary table, so the
+    // CREATE need not fail with 1: C, and the next statement on ORDERS is
+    // ambiguous too.
+    let sql = "CREATE TEMPORARY TABLE orders (id INT PRIMARY KEY, note TEXT);
+        CREATE TABLE ORDERS (id INT PRIMARY KEY, note VARCHAR(50));
+        ALTER TABLE ORDERS ADD INDEX ix (note);";
+    assert_eq!(case_answers("", sql), ["not checked", UNKNOWN, UNKNOWN]);
+    assert!(case_reason_at("", sql, 1).ends_with(CASE_ENDING_LOST));
+    assert_case_unknown("", sql, "orders", "ORDERS");
+}
+
+#[test]
+fn renaming_a_table_in_another_case_to_a_name_some_table_has_is_unclear() {
+    // RENAME TABLE ORDERS TO users, or TO orders: the new name is taken in
+    // some case, and the two settings part ways. orders is lost after it.
+    let schema = case_fulltext();
+    for statement in [
+        "RENAME TABLE ORDERS TO users",
+        "RENAME TABLE ORDERS TO orders",
+    ] {
+        assert_eq!(case_last_answer(&schema, statement), UNKNOWN, "{statement}");
+        assert!(
+            case_reason(&schema, statement).ends_with(CASE_ENDING_LOST),
+            "{statement}"
+        );
+        assert_eq!(
+            case_trust_after(statement, "orders"),
+            INSTANT,
+            "{statement}"
+        );
+    }
+}
+
+#[test]
+fn a_case_only_statement_that_would_fail_under_1_or_2_too_changes_nothing() {
+    // ALTER TABLE ORDERS DROP COLUMN user_id: 1146 with 0; with 1 or 2 it is
+    // orders and the column is in a foreign key (1828, the lab's answer). The
+    // migration stops, the tables stay as they are.
+    let schema = case_plain();
+    let sql = "ALTER TABLE ORDERS DROP COLUMN user_id;
+        ALTER TABLE orders DROP COLUMN user_id;";
+    assert_eq!(case_answers(&schema, sql), [UNKNOWN, FAILS_1828]);
+    assert_eq!(
+        case_reason_at(&schema, sql, 0),
+        format!(
+            "{} {}",
+            case_sentence("orders", "ORDERS", CASE_REFUSE),
+            case_ending_a_failure("orders", "ORDERS")
+        )
+    );
+    assert_eq!(
+        case_reason_at(&schema, sql, 0),
+        "kilit knows this table as orders. With lower_case_table_names = 0, the default on \
+         Linux, ORDERS is another table, and MySQL 8.0.46 and 8.4.13 refuse the statement \
+         when no table has that exact name; with 1 or 2, the defaults on Windows and macOS, \
+         it is the same table. With 0 the statement fails, and with 1 or 2, where ORDERS is \
+         orders, the lab's answer for it is a failure too, so the migration stops here and \
+         kilit leaves the tables as they are."
+    );
+}
+
+#[test]
+fn a_foreign_key_to_a_parent_in_another_case_says_whether_the_checks_are_known_to_be_off() {
+    let add = "ALTER TABLE orders ADD CONSTRAINT fk_u2 FOREIGN KEY (user_id) REFERENCES USERS (id)";
+    let schema = case_plain();
+    let known = case_sentence("users", "USERS", CASE_FOREIGN_KEY);
+    // Off: both settings add the key.
+    for set in [
+        "SET foreign_key_checks = 0;\n",
+        "SET foreign_key_checks = OFF;\n",
+    ] {
+        assert_eq!(
+            case_reason(&schema, &format!("{set}{add}")),
+            format!("{known} {CASE_ENDING_CHECKS_OFF}"),
+            "{set}"
+        );
+    }
+    // Not known to be on: the checks may be off.
+    assert_eq!(
+        case_reason(
+            &schema,
+            &format!("SET foreign_key_checks = DEFAULT;\n{add}")
+        ),
+        format!("{known} {CASE_ENDING_CHECKS_MAYBE_OFF}")
+    );
+    // On, or never set: the statement fails with 0 (1824), so A.
+    for set in ["", "SET foreign_key_checks = 1;\n"] {
+        assert_eq!(
+            case_reason(&schema, &format!("{set}{add}")),
+            format!("{known} {}", case_ending_a("users", "USERS")),
+            "{set}"
+        );
+    }
+}
+
+#[test]
+fn a_table_with_non_ascii_letters_goes_on_as_with_1_only_where_the_lab_ran_the_letters() {
+    // The hand tests ran ÇİZELGE, ÇIZELGE and Çizelge against çizelge (A);
+    // Ö was not run, so ÖDEME against ödeme is unclear (C).
+    let schema = case_plain();
+    let sql = "ALTER TABLE ÇİZELGE ADD COLUMN a INT NULL;
+        ALTER TABLE çizelge MODIFY COLUMN a BIGINT NULL;";
+    // The column a is in çizelge afterwards: the change of its type copies the
+    // table (a column kilit does not know is unknown).
+    assert_eq!(case_answers(&schema, sql), [UNKNOWN, COPY]);
+    assert_eq!(
+        case_reason_at(&schema, sql, 0),
+        format!(
+            "{} {}",
+            case_sentence("çizelge", "ÇİZELGE", CASE_REFUSE),
+            case_ending_a("çizelge", "ÇİZELGE")
+        )
+    );
+    let sql = "CREATE TABLE ödeme (id INT PRIMARY KEY);
+        ALTER TABLE ÖDEME ADD COLUMN a INT NULL;";
+    assert_eq!(case_answers("", sql), ["not checked", UNKNOWN]);
+    assert_eq!(
+        case_reason_at("", sql, 1),
+        format!(
+            "{} {CASE_ENDING_LOST}",
+            case_sentence("ödeme", "ÖDEME", CASE_REFUSE)
+        )
+    );
+}
+
+#[test]
+fn a_rename_of_a_table_in_another_case_makes_the_new_name_the_table_made_here() {
+    // A: RENAME TABLE T1 TO t2 fails with 0 (1146); kilit goes on as with 1
+    // or 2, where T1 is t1: t2 is the new t1, so the ALTER of t2 is on a new
+    // table.
+    let sql = "CREATE TABLE t1 (id INT PRIMARY KEY, note TEXT);
+        RENAME TABLE T1 TO t2;
+        ALTER TABLE t2 ADD FULLTEXT (note);";
+    assert_eq!(
+        case_answers("", sql),
+        [
+            "not checked",
+            UNKNOWN,
+            "INPLACE, rebuilds the table, writes wait"
+        ]
+    );
+    assert_eq!(
+        case_impacts("", sql),
+        [Impact::NotChecked, Impact::Unknown, Impact::NewTable]
+    );
+    assert_eq!(
+        case_reason_at("", sql, 1),
+        format!(
+            "{} {}",
+            case_sentence("t1", "T1", CASE_REFUSE),
+            case_ending_a("t1", "T1")
+        )
+    );
 }

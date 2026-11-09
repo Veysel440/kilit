@@ -13,12 +13,15 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
+use std::borrow::Cow;
+
 use crate::knowledge::ServerResults;
 use crate::modify::{Change, changes};
 use crate::parse::REJECTED_BY;
 use crate::results::{Server, Variant, Verdict};
 use crate::schema::{
-    CheckTarget, ConstraintKind, Schema, TableState, has_descending, names_foreign_key_index,
+    CheckTarget, ConstraintKind, InAnotherCase, Role, Schema, TableState, creates_temporary,
+    has_descending, names_foreign_key_index, same_in_any_case, with_table_renamed,
 };
 use crate::statement::{
     Alter, Check, CheckColumns, Column, DataType, Engine, ForeignKey, ForeignKeyAction, Index,
@@ -37,6 +40,32 @@ pub struct Finding {
     /// server. When no statement of the input did, every measured server
     /// answers every statement the same way.
     pub server_dependent: bool,
+    /// The statement names a table in another letter case than a table
+    /// kilit knows, or than another name of the statement: with
+    /// lower_case_table_names = 0 it is another table, with 1 or 2 the same
+    /// one. The statement is on no new table; how kilit follows it says
+    /// which setting the migration goes on with.
+    pub letter_case: Option<LetterCase>,
+}
+
+/// How kilit follows a statement that names a table in another letter case:
+/// as the setting of lower_case_table_names under which the migration goes
+/// on. By hand on 8.0.46 and 8.4.13 (0 and 1), each form fails under one
+/// setting, which stops the migration there, or runs under both.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LetterCase {
+    /// It fails with 0 (1146, 1051, 1049, or 1824 for a foreign key's
+    /// parent with the checks on), so the migration goes on only with 1 or
+    /// 2, where `written` is the table `known`.
+    SameTable { written: String, known: String },
+    /// It fails with 1 (1050: CREATE TABLE, or RENAME TABLE to a name in
+    /// another case), so the migration goes on only with 0, where the name
+    /// as written is a table of its own; or it runs with both and leaves
+    /// the same tables (a foreign key whose checks may be off).
+    AsWritten,
+    /// It runs with both and leaves different tables, or the form has no
+    /// hand test under both: kilit stops trusting what it may change.
+    Unclear,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1355,8 +1384,10 @@ pub fn check_sessions(
         }
         for statement in *statements {
             agreements.server_dependent = false;
-            let prediction = check_one(
+            let in_another_case = schema.in_another_case(statement);
+            let (prediction, letter_case) = check_one(
                 statement,
+                in_another_case,
                 &mut session,
                 &mut schema,
                 results,
@@ -1367,6 +1398,7 @@ pub fn check_sessions(
                 sql: statement.sql.clone(),
                 prediction,
                 server_dependent: agreements.server_dependent,
+                letter_case,
             });
         }
     }
@@ -1376,11 +1408,12 @@ pub fn check_sessions(
 /// Checks one statement and moves the session and the tables past it.
 fn check_one<'r>(
     statement: &Statement,
+    in_another_case: Option<InAnotherCase>,
     session: &mut Session,
     schema: &mut Schema,
     results: &'r ServerResults,
     agreements: &mut Agreements<'r>,
-) -> Prediction {
+) -> (Prediction, Option<LetterCase>) {
     let mut unread_foreign_key_checks = false;
     // 8.0.46 has no restrict_fk_on_non_standard_key and 8.4.13 does: once
     // the input names it, every answer may depend on the server.
@@ -1483,7 +1516,259 @@ fn check_one<'r>(
             session.later_sessions.old_alter_table_unclear = true;
         }
     }
-    let prediction = match &statement.kind {
+    let letter_case = in_another_case
+        .as_ref()
+        .map(|found| letter_case_of(found, statement, session, schema));
+    // What the statement does under the setting the migration goes on with.
+    let goes_on = match &letter_case {
+        Some(LetterCase::SameTable { written, known }) => {
+            let renamed = with_table_renamed(statement, written, known);
+            let prediction = predict_kind(
+                &renamed,
+                session,
+                schema,
+                results,
+                agreements,
+                may_be_refused,
+            );
+            Some((Cow::Owned(renamed), prediction))
+        }
+        Some(LetterCase::AsWritten) => {
+            let prediction = predict_kind(
+                statement,
+                session,
+                schema,
+                results,
+                agreements,
+                may_be_refused,
+            );
+            Some((Cow::Borrowed(statement), prediction))
+        }
+        Some(LetterCase::Unclear) | None => None,
+    };
+    let prediction = match (&in_another_case, &letter_case) {
+        // A statement kilit could not read keeps its own reason.
+        (Some(found), Some(letter_case)) if found.role != Role::Unread => {
+            unknown(in_another_case_reason(
+                found,
+                letter_case,
+                goes_on.as_ref().map(|(_, prediction)| prediction),
+                session.foreign_key_checks,
+            ))
+        }
+        _ => predict_kind(
+            statement,
+            session,
+            schema,
+            results,
+            agreements,
+            may_be_refused,
+        ),
+    };
+    if unread_foreign_key_checks {
+        session.foreign_key_checks = Setting::Unknown;
+        session.foreign_key_checks_global = false;
+        session.earlier_session.foreign_key_checks = false;
+        session.foreign_key_checks_unknown = format!(
+            "line {} sets foreign_key_checks in a form kilit cannot read",
+            statement.line
+        );
+    }
+    // The next statement sees the tables as this one leaves them. One that
+    // names a table in another letter case is followed as it runs under
+    // the setting the migration goes on with.
+    match (&letter_case, goes_on) {
+        (Some(LetterCase::Unclear), _) => schema.follow_in_another_case(statement),
+        (_, Some((followed, goes_on))) => go_on(schema, &followed, &goes_on),
+        (_, None) => go_on(schema, statement, &prediction),
+    }
+    (prediction, letter_case)
+}
+
+/// Moves the tables past `statement`, which kilit answered `prediction`,
+/// unless MySQL may refuse it for the table's keys.
+fn go_on(schema: &mut Schema, statement: &Statement, prediction: &Prediction) {
+    if let Some((table, reason, engine, unclear)) = options_kilit_cannot_follow(statement, schema) {
+        schema.lose_table(&table, reason, engine, unclear);
+    } else {
+        follow(schema, statement, prediction);
+    }
+}
+
+/// Under which setting of lower_case_table_names the migration goes on
+/// after `statement`, which names `found.written` in another letter case:
+/// the hand tests of step 14 on 8.0.46 and 8.4.13, form by form. A form
+/// they did not cover, or a name kilit is already unsure of, is unclear.
+fn letter_case_of(
+    found: &InAnotherCase,
+    statement: &Statement,
+    session: &Session,
+    schema: &Schema,
+) -> LetterCase {
+    let InAnotherCase {
+        written,
+        known,
+        role,
+        alone,
+        known_temporary,
+    } = found;
+    if !alone || !tested_letters(written, known) {
+        return LetterCase::Unclear;
+    }
+    let same_table = || LetterCase::SameTable {
+        written: written.clone(),
+        known: known.clone(),
+    };
+    match (&statement.kind, role) {
+        (StatementKind::Alter(alter), _)
+            if alter
+                .operations
+                .iter()
+                .any(|operation| matches!(operation, Operation::RenameTable { .. })) =>
+        {
+            LetterCase::Unclear
+        }
+        (StatementKind::Alter(_), Role::Changes) => same_table(),
+        // A key to the table itself, written in another case, has no hand
+        // test. With the checks on, 0 refuses the key (1824); otherwise
+        // both settings add it to the same table.
+        (StatementKind::Alter(alter), Role::PointsAt) if *known != alter.table => {
+            match session.foreign_key_checks {
+                Setting::On | Setting::ServerDefault => same_table(),
+                Setting::Off | Setting::Unclear | Setting::Unknown => LetterCase::AsWritten,
+            }
+        }
+        (StatementKind::DropTable { tables }, Role::Changes) if tables.len() == 1 => same_table(),
+        // To a name no table kilit knows has, in any letter case: the hand
+        // test renamed ORDERS to o2.
+        (StatementKind::RenameTable { renames }, Role::Changes)
+            if renames.len() == 1 && schema.no_table_in_any_case(&renames[0].to) =>
+        {
+            same_table()
+        }
+        // RENAME TABLE orders TO ORDERS: 1050 with 1. MySQL lets a base
+        // table share a temporary table's name, so not for a temporary one.
+        (StatementKind::RenameTable { renames }, Role::Names)
+            if renames.len() == 1 && renames[0].from == *known && !known_temporary =>
+        {
+            LetterCase::AsWritten
+        }
+        // CREATE TABLE ORDERS while orders exists: 1050 with 1.
+        (
+            StatementKind::CreateTable {
+                table,
+                if_not_exists: false,
+            },
+            Role::Names,
+        ) if table.foreign_keys.is_empty()
+            && !creates_temporary(&statement.sql)
+            && !known_temporary =>
+        {
+            LetterCase::AsWritten
+        }
+        (StatementKind::Unparsed { .. }, Role::Empties) => same_table(),
+        _ => LetterCase::Unclear,
+    }
+}
+
+/// Whether two names that match in another letter case differ only in
+/// letters the hand tests changed: ASCII letters, and Ç, ç, İ against I or
+/// i (with 1, ÇİZELGE, ÇIZELGE and Çizelge all reach çizelge).
+fn tested_letters(a: &str, b: &str) -> bool {
+    a.chars().count() == b.chars().count()
+        && a.chars().zip(b.chars()).all(|(x, y)| {
+            x == y
+                || (x.is_ascii() && y.is_ascii() && x.eq_ignore_ascii_case(&y))
+                || matches!(
+                    (x, y),
+                    ('Ç', 'ç') | ('ç', 'Ç') | ('İ', 'i' | 'I') | ('i' | 'I', 'İ')
+                )
+        })
+}
+
+/// Why kilit gives no answer for a statement that names a table in another
+/// letter case: whether it is the table kilit knows depends on
+/// lower_case_table_names, which kilit does not know. By hand on 8.0.46
+/// and 8.4.13 with 0: 1146, 1051 or 1049 for a table
+/// changed, dropped or renamed; 1824 for a foreign key's parent with the
+/// checks on; a note for DROP TABLE IF EXISTS; a new table for CREATE TABLE
+/// and RENAME. With 1 every one runs on the table kilit knows, or fails
+/// with 1050 for a new name.
+fn in_another_case_reason(
+    found: &InAnotherCase,
+    letter_case: &LetterCase,
+    goes_on: Option<&Prediction>,
+    foreign_key_checks: Setting,
+) -> String {
+    let InAnotherCase {
+        written,
+        known,
+        role,
+        ..
+    } = found;
+    let what = match role {
+        Role::Changes | Role::Empties | Role::Unread => {
+            "refuse the statement when no table has that exact name"
+        }
+        Role::DropsIfExists => "skip it with a note when no table has that exact name",
+        Role::Names => "take it as a new name",
+        Role::PointsAt => {
+            "refuse the foreign key when foreign_key_checks is on and no table has that exact \
+             name"
+        }
+    };
+    let fails_too = matches!(
+        goes_on,
+        Some(Prediction::Measured {
+            verdict: Verdict::Fails { .. },
+            ..
+        })
+    );
+    let after = match (letter_case, role) {
+        (LetterCase::SameTable { .. }, _) if fails_too => format!(
+            "With 0 the statement fails, and with 1 or 2, where {written} is {known}, the lab's \
+             answer for it is a failure too, so the migration stops here and kilit leaves the \
+             tables as they are."
+        ),
+        (LetterCase::SameTable { .. }, _) => format!(
+            "With 0 the statement fails and the migration stops there, so kilit goes on as \
+             with 1 or 2, where {written} is {known}."
+        ),
+        (LetterCase::AsWritten, Role::PointsAt) if foreign_key_checks == Setting::Off => {
+            "With the checks off both settings add the foreign key, so kilit goes on with it \
+             as written."
+                .to_owned()
+        }
+        (LetterCase::AsWritten, Role::PointsAt) => {
+            "The checks may be off, and then both settings add the foreign key, so kilit goes \
+             on with it as written."
+                .to_owned()
+        }
+        (LetterCase::AsWritten, _) => format!(
+            "With 1 or 2 the statement fails and the migration stops there, so kilit goes on \
+             as with 0, where {written} is a table of its own."
+        ),
+        (LetterCase::Unclear, _) => "kilit cannot tell which setting the migration goes on \
+             with, so it stops trusting the tables the statement may change."
+            .to_owned(),
+    };
+    format!(
+        "kilit knows this table as {known}. With lower_case_table_names = 0, the default on \
+         Linux, {written} is another table, and MySQL 8.0.46 and 8.4.13 {what}; with 1 or 2, \
+         the defaults on Windows and macOS, it is the same table. {after}"
+    )
+}
+
+/// What kilit says about a statement of `kind`, before it follows it.
+fn predict_kind<'r>(
+    statement: &Statement,
+    session: &mut Session,
+    schema: &Schema,
+    results: &'r ServerResults,
+    agreements: &mut Agreements<'r>,
+    may_be_refused: bool,
+) -> Prediction {
+    match &statement.kind {
         StatementKind::Alter(alter) => {
             let mut prediction =
                 predict(alter, &statement.sql, session, schema, results, agreements);
@@ -1516,24 +1801,7 @@ fn check_one<'r>(
         StatementKind::RenameTable { .. } => unknown("renaming tables has not been measured yet"),
         StatementKind::Other => not_checked("not a schema change"),
         StatementKind::Unparsed { error, .. } => unknown(error.as_str()),
-    };
-    if unread_foreign_key_checks {
-        session.foreign_key_checks = Setting::Unknown;
-        session.foreign_key_checks_global = false;
-        session.earlier_session.foreign_key_checks = false;
-        session.foreign_key_checks_unknown = format!(
-            "line {} sets foreign_key_checks in a form kilit cannot read",
-            statement.line
-        );
     }
-    // The next statement sees the tables as this one leaves them, unless
-    // MySQL may refuse it for the table's keys.
-    if let Some((table, reason, engine, unclear)) = options_kilit_cannot_follow(statement, schema) {
-        schema.lose_table(&table, reason, engine, unclear);
-    } else {
-        follow(schema, statement, &prediction);
-    }
-    prediction
 }
 
 /// An `ALTER TABLE` of table options that MySQL may refuse for the keys of
@@ -3263,7 +3531,7 @@ fn referenced_by(schema: &Schema, table: &Table, column: &str) -> Option<(String
             .foreign_keys
             .iter()
             .find(|key| {
-                key.referenced_table.eq_ignore_ascii_case(&table.name)
+                same_in_any_case(&key.referenced_table, &table.name)
                     && key
                         .referenced_columns
                         .iter()
@@ -3909,7 +4177,7 @@ fn only_index_of_foreign_key(table: &Table, name: &str, situation: &Situation<'_
                     .foreign_keys
                     .iter()
                     .find(|key| {
-                        key.referenced_table.eq_ignore_ascii_case(&table.name)
+                        same_in_any_case(&key.referenced_table, &table.name)
                             && !key.referenced_columns.is_empty()
                             && key
                                 .referenced_columns
@@ -5803,6 +6071,110 @@ mod tests {
     }
 
     #[test]
+    fn a_table_in_another_letter_case_is_followed_where_the_migration_goes_on() {
+        let letter_case = |sql: &str| {
+            let mut schema = Schema::from_sql(SHOP);
+            let mut session = Session::default();
+            let mut agreements = Agreements::default();
+            let mut last = None;
+            for statement in parse(sql) {
+                let found = schema.in_another_case(&statement);
+                last = check_one(
+                    &statement,
+                    found,
+                    &mut session,
+                    &mut schema,
+                    results(),
+                    &mut agreements,
+                )
+                .1;
+            }
+            match last {
+                Some(LetterCase::SameTable { .. }) => "same table",
+                Some(LetterCase::AsWritten) => "as written",
+                Some(LetterCase::Unclear) => "unclear",
+                None => "exact",
+            }
+        };
+        for (sql, expected) in [
+            // Refused with 0 (by hand): 1146, 1051, 1049, 1824.
+            ("ALTER TABLE ORDERS ADD COLUMN c INT NULL", "same table"),
+            ("CREATE INDEX i ON Orders (amount)", "same table"),
+            ("DROP INDEX i ON ORDERS", "same table"),
+            ("RENAME TABLE ORDERS TO o2", "same table"),
+            ("DROP TABLE ORDERS", "same table"),
+            ("TRUNCATE TABLE ORDERS", "same table"),
+            (
+                "ALTER TABLE orders ADD CONSTRAINT k FOREIGN KEY (user_id) REFERENCES USERS (id)",
+                "same table",
+            ),
+            // Refused with 1 (1050), or the same table either way.
+            ("CREATE TABLE ORDERS (id INT PRIMARY KEY)", "as written"),
+            ("RENAME TABLE orders TO ORDERS", "as written"),
+            (
+                "SET foreign_key_checks = 0; \
+                 ALTER TABLE orders ADD CONSTRAINT k FOREIGN KEY (user_id) REFERENCES USERS (id)",
+                "as written",
+            ),
+            // Both go on with different tables, or no hand test.
+            ("DROP TABLE IF EXISTS ORDERS", "unclear"),
+            ("ALTER TABLE orders RENAME TO ORDERS", "unclear"),
+            ("DROP TABLE ORDERS, users", "unclear"),
+            ("RENAME TABLE ORDERS TO o2, users TO u2", "unclear"),
+            ("RENAME TABLE users TO ORDERS", "unclear"),
+            (
+                "CREATE TABLE IF NOT EXISTS ORDERS (id INT PRIMARY KEY)",
+                "unclear",
+            ),
+            (
+                "CREATE TEMPORARY TABLE ORDERS (id INT PRIMARY KEY)",
+                "unclear",
+            ),
+            (
+                "ALTER TABLE orders ADD CONSTRAINT k FOREIGN KEY (user_id) REFERENCES ORDERS (id)",
+                "unclear",
+            ),
+            ("ALTER TABLE ORDERS FROBNICATE", "unclear"),
+            (
+                "CREATE TABLE IF NOT EXISTS ORDERS (id INT PRIMARY KEY); \
+                 ALTER TABLE ORDERS ADD COLUMN c INT NULL",
+                "unclear",
+            ),
+            // A table kilit may not see, another database's table of the
+            // written name, a temporary table, or a name that is taken.
+            (
+                "RENAME TABLES users TO archive; ALTER TABLE ORDERS ADD COLUMN c INT NULL",
+                "unclear",
+            ),
+            (
+                "CREATE TABLE shop.ORDERS (id INT PRIMARY KEY); \
+                 ALTER TABLE ORDERS ADD COLUMN c INT NULL",
+                "unclear",
+            ),
+            (
+                "CREATE TEMPORARY TABLE t1 (id INT); CREATE TABLE T1 (id INT PRIMARY KEY)",
+                "unclear",
+            ),
+            (
+                "CREATE TEMPORARY TABLE t1 (id INT); ALTER TABLE T1 ADD COLUMN c INT NULL",
+                "same table",
+            ),
+            ("RENAME TABLE ORDERS TO users", "unclear"),
+            ("RENAME TABLE ORDERS TO orders", "unclear"),
+            ("ALTER TABLE orders ADD COLUMN c INT NULL", "exact"),
+        ] {
+            assert_eq!(letter_case(sql), expected, "{sql}");
+        }
+        // Letters the hand tests changed, and others.
+        assert!(tested_letters("ÇİZELGE", "çizelge"));
+        assert!(tested_letters("ÇIZELGE", "çizelge"));
+        assert!(tested_letters("Çizelge", "çizelge"));
+        assert!(!tested_letters("çızelge", "çizelge"));
+        assert!(!tested_letters("STRASSE", "straße"));
+        assert!(!tested_letters("ÖDEME", "ödeme"));
+    }
+
+    #[test]
     fn a_new_engine_or_row_format_the_keys_may_not_fit_loses_the_table() {
         let table = |sql: &str| {
             let mut schema = Schema::from_sql(SHOP);
@@ -5811,6 +6183,7 @@ mod tests {
             for statement in parse(sql) {
                 check_one(
                     &statement,
+                    schema.in_another_case(&statement),
                     &mut session,
                     &mut schema,
                     results(),
@@ -8571,7 +8944,7 @@ mod tests {
 
     #[test]
     fn an_index_a_key_added_later_points_at_gets_no_answer() {
-        // The key comes after the tables, and names the table in capitals.
+        // The key comes after the tables.
         let schema = "
             CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100) NOT NULL,
                 UNIQUE KEY uq_name (name));
@@ -8580,7 +8953,7 @@ mod tests {
             schema,
             "ALTER TABLE users DROP INDEX uq_name;
              ALTER TABLE users ADD UNIQUE INDEX uq_name (name);
-             ALTER TABLE children ADD CONSTRAINT fk_name FOREIGN KEY (name) REFERENCES USERS (name);
+             ALTER TABLE children ADD CONSTRAINT fk_name FOREIGN KEY (name) REFERENCES users (name);
              ALTER TABLE users DROP INDEX uq_name;
              ALTER TABLE users ADD UNIQUE INDEX uq_name (name);
              ALTER TABLE children DROP FOREIGN KEY fk_name;
