@@ -86,6 +86,13 @@ safe.
 - A table with no `ENGINE` is taken as InnoDB, the server default. kilit does
   not read `default_storage_engine` from a `--schema` file, so a table created
   under a different default there is still taken as InnoDB.
+- kilit cannot see a table's real row format when `ROW_FORMAT` is not written.
+  Such a table created before MySQL 5.7.9 may be COMPACT, where an index over
+  767 bytes fails with error 1709 (as written and with `ALGORITHM=INPLACE`)
+  while kilit answers as for DYNAMIC.
+  `SELECT NAME, ROW_FORMAT FROM information_schema.INNODB_TABLES WHERE NAME LIKE
+  'mydb/%';` shows it. The hand tests are in [the
+  findings](findings.md#tables-created-without-row_format-under-compact).
 - kilit does not know the server's `lower_case_table_names`. Table names are
   kept and compared as written. A name that differs from a known table only in
   letter case, in any statement that names a table (including a foreign key's

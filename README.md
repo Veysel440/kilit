@@ -313,6 +313,12 @@ meets first:
   where the hand tests show it; otherwise it stops trusting the tables involved.
 - InnoDB is measured, and MyISAM for some changes. A table with no `ENGINE` is
   InnoDB; any other engine is `UNKNOWN`.
+- An InnoDB table with no `ROW_FORMAT` is answered as DYNAMIC. A table created
+  without one while the default was COMPACT (before MySQL 5.7.9) and not
+  rebuilt since is still COMPACT, and neither `SHOW CREATE TABLE` nor
+  `mysqldump` shows it. `SELECT NAME, ROW_FORMAT FROM
+  information_schema.INNODB_TABLES WHERE NAME LIKE 'mydb/%';` shows the real
+  row format. See [the findings](docs/findings.md#tables-created-without-row_format-under-compact).
 - Some forms, such as `CONVERT TO CHARACTER SET`, are `UNKNOWN`: kilit cannot
   read them.
 

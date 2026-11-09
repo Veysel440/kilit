@@ -17,6 +17,7 @@ says which one does what.
 - [Changing a column with `->change()`](#changing-a-column-with--change)
 - [MyISAM tables](#myisam-tables)
 - [Row formats and `old_alter_table`](#row-formats-and-old_alter_table)
+- [Tables created without `ROW_FORMAT` under COMPACT](#tables-created-without-row_format-under-compact)
 - [Where the rows come from](#where-the-rows-come-from)
 
 ## How to read the tables
@@ -269,6 +270,44 @@ refused by MySQL unless `innodb_strict_mode` is OFF, and kilit answers
 `UNKNOWN` for such a table. The case of 64 instant column
 changes, and tables with duplicate values, were measured on DYNAMIC tables
 only; on other row formats the answer carries a note saying so.
+
+## Tables created without `ROW_FORMAT` under COMPACT
+
+kilit answers an InnoDB table that has no `ROW_FORMAT` as a DYNAMIC table. A
+table created without one while the default row format was COMPACT (before
+MySQL 5.7.9) keeps COMPACT until it is rebuilt. These facts are hand tests, not
+lab scenarios, so there is no case id, and kilit does not use them.
+
+The tests ran on MySQL 8.0.46 and 8.4.13 with the same result on both
+(`innodb_strict_mode` ON, 16K pages, default `sql_mode`). One table was created
+without `ROW_FORMAT` while the global `innodb_default_row_format` was COMPACT,
+another with `ROW_FORMAT=COMPACT` written, and a control after the default was
+set back to DYNAMIC. Each table had a `utf8mb4` `VARCHAR(255)`, `VARCHAR(191)`
+and `VARCHAR(192)` column and three rows.
+
+- `SHOW CREATE TABLE` and `mysqldump --no-data` print the table without
+  `ROW_FORMAT`, the same text as for the DYNAMIC control. The table with
+  `ROW_FORMAT=COMPACT` written shows it.
+  `information_schema.INNODB_TABLES` says Compact for both tables.
+- An index or unique index on `VARCHAR(255)` (1020 bytes) or `VARCHAR(192)`
+  (768 bytes), by `ADD INDEX`, `ADD UNIQUE` or `CREATE INDEX`, fails with error
+  1709 (`Index column size too large. The maximum column size is 767 bytes.`)
+  as written, with `ALGORITHM=INPLACE`, with `ALGORITHM=INPLACE, LOCK=NONE`,
+  and with `LOCK=NONE`. `ALGORITHM=INSTANT` fails with error 1845.
+  `ALGORITHM=COPY` succeeds and the table becomes DYNAMIC.
+- The same on the table with `ROW_FORMAT=COMPACT` written fails with error 1071
+  in all six variants, as in the COMPACT rows above, and the table stays COMPACT after a rebuild.
+- A 764-byte key (`VARCHAR(191)`) is accepted: INPLACE, no rebuild.
+- `ADD COLUMN` is INSTANT, as on a DYNAMIC table.
+- Any rebuild makes the table DYNAMIC: `ADD COLUMN` with `ALGORITHM=INPLACE`,
+  `ALGORITHM=COPY`, `ALTER TABLE … FORCE` and `ALTER TABLE … ENGINE=InnoDB`.
+  The index is accepted afterwards.
+
+To see the real row format:
+
+```sql
+SELECT NAME, ROW_FORMAT FROM information_schema.INNODB_TABLES WHERE NAME LIKE 'mydb/%';
+```
 
 ## Where the rows come from
 
