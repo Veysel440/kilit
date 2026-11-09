@@ -1,0 +1,3 @@
+# Keep every text file LF on checkout, on every platform: some tests compare
+# committed files byte for byte.
+* text=auto eol=lf

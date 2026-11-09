@@ -296,7 +296,8 @@ and `VARCHAR(192)` column and three rows.
   and with `LOCK=NONE`. `ALGORITHM=INSTANT` fails with error 1845.
   `ALGORITHM=COPY` succeeds and the table becomes DYNAMIC.
 - The same on the table with `ROW_FORMAT=COMPACT` written fails with error 1071
-  in all six variants, as in the COMPACT rows above, and the table stays COMPACT after a rebuild.
+  in all six variants, as in the COMPACT rows above, and the table stays
+  COMPACT after a rebuild.
 - A 764-byte key (`VARCHAR(191)`) is accepted: INPLACE, no rebuild.
 - `ADD COLUMN` is INSTANT, as on a DYNAMIC table.
 - Any rebuild makes the table DYNAMIC: `ADD COLUMN` with `ALGORITHM=INPLACE`,

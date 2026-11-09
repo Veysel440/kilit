@@ -107,7 +107,7 @@ impl Schema {
     /// What kilit knows about the table `name`, written exactly so: with
     /// lower_case_table_names = 0, the default on Linux, MySQL keeps
     /// `orders` and `ORDERS` apart, and with 1 or 2 it takes them as one
-    /// table. See [`Schema::in_another_case`].
+    /// table. See `Schema::in_another_case`.
     pub fn table(&self, name: &str) -> TableState<'_> {
         match self.tables.get(&key(name)) {
             Some(Entry::Known(table)) => TableState::Known(table),

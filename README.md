@@ -4,6 +4,7 @@
 
 **Know what MySQL will do with your migration before you deploy it.**
 
+[![CI](https://github.com/Veysel440/kilit/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Veysel440/kilit/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success)](Cargo.toml)
