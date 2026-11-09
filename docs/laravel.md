@@ -42,6 +42,14 @@ at a database you do not want to touch.
 Without `--schema`, kilit still answers everything that does not depend on the
 table, and says so where it does.
 
+With `--format github`, an annotation points at
+`database/migrations/<name>.php`, line 1, only when that file exists under the
+current directory, the folder `make:migration` writes to. A migration run with
+`--path`, a package's migrations, or a class-named migration (for which
+`--pretend` prints the class name, not the file name) gets no file, and GitHub
+shows the annotation on the run's summary page. See
+[Annotations in GitHub Actions](../README.md#annotations-in-github-actions).
+
 ## How the output is read
 
 kilit recognizes `migrate --pretend` output on its own. Laravel 10 to 13 print

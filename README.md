@@ -238,6 +238,38 @@ so, such as `on mysql-8.0.46: fails with error 1822`; it never changes the exit
 status. `--format json` prints one JSON document for tools to parse: see
 [JSON output](docs/json-output.md).
 
+### Annotations in GitHub Actions
+
+In a GitHub Actions job, use `--format github`. kilit first prints the text
+report, byte for byte, between `::stop-commands::` and a closing line with a
+token that is new on each run, so nothing in the input is read as a workflow
+command. Then it prints one annotation per finding, in the order of the text
+report. The text part is left out of the example:
+
+```text
+$ php artisan migrate --pretend | kilit check --format github --schema database/schema/mysql-schema.sql
+::error file=database/migrations/2026_11_02_090100_widen_amount_on_orders_table.php,line=1,title=kilit%3A COPY%2C copies every row%2C writes wait::2026_11_02_090100_widen_amount_on_orders_table%0Aalter table `orders` modify `amount` bigint not null%0Ameasured as change-integer-type (3 lab scenarios)%0A- changes the type from INT to BIGINT%0A- if a value does not fit the new type (in strict SQL mode, the default): fails with error 1264 (int-to-tinyint-out-of-range)
+::error file=database/migrations/2026_11_02_090500_add_note_search_to_orders_table.php,line=1,title=kilit%3A INPLACE%2C rebuilds the table%2C writes wait::2026_11_02_090500_add_note_search_to_orders_table%0Aalter table `orders` add fulltext `orders_note_fulltext`(`note`)%0Ameasured as add-fulltext-index (1 lab scenario)
+```
+
+An annotation is an error when it is what makes the exit status non-zero: a
+statement that fails, makes writes wait, or is unknown when `--fail-on` counts
+it, a line of the input kilit does not understand, Laravel's error screen, or
+an error that stops kilit before it checks. A statement `--fail-on` does not
+count, and a schema dump from another server, are warnings. Notices are the
+metadata lock, once, and a statement whose answer another measured server
+gives differently while writes continue.
+
+An annotation points at an SQL file and line. For Laravel it points at
+`database/migrations/<name>.php`, line 1, when that file exists under the
+current directory. For standard input or a migration anywhere else, it has no
+file, and GitHub shows it on the run's summary page. GitHub shows at most 10
+errors, 10 warnings and 10 notices per step and 50 per job, and does not say
+when it drops the rest: the step's log has every answer.
+
+`--format text` prints the input's text as it is, which a GitHub Actions job
+could read as workflow commands. Use `--format github` there.
+
 ## Measured behavior at a glance
 
 Ten common changes, as kilit answers for MySQL 8.4.13 on the example schema

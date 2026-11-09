@@ -27,6 +27,9 @@ pub struct Input {
 pub struct Source {
     /// The migration's name, the file's path, or `standard input`.
     pub name: String,
+    /// The SQL file the statements are in, as given; `None` for standard
+    /// input and for a Laravel migration.
+    pub file: Option<PathBuf>,
     pub kind: SourceKind,
     pub statements: Vec<Statement>,
     /// Which of `statements` is the first that asks the database something,
@@ -50,6 +53,8 @@ pub enum SourceKind {
 pub struct Unreadable {
     /// The file it is in, or `standard input`.
     pub input: String,
+    /// The file it is in, as given; `None` for standard input.
+    pub file: Option<PathBuf>,
     pub line: UnreadableLine,
 }
 
@@ -84,15 +89,15 @@ impl Input {
                 std::io::stdin()
                     .read_to_end(&mut bytes)
                     .map_err(|err| format!("{STDIN}: {err}"))?;
-                input.add(STDIN.to_owned(), &decode(&bytes, STDIN)?);
+                input.add(STDIN.to_owned(), None, &decode(&bytes, STDIN)?);
             } else {
-                input.add(file.display().to_string(), &read(file)?);
+                input.add(file.display().to_string(), Some(file), &read(file)?);
             }
         }
         Ok(input)
     }
 
-    fn add(&mut self, name: String, text: &str) {
+    fn add(&mut self, name: String, file: Option<&Path>, text: &str) {
         let session = self.sessions;
         self.sessions += 1;
         self.runs_comments |= text.contains("/*!");
@@ -102,6 +107,7 @@ impl Input {
                 for migration in pretend.migrations {
                     self.sources.push(Source {
                         name: migration.name,
+                        file: None,
                         kind: SourceKind::LaravelMigration,
                         statements: migration.statements,
                         first_read: migration.first_read,
@@ -111,6 +117,7 @@ impl Input {
                 for line in pretend.unreadable {
                     self.unreadable.push(Unreadable {
                         input: name.clone(),
+                        file: file.map(Path::to_path_buf),
                         line,
                     });
                 }
@@ -120,6 +127,7 @@ impl Input {
             }
             None => self.sources.push(Source {
                 name,
+                file: file.map(Path::to_path_buf),
                 kind: SourceKind::Sql,
                 statements: parse(text),
                 first_read: None,

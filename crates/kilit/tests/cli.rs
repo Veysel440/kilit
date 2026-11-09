@@ -7149,3 +7149,1767 @@ alter table orders add column x int null;";
     );
     assert_eq!(code, Some(0), "{text}");
 }
+
+// ---------------------------------------------------------------------------
+// --format github: the text report between stop-commands, then one workflow
+// command per finding. The expected lines are written out from the format's
+// rules (GitHub's escaping, the order, the paths), not copied from a run.
+// ---------------------------------------------------------------------------
+
+/// An empty directory of the running test's own, under the target directory.
+fn github_scratch(name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("github-{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Writes `text` to `dir/relative`, making the folders on the way.
+fn github_write(dir: &Path, relative: &str, text: &str) -> PathBuf {
+    let file = dir.join(relative);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, text).unwrap();
+    file
+}
+
+/// Runs kilit with `dir` as its current directory. GITHUB_WORKSPACE is
+/// removed, because the CI runner sets it, and set to `workspace` if given.
+fn kilit_at(dir: &Path, workspace: Option<&str>, args: &[&str], stdin: &str) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_kilit"));
+    command
+        .args(args)
+        .current_dir(dir)
+        .env_remove("GITHUB_WORKSPACE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(workspace) = workspace {
+        command.env("GITHUB_WORKSPACE", workspace);
+    }
+    let mut child = command.spawn().unwrap();
+    let _ = child.stdin.take().unwrap().write_all(stdin.as_bytes());
+    child.wait_with_output().unwrap()
+}
+
+/// What `--format github` printed, taken apart.
+struct Github {
+    status: Option<i32>,
+    token: String,
+    /// Between the stop line and the resume line: the text report.
+    text: String,
+    /// The lines after the resume line.
+    annotations: Vec<String>,
+}
+
+fn parse_github(output: &Output) -> Github {
+    let all = stdout(output);
+    let first = all.split('\n').next().unwrap();
+    let token = first
+        .strip_prefix("::stop-commands::")
+        .unwrap_or_else(|| panic!("the first line is not the stop line: {all}"))
+        .to_owned();
+    let resume = format!("\n::{token}::\n");
+    let at = all
+        .find(&resume)
+        .unwrap_or_else(|| panic!("no resume line: {all}"));
+    let rest = &all[at + resume.len()..];
+    assert!(rest.is_empty() || rest.ends_with('\n'), "{all}");
+    Github {
+        status: output.status.code(),
+        token,
+        text: all[first.len() + 1..at + 1].to_owned(),
+        annotations: rest.split_terminator('\n').map(str::to_owned).collect(),
+    }
+}
+
+/// `kilit check --format github <args>` in `dir`.
+fn github_at(dir: &Path, workspace: Option<&str>, args: &[&str], stdin: &str) -> Github {
+    let mut all = vec!["check", "--format", "github"];
+    all.extend(args);
+    let output = kilit_at(dir, workspace, &all, stdin);
+    assert!(
+        output.stdout.starts_with(b"::stop-commands::"),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    parse_github(&output)
+}
+
+/// A message as GitHub's runner unescapes it: `%`, CR and LF.
+fn escape_message(text: &str) -> String {
+    text.replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
+/// A property value: the message's escapes, and `:` and `,`.
+fn escape_property(text: &str) -> String {
+    escape_message(text).replace(':', "%3A").replace(',', "%2C")
+}
+
+/// The annotation line for `level`, a location (file and line), a title
+/// without its `kilit: ` prefix and a message of LF-joined lines.
+fn annotation(level: &str, location: Option<(&str, usize)>, title: &str, message: &str) -> String {
+    let mut properties = String::new();
+    if let Some((file, line)) = location {
+        properties.push_str(&format!("file={},line={line},", escape_property(file)));
+    }
+    properties.push_str(&format!(
+        "title={}",
+        escape_property(&format!("kilit: {title}"))
+    ));
+    format!("::{level} {properties}::{}", escape_message(message))
+}
+
+/// One annotation line taken apart. The values stay escaped.
+struct Annotation {
+    level: String,
+    keys: Vec<String>,
+    file: Option<String>,
+    line: Option<String>,
+    title: String,
+    message: String,
+}
+
+fn parse_annotation(line: &str) -> Annotation {
+    let rest = line
+        .strip_prefix("::")
+        .unwrap_or_else(|| panic!("not a command: {line}"));
+    let (level, rest) = rest
+        .split_once(' ')
+        .unwrap_or_else(|| panic!("no properties: {line}"));
+    let (properties, message) = rest
+        .split_once("::")
+        .unwrap_or_else(|| panic!("no message: {line}"));
+    let mut parsed = Annotation {
+        level: level.to_owned(),
+        keys: Vec::new(),
+        file: None,
+        line: None,
+        title: String::new(),
+        message: message.to_owned(),
+    };
+    for property in properties.split(',') {
+        let (key, value) = property
+            .split_once('=')
+            .unwrap_or_else(|| panic!("a property without a value: {line}"));
+        parsed.keys.push(key.to_owned());
+        match key {
+            "file" => parsed.file = Some(value.to_owned()),
+            "line" => parsed.line = Some(value.to_owned()),
+            "title" => parsed.title = value.to_owned(),
+            other => panic!("unknown property {other}: {line}"),
+        }
+    }
+    parsed
+}
+
+/// Every annotation is a workflow command of a known level, with its
+/// properties in the order file, line, title (the title always there), and
+/// no line break or carriage return of its own.
+fn assert_well_formed(github: &Github) {
+    for line in &github.annotations {
+        assert!(!line.contains('\r'), "a raw CR in {line:?}");
+        assert!(
+            ["::error ", "::warning ", "::notice "]
+                .iter()
+                .any(|start| line.starts_with(start)),
+            "not an annotation: {line:?}"
+        );
+        let parsed = parse_annotation(line);
+        let expected: &[&[&str]] = &[&["title"], &["file", "line", "title"]];
+        assert!(
+            expected.iter().any(|keys| parsed.keys == *keys),
+            "properties out of order or missing: {line}"
+        );
+    }
+}
+
+fn is_lock_notice(line: &str) -> bool {
+    line.contains("title=kilit%3A metadata lock on ")
+}
+
+/// The annotations of statements, warnings and errors, without the
+/// metadata lock notice.
+fn without_lock(github: &Github) -> Vec<&String> {
+    github
+        .annotations
+        .iter()
+        .filter(|line| !is_lock_notice(line))
+        .collect()
+}
+
+fn levels(lines: &[&String]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| parse_annotation(line).level)
+        .collect()
+}
+
+/// The metadata lock warning's text, as the JSON gives it.
+fn lock_message(dir: &Path, args: &[&str], stdin: &str) -> String {
+    let mut all = vec!["check", "--format", "json"];
+    all.extend(args);
+    let json = json_of(&kilit_at(dir, None, &all, stdin));
+    json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["id"] == "metadata-lock")
+        .unwrap_or_else(|| panic!("no metadata lock warning: {json}"))["message"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// The notice for the metadata lock on `tables` (as the text prints them).
+fn lock_notice(tables: &str, text: &str, server: &str) -> String {
+    annotation(
+        "notice",
+        None,
+        &format!("metadata lock on {tables}"),
+        &format!("{text}\nmeasured by kilit-lab on {server}"),
+    )
+}
+
+const GITHUB_TWO_CHANGES: &str = "UNKNOWN: 2 changes in one statement. kilit has measured single \
+changes only, and MySQL picks one algorithm for the whole statement, which can be heavier than \
+each change alone.";
+const GITHUB_COPY: &str = "COPY, copies every row, writes wait";
+const GITHUB_DROP_TWO: &str = "alter table orders drop a, drop b";
+
+fn example_schema() -> String {
+    example("mysql-schema.sql").to_str().unwrap().to_owned()
+}
+
+fn demo_input() -> String {
+    std::fs::read_to_string(example("laravel-pretend.txt")).unwrap()
+}
+
+#[test]
+fn the_text_part_is_what_format_text_prints_for_the_demo_and_the_sample() {
+    let dir = github_scratch("text-part");
+    let schema = example_schema();
+    let sample = example("sample.sql");
+    let sample = sample.to_str().unwrap();
+    let demo = demo_input();
+    let inputs: [(Vec<&str>, &str); 4] = [
+        (vec!["--schema", &schema], &demo),
+        (vec!["--schema", &schema, sample], ""),
+        (vec![sample], ""),
+        (vec!["--schema", &schema, "--strict"], &demo),
+    ];
+    for (args, stdin) in inputs {
+        let mut text_args = vec!["check", "--format", "text"];
+        text_args.extend(&args);
+        let text = stdout(&kilit_at(&dir, None, &text_args, stdin));
+        let github = github_at(&dir, None, &args, stdin);
+        assert_eq!(github.text, text, "{args:?}");
+        assert_well_formed(&github);
+    }
+}
+
+#[test]
+fn the_exit_status_is_the_same_in_text_json_and_github() {
+    let dir = github_scratch("exit-status");
+    let schema = example_schema();
+    let sample = example("sample.sql");
+    let sample = sample.to_str().unwrap();
+    let demo = demo_input();
+    let unreadable = "   INFO  Running migrations.
+
+  2026_11_02_090100_widen_amount_on_orders_table .............................
+
+   ERROR  [2026_11_02_090100_widen_amount_on_orders_table] failed to dump queries.
+";
+    let cases: Vec<(&str, Vec<&str>, &str, i32)> = vec![
+        ("the demo", vec!["--schema", &schema], &demo, 1),
+        ("sample.sql", vec!["--schema", &schema, sample], "", 1),
+        ("sample.sql without a schema", vec![sample], "", 1),
+        (
+            "writes continue",
+            vec!["--schema", &schema],
+            "alter table orders add coupon varchar(255) null;",
+            0,
+        ),
+        (
+            "only unknown, counted",
+            vec!["--fail-on", "unknown"],
+            "alter table orders drop a, drop b;",
+            3,
+        ),
+        (
+            "only unknown, not counted",
+            vec![],
+            "alter table orders drop a, drop b;",
+            0,
+        ),
+        ("a Laravel error", vec![], C1_THROW_L12, 2),
+        ("lines kilit cannot read", vec![], unreadable, 2),
+    ];
+    for (name, args, stdin, expected) in cases {
+        for format in ["text", "json", "github"] {
+            let mut all = vec!["check", "--format", format];
+            all.extend(&args);
+            let output = kilit_at(&dir, None, &all, stdin);
+            assert_eq!(output.status.code(), Some(expected), "{name}, {format}");
+        }
+        // A counted finding is an error annotation, and nothing else is.
+        let github = github_at(&dir, None, &args, stdin);
+        let has_error = github
+            .annotations
+            .iter()
+            .any(|line| line.starts_with("::error "));
+        assert_eq!(has_error, expected != 0, "{name}: {:?}", github.annotations);
+    }
+}
+
+#[test]
+fn the_token_is_kilit_and_32_lowercase_hex_digits_and_differs_between_runs() {
+    let dir = github_scratch("token");
+    let schema = example_schema();
+    let demo = demo_input();
+    let args = ["--schema", schema.as_str()];
+    let first = github_at(&dir, None, &args, &demo);
+    let second = github_at(&dir, None, &args, &demo);
+    for github in [&first, &second] {
+        let digits = github.token.strip_prefix("kilit-").unwrap();
+        assert_eq!(digits.len(), 32, "{}", github.token);
+        assert!(
+            digits
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "{}",
+            github.token
+        );
+        let resume = format!("::{}::", github.token);
+        assert!(
+            github.text.split('\n').all(|line| line != resume),
+            "{}",
+            github.text
+        );
+        assert!(
+            !github.annotations.contains(&resume),
+            "{:?}",
+            github.annotations
+        );
+    }
+    assert_ne!(first.token, second.token);
+    // Nothing but the stop line, the text, the resume line and the
+    // annotations is printed.
+    let output = kilit_at(
+        &dir,
+        None,
+        &["check", "--format", "github", "--schema", &schema],
+        &demo,
+    );
+    let all = stdout(&output);
+    let (stop, rest) = all.split_once('\n').unwrap();
+    let token = stop.strip_prefix("::stop-commands::").unwrap();
+    assert!(
+        rest.starts_with("checked against mysql-8.4.13, as measured by kilit-lab\n"),
+        "{all}"
+    );
+    assert!(rest.contains(&format!("\n::{token}::\n::")), "{all}");
+    assert_eq!(stderr(&output), "");
+}
+
+/// The demo's annotation lines for `kilit check --schema mysql-schema.sql`
+/// from a folder with no migration files and no GITHUB_WORKSPACE.
+fn demo_annotations(strict: bool) -> Vec<String> {
+    let widen = "2026_11_02_090100_widen_amount_on_orders_table";
+    let shop = "2026_11_02_090200_add_shop_to_orders_table";
+    let status = "2026_11_02_090400_lengthen_status_on_orders_table";
+    let search = "2026_11_02_090500_add_note_search_to_orders_table";
+    let unknown = if strict { "error" } else { "warning" };
+    let dir = github_scratch("demo-lock-message");
+    let schema = example_schema();
+    let lock = lock_message(&dir, &["--schema", &schema], &demo_input());
+    vec![
+        annotation(
+            "error",
+            None,
+            GITHUB_COPY,
+            &format!(
+                "{widen}\n\
+                 alter table `orders` modify `amount` bigint not null\n\
+                 measured as change-integer-type (3 lab scenarios)\n\
+                 - changes the type from INT to BIGINT\n\
+                 - if a value does not fit the new type (in strict SQL mode, the default): fails \
+                 with error 1264 (int-to-tinyint-out-of-range)"
+            ),
+        ),
+        annotation(
+            "error",
+            None,
+            GITHUB_COPY,
+            &format!(
+                "{shop}\n\
+                 alter table `orders` add constraint `orders_shop_id_foreign` foreign key \
+                 (`shop_id`) references `shops` (`id`)\n\
+                 measured as add-foreign-key (16 lab scenarios)\n\
+                 - assumes foreign_key_checks is ON, the MySQL default: nothing before this \
+                 statement sets it\n\
+                 - if a row points to a parent row that does not exist: fails with error 1452 \
+                 (add-foreign-key-orphans)"
+            ),
+        ),
+        annotation(
+            unknown,
+            None,
+            "UNKNOWN: 2 changes in one statement. kilit has measured them one at a time, and \
+             MySQL picks one algorithm for the whole statement, which can be heavier than each \
+             change alone:",
+            &format!(
+                "{status}\n\
+                 alter table `orders` modify `status` varchar(30) not null\n\
+                 - changes VARCHAR(20) to VARCHAR(30), 80 to 120 bytes in utf8mb4\n\
+                 - drops the default 'new'"
+            ),
+        ),
+        annotation(
+            "error",
+            None,
+            "INPLACE, rebuilds the table, writes wait",
+            &format!(
+                "{search}\n\
+                 alter table `orders` add fulltext `orders_note_fulltext`(`note`)\n\
+                 measured as add-fulltext-index (1 lab scenario)"
+            ),
+        ),
+        lock_notice("orders", &lock, "mysql-8.4.13"),
+    ]
+}
+
+#[test]
+fn the_demo_gets_one_annotation_per_finding_in_the_order_of_the_report() {
+    let dir = github_scratch("demo");
+    let schema = example_schema();
+    let github = github_at(&dir, None, &["--schema", &schema], &demo_input());
+    assert_eq!(github.annotations, demo_annotations(false));
+    assert_eq!(github.status, Some(1));
+    assert_well_formed(&github);
+
+    // --strict counts the unknown statement: an error instead of a warning.
+    let github = github_at(
+        &dir,
+        None,
+        &["--schema", &schema, "--strict"],
+        &demo_input(),
+    );
+    assert_eq!(github.annotations, demo_annotations(true));
+    assert_eq!(github.status, Some(1));
+}
+
+#[test]
+fn the_demo_levels_follow_fail_on() {
+    let dir = github_scratch("demo-fail-on");
+    let schema = example_schema();
+    let demo = demo_input();
+    // Statements with an annotation: two COPY, one UNKNOWN, one FULLTEXT.
+    let cases: [(&[&str], [&str; 4], i32); 4] = [
+        (
+            &["--fail-on", "fails"],
+            ["warning", "warning", "warning", "warning"],
+            0,
+        ),
+        (
+            &["--fail-on", "waits"],
+            ["error", "error", "warning", "error"],
+            1,
+        ),
+        (
+            &["--fail-on", "unknown"],
+            ["warning", "warning", "error", "warning"],
+            3,
+        ),
+        (
+            &["--fail-on", "fails,waits,unknown"],
+            ["error", "error", "error", "error"],
+            1,
+        ),
+    ];
+    for (options, expected, status) in cases {
+        let mut args = vec!["--schema", schema.as_str()];
+        args.extend(options);
+        let github = github_at(&dir, None, &args, &demo);
+        assert_eq!(levels(&without_lock(&github)), expected, "{options:?}");
+        assert_eq!(github.status, Some(status), "{options:?}");
+        assert_eq!(
+            parse_annotation(github.annotations.last().unwrap()).level,
+            "notice"
+        );
+    }
+}
+
+/// The statements of the level tests, on the example's tables: what each
+/// is, its SQL, and the title its annotation carries.
+const LEVEL_STATEMENTS: [(&str, &str, &str); 3] = [
+    (
+        "fails",
+        "alter table orders modify user_id int unsigned not null;",
+        "fails with error 3780",
+    ),
+    (
+        "makes writes wait",
+        "alter table orders modify amount bigint not null;",
+        GITHUB_COPY,
+    ),
+    (
+        "unknown",
+        "alter table orders drop legacy_code, drop legacy_flag;",
+        GITHUB_TWO_CHANGES,
+    ),
+];
+
+/// --fail-on values (or --strict), and which of fails, waits and unknown
+/// each one counts.
+const LEVEL_OPTIONS: [(&[&str], [bool; 3]); 8] = [
+    (&[], [true, true, false]),
+    (&["--fail-on", "fails"], [true, false, false]),
+    (&["--fail-on", "waits"], [false, true, false]),
+    (&["--fail-on", "unknown"], [false, false, true]),
+    (&["--fail-on", "fails,waits"], [true, true, false]),
+    (&["--fail-on", "fails,unknown"], [true, false, true]),
+    (&["--fail-on", "waits,unknown"], [false, true, true]),
+    (&["--strict"], [true, true, true]),
+];
+
+#[test]
+fn a_statement_is_an_error_when_fail_on_counts_it_and_a_warning_when_it_does_not() {
+    let dir = github_scratch("levels");
+    let schema = example_schema();
+    for (options, counted) in LEVEL_OPTIONS {
+        for (i, (kind, sql, title)) in LEVEL_STATEMENTS.iter().enumerate() {
+            let mut args = vec!["--schema", schema.as_str()];
+            args.extend(options);
+            let github = github_at(&dir, None, &args, sql);
+            let statements = without_lock(&github);
+            assert_eq!(
+                statements.len(),
+                1,
+                "{kind} {options:?}: {:?}",
+                github.annotations
+            );
+            let parsed = parse_annotation(statements[0]);
+            let level = if counted[i] { "error" } else { "warning" };
+            assert_eq!(parsed.level, level, "{kind} {options:?}");
+            assert_eq!(
+                parsed.title,
+                escape_property(&format!("kilit: {title}")),
+                "{kind} {options:?}"
+            );
+            let status = match (counted[i], i) {
+                (false, _) => 0,
+                (true, 2) => 3,
+                (true, _) => 1,
+            };
+            assert_eq!(github.status, Some(status), "{kind} {options:?}");
+            // An error is exactly what makes the exit status non-zero.
+            let has_error = github
+                .annotations
+                .iter()
+                .any(|line| line.starts_with("::error "));
+            assert_eq!(has_error, status != 0, "{kind} {options:?}");
+        }
+    }
+}
+
+#[test]
+fn a_statement_that_runs_while_writes_continue_gets_no_annotation_whatever_fail_on_says() {
+    let dir = github_scratch("levels-continue");
+    let schema = example_schema();
+    for (options, _) in LEVEL_OPTIONS {
+        let mut args = vec!["--schema", schema.as_str()];
+        args.extend(options);
+        let github = github_at(
+            &dir,
+            None,
+            &args,
+            "alter table orders add coupon varchar(255) null;",
+        );
+        assert_eq!(without_lock(&github), Vec::<&String>::new(), "{options:?}");
+        assert_eq!(github.status, Some(0), "{options:?}");
+    }
+}
+
+#[test]
+fn several_statements_get_their_levels_in_the_order_of_the_input() {
+    let dir = github_scratch("levels-together");
+    let schema = example_schema();
+    let sql = "alter table orders add coupon varchar(255) null;
+alter table orders modify amount bigint not null;
+alter table orders modify user_id int unsigned not null;
+alter table orders drop legacy_code, drop legacy_flag;";
+    // The second statement waits, the third fails, the fourth is unknown.
+    let cases: [(&[&str], [&str; 3], i32); 5] = [
+        (&[], ["error", "error", "warning"], 1),
+        (&["--fail-on", "fails"], ["warning", "error", "warning"], 1),
+        (&["--fail-on", "waits"], ["error", "warning", "warning"], 1),
+        (
+            &["--fail-on", "unknown"],
+            ["warning", "warning", "error"],
+            3,
+        ),
+        (&["--strict"], ["error", "error", "error"], 1),
+    ];
+    for (options, expected, status) in cases {
+        let mut args = vec!["--schema", schema.as_str()];
+        args.extend(options);
+        let github = github_at(&dir, None, &args, sql);
+        let statements = without_lock(&github);
+        assert_eq!(levels(&statements), expected, "{options:?}");
+        let lines: Vec<&str> = statements
+            .iter()
+            .map(|line| {
+                line.split("::")
+                    .nth(2)
+                    .unwrap()
+                    .split("%0A")
+                    .nth(1)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "line 2: alter table orders modify amount bigint not null",
+                "line 3: alter table orders modify user_id int unsigned not null",
+                "line 4: alter table orders drop legacy_code, drop legacy_flag",
+            ],
+            "{options:?}"
+        );
+        assert_eq!(github.status, Some(status), "{options:?}");
+    }
+}
+
+#[test]
+fn sample_sql_gets_an_annotation_for_every_statement_that_fails_waits_or_is_unknown() {
+    let dir = github_scratch("sample");
+    let schema = example_schema();
+    let sample = example("sample.sql");
+    let sample = sample.to_str().unwrap();
+    let github = github_at(&dir, None, &["--schema", &schema, sample], "");
+    let lock = lock_message(
+        &dir,
+        &["--schema", &schema],
+        "alter table orders add x int;",
+    );
+    // (level, line of the statement, start of the title)
+    let expected = [
+        ("error", 9, GITHUB_COPY),
+        (
+            "warning",
+            16,
+            "UNKNOWN: 2 changes in one statement. kilit has measured them",
+        ),
+        ("error", 19, "fails with error 3780"),
+        ("error", 25, "INPLACE, rebuilds the table, writes wait"),
+        ("error", 28, GITHUB_COPY),
+        ("warning", 34, GITHUB_TWO_CHANGES),
+        ("error", 39, GITHUB_COPY),
+        (
+            "warning",
+            45,
+            "UNKNOWN: kilit could not read this statement",
+        ),
+        (
+            "warning",
+            46,
+            "UNKNOWN: kilit lost track of this table (line 45: kilit could not read a statement on it)",
+        ),
+    ];
+    let statements = without_lock(&github);
+    assert_eq!(statements.len(), expected.len(), "{:?}", github.annotations);
+    for (line, (level, number, title)) in statements.iter().zip(expected) {
+        let parsed = parse_annotation(line);
+        assert_eq!(parsed.level, level, "{line}");
+        assert_eq!(
+            parsed.file.as_deref(),
+            Some(escape_property(sample).as_str()),
+            "{line}"
+        );
+        assert_eq!(
+            parsed.line.as_deref(),
+            Some(number.to_string().as_str()),
+            "{line}"
+        );
+        assert!(
+            parsed
+                .title
+                .starts_with(&escape_property(&format!("kilit: {title}"))),
+            "{line}"
+        );
+        assert!(
+            parsed
+                .message
+                .starts_with(&format!("{}%0Aline {number}: ", escape_message(sample))),
+            "{line}"
+        );
+    }
+    // A statement that runs while writes continue, not checked ones, and the
+    // SET lines have none; the notice for the metadata lock comes last.
+    assert_eq!(
+        github.annotations.last().unwrap(),
+        &lock_notice("orders", &lock, "mysql-8.4.13")
+    );
+    assert_eq!(github.status, Some(1));
+
+    // Without the schema MODIFY and CHANGE are unknown; the exit status says
+    // the one statement that waits.
+    let github = github_at(&dir, None, &[sample], "");
+    let statements = without_lock(&github);
+    let waits: Vec<String> = statements
+        .iter()
+        .map(|line| parse_annotation(line))
+        .filter(|parsed| parsed.level == "error")
+        .map(|parsed| parsed.line.unwrap())
+        .collect();
+    assert_eq!(waits, ["25"]);
+    assert_eq!(github.status, Some(1));
+}
+
+#[test]
+fn a_foreign_key_that_the_other_server_answers_differently_is_noted_where_writes_continue() {
+    // $table->foreign('user_name')->references('name')->on('users'), then
+    // $table->dropColumn('user_name'), after $table->index('name') on users:
+    // 8.4.13 refuses the key (6125) and drops the column at once, 8.0.46
+    // copies the table for the key and refuses the drop (1828).
+    let dir = github_scratch("other-server");
+    let schema = github_write(&dir, "tables.sql", PLAIN_INDEX_TABLES);
+    let schema = schema.to_str().unwrap();
+    let github = github_at(&dir, None, &["--schema", schema], FOREIGN_KEY_THEN_DROP);
+    let lock = lock_message(&dir, &["--schema", schema], FOREIGN_KEY_THEN_DROP);
+    assert_eq!(
+        github.annotations,
+        [
+            annotation(
+                "error",
+                None,
+                "fails with error 6125",
+                "standard input\n\
+                 line 1: ALTER TABLE orders ADD CONSTRAINT orders_user_name_foreign FOREIGN KEY \
+                 (user_name) REFERENCES users (name)\n\
+                 measured as add-foreign-key (4 lab scenarios)\n\
+                 - assumes foreign_key_checks is ON, the MySQL default: nothing before this \
+                 statement sets it\n\
+                 - the index users_name_index of users starts with name but is not unique on it \
+                 alone\n\
+                 - on mysql-8.0.46: COPY, copies every row, writes wait"
+            ),
+            annotation(
+                "notice",
+                None,
+                "INSTANT, no rebuild, writes continue",
+                "standard input\n\
+                 line 2: ALTER TABLE orders DROP COLUMN user_name\n\
+                 measured as drop-column (5 lab scenarios)\n\
+                 - on mysql-8.0.46: fails with error 1828"
+            ),
+            lock_notice("orders", &lock, "mysql-8.4.13"),
+        ]
+    );
+    assert_eq!(github.status, Some(1));
+
+    // On 8.0.46 both statements differ from 8.4.13 and both count: the first
+    // makes writes wait, the second fails.
+    let github = github_at(
+        &dir,
+        None,
+        &["--schema", schema, "--server", "mysql-8.0"],
+        FOREIGN_KEY_THEN_DROP,
+    );
+    assert_eq!(levels(&without_lock(&github)), ["error", "error"]);
+    assert_eq!(
+        parse_annotation(without_lock(&github)[1]).title,
+        escape_property("kilit: fails with error 1828")
+    );
+}
+
+#[test]
+fn a_new_table_statement_that_the_other_server_answers_differently_is_a_notice() {
+    // Schema::create('child', ...) then
+    // $table->foreign('user_name')->references('name')->on('users'): on
+    // 8.0.46 the key is accepted and costs nothing on a new table, 8.4.13
+    // refuses it.
+    let dir = github_scratch("other-server-new-table");
+    let schema = github_write(&dir, "tables.sql", PLAIN_INDEX_TABLES);
+    let schema = schema.to_str().unwrap();
+    let github = github_at(
+        &dir,
+        None,
+        &["--schema", schema, "--server", "mysql-8.0"],
+        NEW_CHILD_FOREIGN_KEY,
+    );
+    assert_eq!(
+        github.annotations,
+        [annotation(
+            "notice",
+            None,
+            GITHUB_COPY,
+            "standard input\n\
+             line 2: ALTER TABLE child ADD CONSTRAINT child_user_name_foreign FOREIGN KEY \
+             (user_name) REFERENCES users (name)\n\
+             measured as add-foreign-key (4 lab scenarios)\n\
+             - assumes foreign_key_checks is ON, the MySQL default: nothing before this \
+             statement sets it\n\
+             - the index users_name_index of users starts with name but is not unique on it \
+             alone\n\
+             - child is created earlier in these migrations: nothing else uses it yet, so \
+             nothing waits for it\n\
+             - on mysql-8.4.13: fails with error 6125"
+        )]
+    );
+    assert_eq!(github.status, Some(0));
+}
+
+#[test]
+fn a_statement_on_a_new_table_with_no_other_server_answer_gets_no_annotation() {
+    let dir = github_scratch("new-table");
+    let schema = example_schema();
+    let github = github_at(
+        &dir,
+        None,
+        &["--schema", &schema],
+        "create table tags (id bigint unsigned not null primary key, name varchar(20) not null);
+alter table tags add index tags_name_index (name);",
+    );
+    assert_eq!(github.annotations, Vec::<String>::new());
+    assert_eq!(github.status, Some(0));
+}
+
+#[test]
+fn a_schema_from_another_server_is_a_warning_before_the_statements() {
+    let dir = github_scratch("server-mismatch");
+    let tables = std::fs::read_to_string(example("mysql-schema.sql")).unwrap();
+    let sql = "alter table orders modify amount bigint not null;";
+    let widen = "standard input\n\
+                 line 1: alter table orders modify amount bigint not null\n\
+                 measured as change-integer-type (3 lab scenarios)\n\
+                 - changes the type from INT to BIGINT\n\
+                 - if a value does not fit the new type (in strict SQL mode, the default): fails \
+                 with error 1264 (int-to-tinyint-out-of-range)";
+    let one = github_write(
+        &dir,
+        "one.sql",
+        &format!("-- Server version\t8.0.36\n{tables}"),
+    );
+    let one = one.to_str().unwrap();
+    let lock = lock_message(&dir, &["--schema", one], sql);
+    let github = github_at(&dir, None, &["--schema", one], sql);
+    assert_eq!(
+        github.annotations,
+        [
+            annotation(
+                "warning",
+                None,
+                "the schema's server",
+                "the schema comes from MySQL 8.0.36; answers are for mysql-8.4.13"
+            ),
+            annotation("error", None, GITHUB_COPY, widen),
+            lock_notice("orders", &lock, "mysql-8.4.13"),
+        ]
+    );
+    assert_eq!(github.status, Some(1));
+
+    // Two versions: two warnings, in the order of the dump's lines. Alone, a
+    // warning is not an error and does not change the exit status.
+    let two = github_write(
+        &dir,
+        "two.sql",
+        &format!("-- Server version\t8.0.36\n\n-- Server version\t5.7.44\n{tables}"),
+    );
+    let two = two.to_str().unwrap();
+    let github = github_at(
+        &dir,
+        None,
+        &["--schema", two],
+        "alter table orders add coupon varchar(255) null;",
+    );
+    assert_eq!(
+        &github.annotations[..2],
+        [
+            annotation(
+                "warning",
+                None,
+                "the schema's server",
+                "the schema comes from MySQL 8.0.36; answers are for mysql-8.4.13"
+            ),
+            annotation(
+                "warning",
+                None,
+                "the schema's server",
+                "the schema comes from MySQL 5.7.44; answers are for mysql-8.4.13"
+            ),
+        ]
+    );
+    assert_eq!(github.annotations.len(), 3);
+    assert_eq!(github.status, Some(0));
+}
+
+#[test]
+fn laravel_stopping_with_an_error_is_an_error_annotation_with_no_file() {
+    let dir = github_scratch("laravel-error");
+    let github = github_at(&dir, None, &[], C1_THROW_L12);
+    assert_eq!(
+        github.annotations,
+        [annotation(
+            "error",
+            None,
+            "Laravel stopped with an error",
+            &stopped_in(THROW_NAME)
+        )]
+    );
+    assert_eq!(github.status, Some(2));
+
+    // With several inputs the message names the one it comes from.
+    let alter = github_write(&dir, "alter.sql", "alter table orders add x int null;\n");
+    let alter = alter.to_str().unwrap();
+    let github = github_at(&dir, None, &[alter, "-"], C1_THROW_L12);
+    let lock = lock_message(&dir, &[alter, "-"], C1_THROW_L12);
+    assert_eq!(
+        github.annotations,
+        [
+            annotation(
+                "error",
+                None,
+                "Laravel stopped with an error",
+                &format!("standard input: {}", stopped_in(THROW_NAME))
+            ),
+            lock_notice("orders", &lock, "mysql-8.4.13"),
+        ]
+    );
+    assert_eq!(github.status, Some(2));
+}
+
+#[test]
+fn the_laravel_error_comes_after_the_statements_and_before_the_metadata_lock() {
+    // The demo, then an error screen after its last migration.
+    let dir = github_scratch("laravel-error-order");
+    let schema = example_schema();
+    let input = format!(
+        "{}\n   RuntimeException \n\n  boom from a migration\n\n  at \
+         database/migrations/2026_11_02_090500_add_note_search_to_orders_table.php:15\n\n",
+        demo_input()
+    );
+    let github = github_at(&dir, None, &["--schema", &schema], &input);
+    let titles: Vec<String> = github
+        .annotations
+        .iter()
+        .map(|line| parse_annotation(line).title)
+        .collect();
+    let copy = escape_property(&format!("kilit: {GITHUB_COPY}"));
+    assert_eq!(titles.len(), 6, "{titles:?}");
+    assert_eq!(titles[0], copy);
+    assert_eq!(titles[1], copy);
+    assert!(
+        titles[2].starts_with("kilit%3A UNKNOWN%3A 2 changes"),
+        "{titles:?}"
+    );
+    assert_eq!(
+        titles[3],
+        "kilit%3A INPLACE%2C rebuilds the table%2C writes wait"
+    );
+    assert_eq!(titles[4], "kilit%3A Laravel stopped with an error");
+    assert_eq!(titles[5], "kilit%3A metadata lock on orders");
+    assert_eq!(
+        parse_annotation(&github.annotations[4]).message,
+        "Laravel stopped with an error after \
+         2026_11_02_090500_add_note_search_to_orders_table; the migrations after it were not seen"
+    );
+    assert_eq!(github.status, Some(2));
+}
+
+#[test]
+fn a_line_kilit_cannot_read_is_an_error_annotation_with_the_file_and_line_of_a_file_input() {
+    let dir = github_scratch("unreadable");
+    let input = "   INFO  Running migrations.
+
+  2026_01_01_000000_x .............................
+  \u{21c2} alter table orders drop a, drop b
+
+   ERROR  [x] failed to dump queries.
+";
+    let file = github_write(&dir, "unread.txt", input);
+    let _ = file;
+    let lock = lock_message(&dir, &["unread.txt"], "");
+    let statement = annotation(
+        "warning",
+        None,
+        GITHUB_TWO_CHANGES,
+        &format!("2026_01_01_000000_x\n{GITHUB_DROP_TWO}"),
+    );
+    // A file: its path and the line.
+    let github = github_at(&dir, None, &["unread.txt"], "");
+    assert_eq!(
+        github.annotations,
+        [
+            statement.clone(),
+            annotation(
+                "error",
+                Some(("unread.txt", 6)),
+                "could not read this line",
+                "unread.txt, line 6: ERROR  [x] failed to dump queries."
+            ),
+            lock_notice("orders", &lock, "mysql-8.4.13"),
+        ]
+    );
+    assert_eq!(github.status, Some(2));
+
+    // Standard input: no file and no line.
+    let github = github_at(&dir, None, &[], input);
+    assert_eq!(
+        github.annotations[1],
+        annotation(
+            "error",
+            None,
+            "could not read this line",
+            "standard input, line 6: ERROR  [x] failed to dump queries."
+        )
+    );
+    assert_eq!(github.status, Some(2));
+}
+
+#[test]
+fn the_metadata_lock_is_one_notice_that_names_every_table() {
+    let dir = github_scratch("lock-tables");
+    let sql = "alter table b add y int null;\nalter table a add x int null;\n";
+    let lock = lock_message(&dir, &[], sql);
+    let github = github_at(&dir, None, &[], sql);
+    assert_eq!(
+        github.annotations,
+        [lock_notice("b, a", &lock, "mysql-8.4.13")]
+    );
+    assert_eq!(
+        github.annotations[0]
+            .matches("title=kilit%3A metadata lock on b%2C a::")
+            .count(),
+        1
+    );
+    assert_eq!(github.status, Some(0));
+    // Nothing to lock, no notice.
+    let github = github_at(&dir, None, &[], "select 1;\n");
+    assert_eq!(github.annotations, Vec::<String>::new());
+}
+
+// Paths. Every case is an UNKNOWN statement counted by --strict, so each
+// run has one error annotation to look at.
+
+fn unknown_sql_file(dir: &Path, relative: &str) -> PathBuf {
+    github_write(
+        dir,
+        relative,
+        "-- two changes\n\nalter table orders drop a, drop b;\n",
+    )
+}
+
+/// The annotation of the statement on line 3 of a file given as `given`.
+fn unknown_in_file(given: &str, file: &str) -> String {
+    annotation(
+        "error",
+        Some((file, 3)),
+        GITHUB_TWO_CHANGES,
+        &format!("{given}\nline 3: {GITHUB_DROP_TWO}"),
+    )
+}
+
+fn statement_line(github: &Github) -> String {
+    let statements = without_lock(github);
+    assert_eq!(statements.len(), 1, "{:?}", github.annotations);
+    statements[0].clone()
+}
+
+#[test]
+fn an_sql_file_is_named_as_given_when_there_is_no_workspace() {
+    let dir = github_scratch("path-plain");
+    unknown_sql_file(&dir, "a.sql");
+    let github = github_at(&dir, None, &["--strict", "a.sql"], "");
+    assert_eq!(statement_line(&github), unknown_in_file("a.sql", "a.sql"));
+
+    let absolute = dir.join("a.sql");
+    let absolute = absolute.to_str().unwrap();
+    let github = github_at(&dir, None, &["--strict", absolute], "");
+    assert_eq!(statement_line(&github), unknown_in_file(absolute, absolute));
+    assert_eq!(github.status, Some(3));
+
+    // An empty GITHUB_WORKSPACE is no workspace.
+    let github = github_at(&dir, Some(""), &["--strict", "a.sql"], "");
+    assert_eq!(statement_line(&github), unknown_in_file("a.sql", "a.sql"));
+}
+
+#[test]
+fn an_sql_file_inside_the_workspace_is_named_relative_to_it_with_slashes() {
+    let dir = github_scratch("path-workspace");
+    let sub = dir.join("sub");
+    unknown_sql_file(&sub, "a.sql");
+    let workspace = dir.to_str().unwrap();
+    let absolute = sub.join("a.sql");
+    let absolute = absolute.to_str().unwrap();
+    // The message keeps the path as given; the file property is relative.
+    for given in ["a.sql", "./a.sql", "../sub/a.sql", absolute] {
+        let github = github_at(&sub, Some(workspace), &["--strict", given], "");
+        assert_eq!(
+            statement_line(&github),
+            unknown_in_file(given, "sub/a.sql"),
+            "{given}"
+        );
+    }
+    // From the workspace itself.
+    let github = github_at(&dir, Some(workspace), &["--strict", "sub/a.sql"], "");
+    assert_eq!(
+        statement_line(&github),
+        unknown_in_file("sub/a.sql", "sub/a.sql")
+    );
+    // A `..` that stays inside is removed, and one that leaves is not.
+    let github = github_at(&dir, Some(workspace), &["--strict", "sub/../sub/a.sql"], "");
+    assert_eq!(
+        statement_line(&github),
+        unknown_in_file("sub/../sub/a.sql", "sub/a.sql")
+    );
+}
+
+#[test]
+fn an_sql_file_outside_the_workspace_is_named_as_given() {
+    let dir = github_scratch("path-outside");
+    unknown_sql_file(&dir, "other/a.sql");
+    unknown_sql_file(&dir, "ws2/a.sql");
+    std::fs::create_dir_all(dir.join("ws")).unwrap();
+    let workspace = dir.join("ws");
+    let workspace = workspace.to_str().unwrap();
+    // `ws2` starts with `ws` as text, and `..` leaves the workspace.
+    for given in ["other/a.sql", "ws2/a.sql", "ws/../other/a.sql"] {
+        let github = github_at(&dir, Some(workspace), &["--strict", given], "");
+        assert_eq!(
+            statement_line(&github),
+            unknown_in_file(given, given),
+            "{given}"
+        );
+    }
+    let ws_dir = dir.join("ws");
+    let github = github_at(
+        &ws_dir,
+        Some(workspace),
+        &["--strict", "../other/a.sql"],
+        "",
+    );
+    assert_eq!(
+        statement_line(&github),
+        unknown_in_file("../other/a.sql", "../other/a.sql")
+    );
+}
+
+#[test]
+fn a_statement_from_standard_input_has_no_file_and_no_line() {
+    let dir = github_scratch("path-stdin");
+    let sql = "alter table orders drop a, drop b;";
+    let expected = annotation(
+        "error",
+        None,
+        GITHUB_TWO_CHANGES,
+        &format!("standard input\nline 1: {GITHUB_DROP_TWO}"),
+    );
+    let workspace = dir.to_str().unwrap();
+    for (args, workspace) in [
+        (vec!["--strict"], None),
+        (vec!["--strict", "-"], None),
+        (vec!["--strict"], Some(workspace)),
+    ] {
+        let github = github_at(&dir, workspace, &args, sql);
+        assert_eq!(statement_line(&github), expected, "{args:?} {workspace:?}");
+        assert_eq!(github.status, Some(3));
+    }
+}
+
+const GITHUB_MIGRATION: &str = "2026_03_01_000000_drop_two_from_orders_table";
+
+/// A `migrate --pretend` run of one migration whose one statement is
+/// unknown.
+fn pretend_of(name: &str) -> String {
+    format!(
+        "   INFO  Running migrations.  \n\n  {name} ......................  \n  \u{21c2} \
+         {GITHUB_DROP_TWO}  \n"
+    )
+}
+
+fn unknown_in_migration(name: &str, location: Option<&str>) -> String {
+    annotation(
+        "error",
+        location.map(|file| (file, 1)),
+        GITHUB_TWO_CHANGES,
+        &format!("{name}\n{GITHUB_DROP_TWO}"),
+    )
+}
+
+#[test]
+fn a_migration_with_its_file_in_database_migrations_is_named_with_line_1() {
+    let dir = github_scratch("migration-present");
+    github_write(
+        &dir,
+        &format!("database/migrations/{GITHUB_MIGRATION}.php"),
+        "",
+    );
+    let input = pretend_of(GITHUB_MIGRATION);
+    let github = github_at(&dir, None, &["--strict"], &input);
+    assert_eq!(
+        statement_line(&github),
+        unknown_in_migration(
+            GITHUB_MIGRATION,
+            Some(&format!("database/migrations/{GITHUB_MIGRATION}.php"))
+        )
+    );
+    assert_eq!(github.status, Some(3));
+    // The file is not read: it can say anything.
+    github_write(
+        &dir,
+        &format!("database/migrations/{GITHUB_MIGRATION}.php"),
+        "<?php // not what the migration does\n",
+    );
+    let again = github_at(&dir, None, &["--strict"], &input);
+    assert_eq!(statement_line(&again), statement_line(&github));
+}
+
+#[test]
+fn a_migration_without_its_file_has_no_file_and_no_line() {
+    let dir = github_scratch("migration-absent");
+    github_write(&dir, "database/migrations/some_other_migration.php", "");
+    let github = github_at(&dir, None, &["--strict"], &pretend_of(GITHUB_MIGRATION));
+    assert_eq!(
+        statement_line(&github),
+        unknown_in_migration(GITHUB_MIGRATION, None)
+    );
+    // The file must be a regular file: a folder with that name is not one.
+    let folder = format!("database/migrations/{GITHUB_MIGRATION}.php/x");
+    github_write(&dir, &folder, "");
+    let github = github_at(&dir, None, &["--strict"], &pretend_of(GITHUB_MIGRATION));
+    assert_eq!(
+        statement_line(&github),
+        unknown_in_migration(GITHUB_MIGRATION, None)
+    );
+}
+
+#[test]
+fn a_migration_file_in_a_workspace_subfolder_is_named_relative_to_the_workspace() {
+    let dir = github_scratch("migration-workspace");
+    let app = dir.join("app");
+    github_write(
+        &app,
+        &format!("database/migrations/{GITHUB_MIGRATION}.php"),
+        "",
+    );
+    let input = pretend_of(GITHUB_MIGRATION);
+    let workspace = dir.to_str().unwrap();
+    let github = github_at(&app, Some(workspace), &["--strict"], &input);
+    assert_eq!(
+        statement_line(&github),
+        unknown_in_migration(
+            GITHUB_MIGRATION,
+            Some(&format!("app/database/migrations/{GITHUB_MIGRATION}.php"))
+        )
+    );
+    // A workspace the project is not in: the path under the current folder.
+    std::fs::create_dir_all(dir.join("elsewhere")).unwrap();
+    let elsewhere = dir.join("elsewhere");
+    let github = github_at(
+        &app,
+        Some(elsewhere.to_str().unwrap()),
+        &["--strict"],
+        &input,
+    );
+    assert_eq!(
+        statement_line(&github),
+        unknown_in_migration(
+            GITHUB_MIGRATION,
+            Some(&format!("database/migrations/{GITHUB_MIGRATION}.php"))
+        )
+    );
+    // No workspace at all: the same.
+    let github = github_at(&app, None, &["--strict"], &input);
+    assert_eq!(
+        statement_line(&github),
+        unknown_in_migration(
+            GITHUB_MIGRATION,
+            Some(&format!("database/migrations/{GITHUB_MIGRATION}.php"))
+        )
+    );
+}
+
+#[test]
+fn a_migration_name_that_is_not_a_plain_file_name_never_gets_a_file() {
+    // Files exist for every one of these names, so only the rule keeps the
+    // annotation from pointing at them.
+    let dir = github_scratch("migration-names");
+    let migrations = dir.join("database/migrations");
+    std::fs::create_dir_all(migrations.join("sub")).unwrap();
+    std::fs::write(dir.join("database/evil.php"), "").unwrap();
+    std::fs::write(migrations.join("sub/x.php"), "").unwrap();
+    std::fs::write(migrations.join("...php"), "").unwrap();
+    // A colon is not allowed in a Windows file name.
+    let _ = std::fs::write(migrations.join("a:b.php"), "");
+    for name in ["../evil", "sub/x", "a:b", ".."] {
+        let github = github_at(&dir, None, &["--strict"], &pretend_of(name));
+        assert_eq!(
+            statement_line(&github),
+            unknown_in_migration(name, None),
+            "{name}"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_path_given_with_backslashes_inside_the_workspace_comes_out_with_slashes() {
+    let dir = github_scratch("path-backslash");
+    unknown_sql_file(&dir, "sub/a.sql");
+    let workspace = dir.to_str().unwrap();
+    let github = github_at(&dir, Some(workspace), &["--strict", "sub\\a.sql"], "");
+    assert_eq!(
+        statement_line(&github),
+        unknown_in_file("sub\\a.sql", "sub/a.sql")
+    );
+    let absolute = dir.join("sub").join("a.sql");
+    let absolute = absolute.to_str().unwrap();
+    let github = github_at(&dir, Some(workspace), &["--strict", absolute], "");
+    assert_eq!(
+        statement_line(&github),
+        unknown_in_file(absolute, "sub/a.sql")
+    );
+    // A Laravel migration's file, from the project's folder.
+    let app = dir.join("app");
+    github_write(
+        &app,
+        &format!("database/migrations/{GITHUB_MIGRATION}.php"),
+        "",
+    );
+    let github = github_at(
+        &app,
+        Some(workspace),
+        &["--strict"],
+        &pretend_of(GITHUB_MIGRATION),
+    );
+    assert_eq!(
+        statement_line(&github),
+        unknown_in_migration(
+            GITHUB_MIGRATION,
+            Some(&format!("app/database/migrations/{GITHUB_MIGRATION}.php"))
+        )
+    );
+}
+
+// Escaping: what the input holds stays text.
+
+#[test]
+fn a_table_name_and_a_statement_with_percent_colons_commas_and_line_ends_stay_text() {
+    // The name is backticked, and the statement ends its lines with CR LF.
+    let dir = github_scratch("escape-statement");
+    let sql = "ALTER TABLE `or::d,%x`\r\nDROP a,\r\nDROP b;\n";
+    github_write(&dir, "n.sql", sql);
+    let github = github_at(&dir, None, &["--strict", "n.sql"], "");
+    let lock = lock_message(&dir, &["n.sql"], "");
+    assert_well_formed(&github);
+    assert_eq!(
+        github.annotations,
+        [
+            annotation(
+                "error",
+                Some(("n.sql", 1)),
+                GITHUB_TWO_CHANGES,
+                "n.sql\nline 1: ALTER TABLE `or::d,%x`\r\nDROP a,\r\nDROP b"
+            ),
+            lock_notice("or::d,%x", &lock, "mysql-8.4.13"),
+        ]
+    );
+    // Spelled out: no raw CR, `%` as %25, and `::` and `,` of the name in
+    // the title as %3A and %2C.
+    assert_eq!(
+        parse_annotation(&github.annotations[0]).message,
+        "n.sql%0Aline 1: ALTER TABLE `or::d,%25x`%0D%0ADROP a,%0D%0ADROP b"
+    );
+    assert!(github.annotations[1].contains("title=kilit%3A metadata lock on or%3A%3Ad%2C%25x::"));
+    assert!(github.text.contains("`or::d,%x`\r\nDROP a,"));
+    // The text part is still what --format text prints.
+    let text = stdout(&kilit_at(&dir, None, &["check", "--strict", "n.sql"], ""));
+    assert_eq!(github.text, text);
+}
+
+// Unix only: Windows takes no `:` in a file name (or reads it as a stream).
+#[cfg(unix)]
+#[test]
+fn a_file_name_with_percent_comma_and_colon_is_escaped_in_the_file_property() {
+    let dir = github_scratch("escape-file-name");
+    let name = "a%b,c:d.sql";
+    std::fs::write(dir.join(name), "alter table orders drop a, drop b;\n").unwrap();
+    let github = github_at(&dir, None, &["--strict", name], "");
+    assert_eq!(
+        statement_line(&github),
+        annotation(
+            "error",
+            Some((name, 1)),
+            GITHUB_TWO_CHANGES,
+            &format!("{name}\nline 1: {GITHUB_DROP_TWO}")
+        )
+    );
+    assert!(
+        statement_line(&github).starts_with("::error file=a%25b%2Cc%3Ad.sql,line=1,title="),
+        "{}",
+        statement_line(&github)
+    );
+    assert!(
+        statement_line(&github).contains("::a%25b,c:d.sql%0Aline 1: "),
+        "{}",
+        statement_line(&github)
+    );
+}
+
+/// No annotation line starts a command of the input's making, and the
+/// commands the text part could have held are inside the stop.
+fn assert_input_stays_text(github: &Github, injected: &str) {
+    assert_well_formed(github);
+    assert!(
+        github
+            .text
+            .split('\n')
+            .any(|line| line.starts_with(injected)),
+        "the text part does not hold the line it should: {}",
+        github.text
+    );
+    for line in &github.annotations {
+        assert!(!line.starts_with(injected), "{line}");
+        assert!(!line.contains(&format!("\n{injected}")), "{line}");
+    }
+    let all = format!(
+        "::stop-commands::{}\n{}::{}::\n{}",
+        github.token,
+        github.text,
+        github.token,
+        github.annotations.join("\n")
+    );
+    assert!(all.find(injected).unwrap() < all.find(&format!("\n::{}::\n", github.token)).unwrap());
+}
+
+#[test]
+fn text_that_looks_like_a_workflow_command_stays_inside_the_stop() {
+    let dir = github_scratch("escape-injection");
+
+    // A statement whose second line starts with a command, on standard input.
+    let sql = "alter table orders drop a,\n::error::pwned\n drop b;";
+    let github = github_at(&dir, None, &["--strict"], sql);
+    assert_input_stays_text(&github, "::error::pwned");
+    assert_eq!(github.status, Some(3));
+    let text = stdout(&kilit_at(&dir, None, &["check", "--strict"], sql));
+    assert_eq!(github.text, text);
+
+    // A migration named like a command: its name is a line of its own.
+    let github = github_at(&dir, None, &["--strict"], &pretend_of("::error::boom"));
+    assert_input_stays_text(&github, "::error::boom");
+    assert_eq!(
+        statement_line(&github),
+        unknown_in_migration("::error::boom", None)
+    );
+}
+
+// Unix only: Windows takes no `:` or line end in a file name.
+#[cfg(unix)]
+#[test]
+fn a_file_named_like_a_command_or_with_a_line_end_stays_inside_the_stop() {
+    let dir = github_scratch("escape-injection-files");
+    for name in ["::error::pwned.sql", "x\n::error::boom.sql"] {
+        std::fs::write(dir.join(name), "alter table orders drop a, drop b;\n").unwrap();
+        let github = github_at(&dir, None, &["--strict", name], "");
+        assert_input_stays_text(&github, "::error::");
+        assert_eq!(
+            statement_line(&github),
+            annotation(
+                "error",
+                Some((name, 1)),
+                GITHUB_TWO_CHANGES,
+                &format!("{name}\nline 1: {GITHUB_DROP_TWO}")
+            ),
+            "{name:?}"
+        );
+        assert!(!statement_line(&github).contains(['\n', '\r']), "{name:?}");
+    }
+}
+
+// The guarded README example, and the help text.
+
+#[test]
+fn the_readme_github_example_is_real_output() {
+    // The README shows the annotation lines of the demo, run from a Laravel
+    // project's root: the text part is left out. Every line it shows must be
+    // a line kilit prints. The project has an empty file for each migration.
+    let readme = include_str!("../../../README.md");
+    let command = "$ php artisan migrate --pretend | kilit check --format github --schema \
+                   database/schema/mysql-schema.sql\n";
+    let start = readme
+        .find(command)
+        .expect("the README shows the command of the --format github example")
+        + command.len();
+    let shown = &readme[start..start + readme[start..].find("```").unwrap()];
+
+    let project = github_scratch("readme-example");
+    github_write(
+        &project,
+        "database/schema/mysql-schema.sql",
+        &std::fs::read_to_string(example("mysql-schema.sql")).unwrap(),
+    );
+    let demo = demo_input();
+    for line in demo.lines() {
+        if let Some(name) = line.strip_prefix("  20") {
+            let name = format!("20{}", name.split(' ').next().unwrap());
+            github_write(&project, &format!("database/migrations/{name}.php"), "");
+        }
+    }
+    let github = github_at(
+        &project,
+        None,
+        &["--schema", "database/schema/mysql-schema.sql"],
+        &demo,
+    );
+    let mut count = 0;
+    for line in shown.lines().filter(|line| !line.is_empty()) {
+        count += 1;
+        assert!(
+            github.annotations.iter().any(|real| real == line),
+            "the README shows\n{line}\nbut kilit prints\n{}",
+            github.annotations.join("\n")
+        );
+    }
+    assert!(count > 0, "the README example shows no annotation line");
+}
+
+#[test]
+fn check_help_names_github_among_the_formats() {
+    let output = kilit(&["check", "--help"], "");
+    let help = stdout(&output);
+    let values = help
+        .lines()
+        .find(|line| line.trim_start().starts_with("[possible values: text"))
+        .unwrap_or_else(|| panic!("no list of formats in {help}"));
+    assert!(values.contains("github"), "{values}");
+    assert!(values.contains("json"), "{values}");
+    assert_eq!(output.status.code(), Some(0));
+}
+
+// Review findings of the --format github step: folders as the system
+// resolves them, errors before the check, and the title cap.
+
+#[cfg(unix)]
+#[test]
+fn a_workspace_that_is_a_symlink_to_the_project_still_gives_the_relative_file() {
+    // GITHUB_WORKSPACE names the link; the current folder is the real one.
+    // db/a.sql also exists at the workspace root, with other statements.
+    let dir = github_scratch("symlink-workspace");
+    let real = dir.join("real");
+    unknown_sql_file(&real, "app/db/a.sql");
+    github_write(&real, "db/a.sql", "select 1;\n");
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let app = link.join("app");
+    let workspace = link.to_str().unwrap();
+    let github = github_at(&app, Some(workspace), &["--strict", "db/a.sql"], "");
+    assert_eq!(
+        statement_line(&github),
+        unknown_in_file("db/a.sql", "app/db/a.sql")
+    );
+    assert_eq!(github.status, Some(3));
+}
+
+#[cfg(unix)]
+#[test]
+fn dot_dot_after_a_symlinked_folder_is_taken_as_the_system_resolves_it() {
+    // In <ws>/app, `dl` is a link to ../deep, so `dl/..` is <ws>, not app.
+    let dir = github_scratch("symlink-dot-dot");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(ws.join("deep")).unwrap();
+    std::fs::create_dir_all(ws.join("app")).unwrap();
+    std::os::unix::fs::symlink("../deep", ws.join("app/dl")).unwrap();
+    unknown_sql_file(&ws, "db/a.sql");
+    github_write(&ws, "app/db/a.sql", "select 1;\n");
+    let workspace = ws.to_str().unwrap();
+    let github = github_at(
+        &ws.join("app"),
+        Some(workspace),
+        &["--strict", "dl/../db/a.sql"],
+        "",
+    );
+    assert_eq!(
+        statement_line(&github),
+        unknown_in_file("dl/../db/a.sql", "db/a.sql")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_that_is_a_symlink_inside_the_workspace_keeps_its_own_name() {
+    let dir = github_scratch("symlink-file");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    unknown_sql_file(&dir, "outside/x.sql");
+    std::os::unix::fs::symlink(dir.join("outside/x.sql"), ws.join("link.sql")).unwrap();
+    let workspace = ws.to_str().unwrap();
+    for given in ["link.sql", "./link.sql"] {
+        let github = github_at(&ws, Some(workspace), &["--strict", given], "");
+        assert_eq!(
+            statement_line(&github),
+            unknown_in_file(given, "link.sql"),
+            "{given}"
+        );
+    }
+}
+
+// Errors that stop kilit before it checks: one error annotation on stderr,
+// nothing on stdout.
+
+const COULD_NOT_CHECK: &str = "::error title=kilit%3A could not check::";
+
+#[test]
+fn an_error_before_the_check_is_one_escaped_annotation_on_stderr_with_format_github() {
+    let dir = github_scratch("stops");
+    // A MariaDB schema whose version line tries to start commands.
+    let schema = github_write(
+        &dir,
+        "maria.sql",
+        "-- Server version\t10.11.6-MariaDB ##[warning]x ::error::y\n\nCREATE TABLE a (id int);\n",
+    );
+    let schema = schema.to_str().unwrap();
+    // kilit prints `<name>: <the operating system's error>` for a file it
+    // cannot read; the same std call gives the system's own words.
+    let missing = format!(
+        "missing.sql: {}",
+        std::fs::read(dir.join("missing.sql")).unwrap_err()
+    );
+    let cases: [(&[&str], &str); 4] = [
+        (
+            &["--schema", schema],
+            "the schema comes from MariaDB 10.11.6-MariaDB ##[warning]x ::error::y, and kilit \
+             has no MariaDB measurements; give --server to check it against MySQL anyway",
+        ),
+        (
+            &["--server", "nope"],
+            "no lab results for nope; kilit has results for mysql-8.0.46, mysql-8.4.13",
+        ),
+        (&["-", "-"], "standard input (`-`) can be read only once"),
+        (&["missing.sql"], &missing),
+    ];
+    for (args, message) in cases {
+        let mut all = vec!["check", "--format", "github"];
+        all.extend(args);
+        let output = kilit_at(&dir, None, &all, "");
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert_eq!(stdout(&output), "", "{args:?}");
+        assert_eq!(
+            stderr(&output),
+            format!("{COULD_NOT_CHECK}{}\n", escape_message(message)),
+            "{args:?}"
+        );
+        // The same stop in the other formats: `kilit: <message>`, as before.
+        for format in ["text", "json"] {
+            let mut all = vec!["check", "--format", format];
+            all.extend(args);
+            let output = kilit_at(&dir, None, &all, "");
+            assert_eq!(output.status.code(), Some(2), "{format} {args:?}");
+            assert_eq!(stdout(&output), "", "{format} {args:?}");
+            assert_eq!(
+                stderr(&output),
+                format!("kilit: {message}\n"),
+                "{format} {args:?}"
+            );
+        }
+    }
+    // The injected text is only text: the line is the one annotation.
+    let output = kilit_at(
+        &dir,
+        None,
+        &["check", "--format", "github", "--schema", schema],
+        "",
+    );
+    let lines: Vec<String> = stderr(&output)
+        .split_terminator('\n')
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with(COULD_NOT_CHECK), "{}", lines[0]);
+}
+
+// The title cap: 255 characters of `kilit: <answer line>` stay as they are;
+// a longer title is its first 252 characters and `...`, and the message
+// starts with the whole title.
+
+const CAP_PREFIX: &str = "kilit: ";
+
+/// A file whose one statement kilit cannot read, with an index name of `n`
+/// characters (`letter` repeated); the answer line holds the name.
+fn unreadable_with_long_name(letter: char, n: usize) -> (String, String) {
+    let name: String = std::iter::repeat_n(letter, n).collect();
+    let statement = format!("alter table orders rename index {name} to y");
+    (format!("{statement};\n"), statement)
+}
+
+/// The answer line (without its indent) of the one statement in `text`.
+fn answer_line(text: &str) -> String {
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("    UNKNOWN: "))
+        .unwrap_or_else(|| panic!("no answer line in {text}"));
+    line.trim_start().to_owned()
+}
+
+/// The error annotation of a statement with `title` (already with its
+/// `kilit: ` prefix) on line 1 of `n.sql`.
+fn github_error_with_full_title(title: &str, message: &str) -> String {
+    format!(
+        "::error file=n.sql,line=1,title={}::{}",
+        escape_property(title),
+        escape_message(message)
+    )
+}
+
+#[test]
+fn a_title_of_255_characters_or_fewer_is_unchanged_and_a_longer_one_is_cut_to_252_and_dots() {
+    let dir = github_scratch("title-cap");
+    // The answer line is longer with the name, so find the name length that
+    // gives each title length from the text report of the same file.
+    let line_with = |letter: char, n: usize| -> String {
+        let (sql, _) = unreadable_with_long_name(letter, n);
+        github_write(&dir, "n.sql", &sql);
+        let text = stdout(&kilit_at(&dir, None, &["check", "n.sql"], ""));
+        answer_line(&text)
+    };
+    let base = CAP_PREFIX.chars().count() + line_with('a', 1).chars().count() - 1;
+    for (letter, wanted, cut) in [
+        ('a', 254, false),
+        ('a', 255, false),
+        ('a', 256, true),
+        ('a', 400, true),
+        // Characters, not bytes: 255 two-byte letters are 255 characters.
+        ('\u{f6}', 255, false),
+        ('\u{f6}', 256, true),
+    ] {
+        let n = wanted - base;
+        let (sql, statement) = unreadable_with_long_name(letter, n);
+        github_write(&dir, "n.sql", &sql);
+        let answer = line_with(letter, n);
+        let title = format!("{CAP_PREFIX}{answer}");
+        assert_eq!(title.chars().count(), wanted, "{letter} {wanted}");
+        let github = github_at(&dir, None, &["--strict", "n.sql"], "");
+        let shown = if cut {
+            let first: String = title.chars().take(252).collect();
+            format!("{first}...")
+        } else {
+            title.clone()
+        };
+        let message = if cut {
+            format!("{title}\nn.sql\nline 1: {statement}")
+        } else {
+            format!("n.sql\nline 1: {statement}")
+        };
+        assert_eq!(
+            statement_line(&github),
+            github_error_with_full_title(&shown, &message),
+            "{letter} {wanted}"
+        );
+        assert_eq!(github.status, Some(3));
+        assert_well_formed(&github);
+    }
+}

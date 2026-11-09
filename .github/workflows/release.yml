@@ -369,6 +369,24 @@ jobs:
             echo "::error::The demo exited with $status, not 1."
             exit 1
           fi
+      - name: Run the demo with GitHub annotations
+        run: |
+          # An empty file for each demo migration, where make:migration puts it.
+          mkdir -p demo/database/migrations
+          grep -o -E '[0-9]{4}_[0-9]{2}_[0-9]{2}_[0-9]{6}_[a-z_]+' \
+            crates/kilit-core/examples/laravel-pretend.txt |
+            while read -r name; do : > "demo/database/migrations/$name.php"; done
+          cd demo
+          status=0
+          kilit check --format github --schema database/schema/mysql-schema.sql \
+            < ../crates/kilit-core/examples/laravel-pretend.txt > ../annotations.txt || status=$?
+          # Printed, so the run's summary shows the annotations.
+          cat ../annotations.txt
+          expected='::error file=demo/database/migrations/2026_11_02_090100_widen_amount_on_orders_table.php,line=1,title='
+          if [ "$status" -ne 1 ] || ! grep -q -F -e "$expected" ../annotations.txt; then
+            echo "::error::The demo with --format github exited with $status, or it has no line starting with $expected"
+            exit 1
+          fi
       - name: The action's script refuses what it must refuse
         run: |
           # Each case runs the script itself; it must fail with its own message.

@@ -1,6 +1,8 @@
-//! What kilit prints: a report for people, or JSON for other programs.
+//! What kilit prints: a report for people, JSON for other programs, or the
+//! report with GitHub Actions annotations.
 
 use std::fmt::Write as _;
+use std::path::{Component, Path, PathBuf};
 
 use clap::ValueEnum;
 use kilit_core::{
@@ -68,6 +70,8 @@ struct SchemaSummary {
 
 struct SourceReport<'a> {
     name: &'a str,
+    /// The SQL file, as given.
+    file: Option<&'a Path>,
     kind: SourceKind,
     statements: Vec<Checked<'a>>,
 }
@@ -186,6 +190,7 @@ impl<'a> Report<'a> {
             .iter()
             .map(|source| SourceReport {
                 name: &source.name,
+                file: source.file.as_deref(),
                 kind: source.kind,
                 statements: source
                     .statements
@@ -418,6 +423,126 @@ impl<'a> Report<'a> {
         Ok(())
     }
 
+    /// The report for people, then a GitHub Actions annotation for each
+    /// statement or warning that needs one. The report echoes the input, so
+    /// GitHub reads no workflow command in it: it is printed between
+    /// `::stop-commands::` and a token new on every run. `places` says
+    /// where the annotations point.
+    pub fn github(&self, counted: &[Count], places: &Places) -> String {
+        let token = stop_token();
+        let mut out = format!("::stop-commands::{token}\n");
+        out.push_str(&self.text(counted));
+        let _ = writeln!(out, "::{token}::");
+        for annotation in self.annotations(counted, places) {
+            let _ = writeln!(out, "{annotation}");
+        }
+        out
+    }
+
+    /// The annotations, in the order of the text report. An error is
+    /// exactly what makes the exit status other than 0.
+    fn annotations(&self, counted: &[Count], places: &Places) -> Vec<Annotation> {
+        let mut annotations: Vec<Annotation> = self
+            .server_warnings
+            .iter()
+            .map(|warning| Annotation {
+                level: "warning",
+                file: None,
+                line: None,
+                title: "kilit: the schema's server".to_owned(),
+                message: warning.clone(),
+            })
+            .collect();
+
+        for source in &self.sources {
+            // A statement of an SQL file points at its line; a migration's
+            // file at its first line, as kilit knows no line in it.
+            let file = match source.kind {
+                SourceKind::Sql => source.file.map(|file| places.shown(file, None)),
+                SourceKind::LaravelMigration => places.migration(source.name),
+            };
+            for checked in &source.statements {
+                let Some(level) = level(checked, counted) else {
+                    continue;
+                };
+                let answer = AnswerLine(&checked.prediction).to_string();
+                let sql = shown_sql(checked);
+                let mut message = format!("{}\n", source.name);
+                match source.kind {
+                    SourceKind::Sql => {
+                        let _ = write!(message, "line {}: {sql}", checked.statement.line);
+                    }
+                    SourceKind::LaravelMigration => message.push_str(&sql),
+                }
+                let mut said = String::new();
+                let _ = write_prediction(&mut said, checked);
+                let rest = said
+                    .strip_prefix(&format!("    {answer}\n"))
+                    .expect("what the report says about a statement starts with its answer");
+                for more in rest.lines() {
+                    message.push('\n');
+                    message.push_str(more.trim_start());
+                }
+                annotations.push(Annotation {
+                    level,
+                    line: file.as_ref().map(|_| match source.kind {
+                        SourceKind::Sql => checked.statement.line,
+                        SourceKind::LaravelMigration => 1,
+                    }),
+                    file: file.clone(),
+                    title: format!("kilit: {answer}"),
+                    message,
+                });
+            }
+        }
+
+        for (input, error) in &self.laravel_errors {
+            annotations.push(Annotation {
+                level: "error",
+                file: None,
+                line: None,
+                title: "kilit: Laravel stopped with an error".to_owned(),
+                message: if self.several_inputs {
+                    format!("{input}: {error}")
+                } else {
+                    (*error).to_owned()
+                },
+            });
+        }
+
+        for unreadable in self.unreadable {
+            let file = unreadable
+                .file
+                .as_deref()
+                .map(|file| places.shown(file, None));
+            annotations.push(Annotation {
+                level: "error",
+                line: file.as_ref().map(|_| unreadable.line.line),
+                file,
+                title: "kilit: could not read this line".to_owned(),
+                message: format!(
+                    "{}, line {}: {}",
+                    unreadable.input, unreadable.line.line, unreadable.line.text
+                ),
+            });
+        }
+
+        if !self.locked_tables.is_empty() {
+            annotations.push(Annotation {
+                level: "notice",
+                file: None,
+                line: None,
+                title: format!("kilit: metadata lock on {}", self.locked_tables.join(", ")),
+                message: format!(
+                    "{}\nmeasured by kilit-lab on {}",
+                    metadata_lock_warning(),
+                    self.server
+                ),
+            });
+        }
+        annotations
+    }
+
     /// The report for other programs, as one JSON document. `counted` is
     /// what the exit status counts.
     pub fn json(&self, counted: &[Count]) -> String {
@@ -486,6 +611,201 @@ impl<'a> Report<'a> {
         json.push('\n');
         json
     }
+}
+
+/// The annotation a statement gets, if any: an error when the exit status
+/// counts it, a warning when it would count it with another `--fail-on`,
+/// and a notice when it runs but another measured server answers it
+/// otherwise.
+fn level(checked: &Checked, counted: &[Count]) -> Option<&'static str> {
+    let count = match checked.impact {
+        Impact::Fails => Count::Fails,
+        Impact::WritesWait => Count::Waits,
+        Impact::Unknown => Count::Unknown,
+        Impact::WritesContinue | Impact::NewTable => {
+            return (!checked.others.is_empty()).then_some("notice");
+        }
+        Impact::NotChecked => return None,
+    };
+    Some(if counted.contains(&count) {
+        "error"
+    } else {
+        "warning"
+    })
+}
+
+/// A token for `::stop-commands::` that no input can know: the standard
+/// library seeds every hasher's keys at random.
+fn stop_token() -> String {
+    use std::hash::BuildHasher;
+    let random = || std::collections::hash_map::RandomState::new().hash_one(0u8);
+    format!("kilit-{:016x}{:016x}", random(), random())
+}
+
+/// One GitHub Actions workflow command that annotates the run, or a file.
+struct Annotation {
+    level: &'static str,
+    file: Option<String>,
+    line: Option<usize>,
+    title: String,
+    message: String,
+}
+
+/// The longest title GitHub keeps, in characters.
+const LONGEST_TITLE: usize = 255;
+
+impl std::fmt::Display for Annotation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "::{} ", self.level)?;
+        if let Some(file) = &self.file {
+            write!(f, "file={},", escape_property(file))?;
+        }
+        if let Some(line) = self.line {
+            write!(f, "line={line},")?;
+        }
+        // A title too long for GitHub is cut, and the message starts with
+        // all of it.
+        if self.title.chars().count() > LONGEST_TITLE {
+            let short: String = self.title.chars().take(LONGEST_TITLE - 3).collect();
+            write!(
+                f,
+                "title={}...::{}",
+                escape_property(&short),
+                escape_data(&format!("{}\n{}", self.title, self.message))
+            )
+        } else {
+            write!(
+                f,
+                "title={}::{}",
+                escape_property(&self.title),
+                escape_data(&self.message)
+            )
+        }
+    }
+}
+
+/// An error that stops kilit before it can check, as an annotation of the
+/// run: the message names input, such as a file or a dump's server line.
+pub fn github_error(message: &str) -> String {
+    Annotation {
+        level: "error",
+        file: None,
+        line: None,
+        title: "kilit: could not check".to_owned(),
+        message: message.to_owned(),
+    }
+    .to_string()
+}
+
+/// A workflow command's message as GitHub's runner reads it back: `%`
+/// first, then the line breaks, so no input can end the command's line.
+fn escape_data(text: &str) -> String {
+    text.replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
+/// A workflow command's property value: as a message, and also `:` and
+/// `,`, which would end the value.
+fn escape_property(text: &str) -> String {
+    escape_data(text).replace(':', "%3A").replace(',', "%2C")
+}
+
+/// Where annotations point: the current directory, and the repository's
+/// folder on the runner (`GITHUB_WORKSPACE`).
+pub struct Places {
+    current_dir: Option<PathBuf>,
+    workspace: Option<PathBuf>,
+}
+
+impl Places {
+    pub fn new(current_dir: Option<PathBuf>, workspace: Option<PathBuf>) -> Places {
+        Places {
+            current_dir,
+            workspace: workspace.filter(|workspace| !workspace.as_os_str().is_empty()),
+        }
+    }
+
+    /// `path` relative to the workspace, with `/` between its parts, when
+    /// it is inside it; else `as_found`, or `path` as given. The folders
+    /// are compared as the system resolves them, links and `..` included,
+    /// and by their text only when the system cannot resolve them.
+    fn shown(&self, path: &Path, as_found: Option<&str>) -> String {
+        if let (Some(current_dir), Some(workspace)) = (&self.current_dir, &self.workspace) {
+            let file = current_dir.join(path);
+            let workspace = current_dir.join(workspace);
+            let inside = match (resolved(&file), std::fs::canonicalize(&workspace)) {
+                (Some(file), Ok(workspace)) => relative(&file, &workspace),
+                _ => relative(&lexical(&file), &lexical(&workspace)),
+            };
+            if let Some(inside) = inside {
+                return inside;
+            }
+        }
+        as_found.map_or_else(|| path.display().to_string(), str::to_owned)
+    }
+
+    /// The file of the Laravel migration `name`, where `make:migration`
+    /// puts it: `database/migrations/<name>.php` under the current
+    /// directory, if it is there. kilit looks nowhere else and reads
+    /// nothing in it.
+    fn migration(&self, name: &str) -> Option<String> {
+        let plain = !name.is_empty()
+            && !name.contains(['/', '\\', ':'])
+            && matches!(
+                Path::new(name).components().collect::<Vec<_>>().as_slice(),
+                [Component::Normal(part)] if *part == name
+            );
+        if !plain {
+            return None;
+        }
+        let file = Path::new("database")
+            .join("migrations")
+            .join(format!("{name}.php"));
+        let current_dir = self.current_dir.as_ref()?;
+        current_dir
+            .join(&file)
+            .is_file()
+            .then(|| self.shown(&file, Some(&format!("database/migrations/{name}.php"))))
+    }
+}
+
+/// `file` in its folder as the system resolves that folder. The file's own
+/// name is kept: a link in the repository is the repository's file.
+fn resolved(file: &Path) -> Option<PathBuf> {
+    let name = file.file_name()?;
+    let folder = std::fs::canonicalize(file.parent()?).ok()?;
+    Some(folder.join(name))
+}
+
+/// `file` relative to `folder` with `/` between its parts, if it is inside.
+fn relative(file: &Path, folder: &Path) -> Option<String> {
+    let inside = file.strip_prefix(folder).ok()?;
+    let parts: Option<Vec<&str>> = inside
+        .components()
+        .map(|part| match part {
+            Component::Normal(part) => part.to_str(),
+            _ => None,
+        })
+        .collect();
+    parts
+        .filter(|parts| !parts.is_empty())
+        .map(|parts| parts.join("/"))
+}
+
+/// `path` with `.` and `..` taken out by its text alone.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            part => out.push(part),
+        }
+    }
+    out
 }
 
 /// The statement as printed: in full when kilit has something to say about
@@ -928,6 +1248,84 @@ mod tests {
     fn wraps_at_spaces() {
         assert_eq!(wrap("one two three four", 9), ["one two", "three", "four"]);
         assert_eq!(wrap("", 9), Vec::<String>::new());
+    }
+
+    #[test]
+    fn escapes_what_ends_a_workflow_command() {
+        assert_eq!(escape_data("50% a::b,c\r\nd"), "50%25 a::b,c%0D%0Ad");
+        assert_eq!(
+            escape_property("50% a::b,c\r\nd"),
+            "50%25 a%3A%3Ab%2Cc%0D%0Ad"
+        );
+        assert_eq!(escape_data("%0A"), "%250A");
+    }
+
+    #[test]
+    fn an_annotation_names_its_file_and_line_only_when_it_has_them() {
+        let mut annotation = Annotation {
+            level: "error",
+            file: Some("db/a,b.sql".to_owned()),
+            line: Some(4),
+            title: "kilit: fails".to_owned(),
+            message: "one\ntwo".to_owned(),
+        };
+        assert_eq!(
+            annotation.to_string(),
+            "::error file=db/a%2Cb.sql,line=4,title=kilit%3A fails::one%0Atwo"
+        );
+        annotation.file = None;
+        annotation.line = None;
+        assert_eq!(
+            annotation.to_string(),
+            "::error title=kilit%3A fails::one%0Atwo"
+        );
+    }
+
+    #[test]
+    fn the_stop_token_is_new_on_every_run() {
+        let token = stop_token();
+        let hex = token.strip_prefix("kilit-").unwrap();
+        assert_eq!(hex.len(), 32);
+        assert!(
+            hex.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        );
+        assert_ne!(token, stop_token());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_inside_the_workspace_is_shown_relative_to_it() {
+        let places = Places::new(Some(PathBuf::from("/w/app")), Some(PathBuf::from("/w/./")));
+        assert_eq!(places.shown(Path::new("db/a.sql"), None), "app/db/a.sql");
+        assert_eq!(places.shown(Path::new("./../x/a.sql"), None), "x/a.sql");
+        assert_eq!(places.shown(Path::new("/w/b.sql"), None), "b.sql");
+        assert_eq!(places.shown(Path::new("../../o.sql"), None), "../../o.sql");
+        assert_eq!(places.shown(Path::new("/o/a.sql"), None), "/o/a.sql");
+        assert_eq!(places.shown(Path::new("/w"), Some("found")), "found");
+        let outside = Places::new(Some(PathBuf::from("/w/app")), Some(PathBuf::new()));
+        assert_eq!(outside.shown(Path::new("./a.sql"), None), "./a.sql");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_path_inside_the_workspace_is_shown_with_slashes() {
+        let places = Places::new(
+            Some(PathBuf::from(r"D:\a\kilit\kilit\demo")),
+            Some(PathBuf::from(r"D:\a\kilit\kilit")),
+        );
+        assert_eq!(
+            places.shown(Path::new(r"database\migrations\m.php"), None),
+            "demo/database/migrations/m.php"
+        );
+    }
+
+    #[test]
+    fn only_a_plain_migration_name_gets_a_file() {
+        let places = Places::new(Some(std::env::temp_dir()), None);
+        for name in ["", ".", "..", "../x", "a/b", "a\\b", "c:x"] {
+            assert_eq!(places.migration(name), None, "{name}");
+        }
     }
 
     #[test]

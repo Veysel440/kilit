@@ -19,7 +19,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use kilit_core::{DEFAULT_SERIES, Knowledge, Schema, ServerResults};
 
 use crate::input::Input;
-use crate::report::{Count, EXIT_FOUND, EXIT_INCOMPLETE, EXIT_PASSED, EXIT_UNKNOWN, Report};
+use crate::report::{
+    Count, EXIT_FOUND, EXIT_INCOMPLETE, EXIT_PASSED, EXIT_UNKNOWN, Places, Report,
+};
 
 /// What each exit status means. `kilit check --help` and the README's table
 /// say exactly this; a test holds both to it.
@@ -100,7 +102,8 @@ struct CheckArgs {
     #[arg(long, value_name = "NAME")]
     server: Option<String>,
 
-    /// How to print the result
+    /// How to print the result: `github` prints the text report, then a
+    /// GitHub Actions annotation for each statement that needs one
     #[arg(long, value_enum, default_value_t = Format::Text)]
     format: Format,
 
@@ -136,6 +139,7 @@ impl CheckArgs {
 enum Format {
     Text,
     Json,
+    Github,
 }
 
 fn main() -> ExitCode {
@@ -144,7 +148,11 @@ fn main() -> ExitCode {
         Command::Check(args) => match check(&args) {
             Ok(code) => ExitCode::from(code),
             Err(message) => {
-                eprintln!("kilit: {message}");
+                match args.format {
+                    // GitHub reads workflow commands on standard error too.
+                    Format::Github => eprintln!("{}", report::github_error(&message)),
+                    Format::Text | Format::Json => eprintln!("kilit: {message}"),
+                }
                 ExitCode::from(EXIT_INCOMPLETE)
             }
         },
@@ -193,6 +201,13 @@ fn check(args: &CheckArgs) -> Result<u8, String> {
     let output = match args.format {
         Format::Text => report.text(&counted),
         Format::Json => report.json(&counted),
+        Format::Github => report.github(
+            &counted,
+            &Places::new(
+                std::env::current_dir().ok(),
+                std::env::var_os("GITHUB_WORKSPACE").map(PathBuf::from),
+            ),
+        ),
     };
     print!("{output}");
     Ok(report.exit_code(&counted))
