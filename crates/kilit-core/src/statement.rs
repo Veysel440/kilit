@@ -262,6 +262,19 @@ pub enum Operation {
     DropConstraint {
         name: String,
     },
+    /// `DROP CHECK name`: MySQL drops only a CHECK constraint with it.
+    DropCheck {
+        name: String,
+    },
+    /// `ALTER CHECK name [NOT] ENFORCED` and `ALTER CONSTRAINT name [NOT]
+    /// ENFORCED`: whether MySQL enforces the CHECK constraint from now on.
+    /// `constraint` tells the second form, which MySQL refuses differently
+    /// for a name that is not a CHECK constraint.
+    AlterCheck {
+        name: String,
+        enforced: bool,
+        constraint: bool,
+    },
     /// `RENAME TO new_name`
     RenameTable {
         new_name: String,
@@ -551,6 +564,17 @@ impl fmt::Display for Operation {
             Operation::DropForeignKey { name } => write!(f, "drop foreign key {name}"),
             Operation::AddCheck(check) => write!(f, "add {check}"),
             Operation::DropConstraint { name } => write!(f, "drop constraint {name}"),
+            Operation::DropCheck { name } => write!(f, "drop check {name}"),
+            Operation::AlterCheck {
+                name,
+                enforced,
+                constraint,
+            } => write!(
+                f,
+                "alter {} {name} {}ENFORCED",
+                if *constraint { "constraint" } else { "check" },
+                if *enforced { "" } else { "NOT " }
+            ),
             Operation::RenameTable { new_name } => write!(f, "rename table to {new_name}"),
             Operation::ChangeTableOptions(options) => write!(f, "change table options {options}"),
             Operation::Other { sql } => write!(f, "not understood: {sql}"),
@@ -789,6 +813,31 @@ mod tests {
             }
             .to_string(),
             "drop constraint chk_amount"
+        );
+        assert_eq!(
+            Operation::DropCheck {
+                name: "chk_amount".into()
+            }
+            .to_string(),
+            "drop check chk_amount"
+        );
+        assert_eq!(
+            Operation::AlterCheck {
+                name: "chk_amount".into(),
+                enforced: false,
+                constraint: false,
+            }
+            .to_string(),
+            "alter check chk_amount NOT ENFORCED"
+        );
+        assert_eq!(
+            Operation::AlterCheck {
+                name: "chk_amount".into(),
+                enforced: true,
+                constraint: true,
+            }
+            .to_string(),
+            "alter constraint chk_amount ENFORCED"
         );
     }
 

@@ -162,6 +162,194 @@
       ]
     },
     {
+      "id": "add-check-constraint-not-enforced",
+      "title": "Add a NOT ENFORCED CHECK constraint",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount >= 0) NOT ENFORCED",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-check-constraint-not-enforced-rows-break-it",
+      "title": "Add a NOT ENFORCED CHECK constraint that rows break",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 500) NOT ENFORCED",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
       "id": "add-check-constraint-rows-break-it",
       "title": "Add a CHECK constraint that rows break",
       "session": [],
@@ -6311,6 +6499,890 @@
       ]
     },
     {
+      "id": "alter-check-enforced",
+      "title": "Enforce a NOT ENFORCED CHECK constraint the rows meet, with ALTER CHECK",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0) NOT ENFORCED"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ALTER CHECK chk_amount ENFORCED",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "alter-check-enforced-again",
+      "title": "Enforce a CHECK constraint that is already enforced, with ALTER CHECK",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ALTER CHECK chk_amount ENFORCED",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "alter-check-enforced-rows-break-it",
+      "title": "Enforce a NOT ENFORCED CHECK constraint that rows break, with ALTER CHECK",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 500) NOT ENFORCED"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ALTER CHECK chk_amount ENFORCED",
+      "verdict": {
+        "result": "fails",
+        "code": 3819,
+        "message": "Check constraint 'chk_amount' is violated."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3819,
+          "message": "Check constraint 'chk_amount' is violated."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3819,
+          "message": "Check constraint 'chk_amount' is violated."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "alter-check-not-enforced",
+      "title": "Stop enforcing a CHECK constraint with ALTER CHECK",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ALTER CHECK chk_amount NOT ENFORCED",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "alter-check-not-enforced-again",
+      "title": "Stop enforcing a CHECK constraint that is already NOT ENFORCED, with ALTER CHECK",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0) NOT ENFORCED"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ALTER CHECK chk_amount NOT ENFORCED",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "alter-constraint-enforced",
+      "title": "Enforce a NOT ENFORCED CHECK constraint the rows meet, with ALTER CONSTRAINT",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0) NOT ENFORCED"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ALTER CONSTRAINT chk_amount ENFORCED",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "alter-constraint-enforced-again",
+      "title": "Enforce a CHECK constraint that is already enforced, with ALTER CONSTRAINT",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ALTER CONSTRAINT chk_amount ENFORCED",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "alter-constraint-enforced-rows-break-it",
+      "title": "Enforce a NOT ENFORCED CHECK constraint that rows break, with ALTER CONSTRAINT",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 500) NOT ENFORCED"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ALTER CONSTRAINT chk_amount ENFORCED",
+      "verdict": {
+        "result": "fails",
+        "code": 3819,
+        "message": "Check constraint 'chk_amount' is violated."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3819,
+          "message": "Check constraint 'chk_amount' is violated."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3819,
+          "message": "Check constraint 'chk_amount' is violated."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "alter-constraint-not-enforced",
+      "title": "Stop enforcing a CHECK constraint with ALTER CONSTRAINT",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ALTER CONSTRAINT chk_amount NOT ENFORCED",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "alter-constraint-not-enforced-again",
+      "title": "Stop enforcing a CHECK constraint that is already NOT ENFORCED, with ALTER CONSTRAINT",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0) NOT ENFORCED"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ALTER CONSTRAINT chk_amount NOT ENFORCED",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
       "id": "change-column-charset",
       "title": "Change a column's character set explicitly",
       "session": [],
@@ -8333,6 +9405,297 @@
       "session": [],
       "row_format": "COMPRESSED",
       "statement": "ALTER TABLE orders ALTER COLUMN amount SET DEFAULT 0",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-check",
+      "title": "Drop a CHECK constraint with DROP CHECK",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP CHECK chk_amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-check-not-enforced",
+      "title": "Drop a NOT ENFORCED CHECK constraint with DROP CHECK",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0) NOT ENFORCED"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP CHECK chk_amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-check-two-column",
+      "title": "Drop a CHECK constraint on two columns with DROP CHECK",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount + user_id > 0)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP CHECK chk_amount",
       "verdict": {
         "result": "runs",
         "algorithm": "INSTANT",

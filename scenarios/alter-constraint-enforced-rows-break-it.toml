@@ -1,0 +1,5 @@
+title = "Enforce a NOT ENFORCED CHECK constraint that rows break, with ALTER CONSTRAINT"
+# The constraint is named chk_amount, as in the ADD CHECK scenarios, so
+# that error 3819 names the same constraint in all of them.
+setup = ["ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 500) NOT ENFORCED"]
+operation = "ALTER CONSTRAINT chk_amount ENFORCED"

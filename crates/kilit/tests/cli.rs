@@ -6617,3 +6617,158 @@ fn laravel_s_date_default_raw_current_date_is_unknown_for_the_create_and_the_tab
         assert_eq!(strict, Some(3), "{form}");
     }
 }
+
+// Step 13b: DROP CHECK, ALTER CHECK and ALTER CONSTRAINT. The answers are the
+// lab's (drop-check, alter-check-enforced, ...); the refusal of a clause
+// without a name is a hand test on MySQL 8.0.46 and 8.4.13 (error 1064).
+
+/// A mysqldump of `orders` with an enforced CHECK (chk_amount) and a NOT
+/// ENFORCED one (chk_off); the path of the file.
+fn write_schema_with_checks(name: &str) -> PathBuf {
+    let file = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::write(
+        &file,
+        "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `amount` int NOT NULL,
+  `stock` int NOT NULL,
+  PRIMARY KEY (`id`),
+  CONSTRAINT `chk_amount` CHECK ((`amount` > 0)),
+  CONSTRAINT `chk_off` CHECK ((`stock` > 0)) /*!80016 NOT ENFORCED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+",
+    )
+    .unwrap();
+    file
+}
+
+#[test]
+fn drop_check_on_a_schema_table_is_instant_in_text_and_json_and_exits_with_0() {
+    let schema = write_schema_with_checks("schema-for-drop-check.sql");
+    let schema = schema.to_str().unwrap();
+    let sql = "alter table `orders` drop check `chk_amount`;";
+    for strict in [false, true] {
+        let mut args = vec!["--schema", schema];
+        if strict {
+            args.push("--strict");
+        }
+        let (text, json, code) = text_and_json(&args, sql);
+        let statement = &json["sources"][0]["statements"][0];
+        assert_eq!(statement["impact"], "writes_continue", "{text}");
+        assert_eq!(statement["case"], "drop-check-constraint", "{text}");
+        assert!(
+            text.contains("INSTANT, no rebuild, writes continue"),
+            "{text}"
+        );
+        assert!(text.contains("drop-check-constraint"), "{text}");
+        assert_eq!(code, Some(0), "strict {strict}: {text}");
+        assert_eq!(json["exit_code"], 0, "strict {strict}");
+    }
+}
+
+#[test]
+fn enforcing_a_not_enforced_check_makes_writes_wait_and_exits_with_1() {
+    let schema = write_schema_with_checks("schema-for-enforce-check.sql");
+    let schema = schema.to_str().unwrap();
+    // The CHECK of the dump is NOT ENFORCED: ENFORCED copies the table.
+    // The same with ALTER CONSTRAINT, and after a NOT ENFORCED in the input.
+    for sql in [
+        "alter table `orders` alter check `chk_off` enforced;",
+        "alter table `orders` alter constraint `chk_off` enforced;",
+        "alter table `orders` alter check `chk_amount` not enforced;
+         alter table `orders` alter check `chk_amount` enforced;",
+    ] {
+        for strict in [false, true] {
+            let mut args = vec!["--schema", schema];
+            if strict {
+                args.push("--strict");
+            }
+            let (text, json, code) = text_and_json(&args, sql);
+            let statements = json["sources"][0]["statements"].as_array().unwrap();
+            let last = statements.last().unwrap();
+            assert_eq!(last["impact"], "writes_wait", "{sql}\n{text}");
+            assert_eq!(last["case"], "enforce-check-constraint", "{sql}\n{text}");
+            assert!(
+                notes_of(last)
+                    .iter()
+                    .any(|note| note.contains("fails with error 3819")),
+                "{sql}\n{last}"
+            );
+            assert!(
+                text.contains("COPY, copies every row, writes wait"),
+                "{sql}\n{text}"
+            );
+            assert!(text.contains("3819"), "{sql}\n{text}");
+            assert_eq!(code, Some(1), "{sql}\nstrict {strict}: {text}");
+            assert_eq!(json["exit_code"], 1, "{sql}");
+        }
+    }
+    // Not enforcing an enforced CHECK, and enforcing an enforced one, are
+    // INSTANT: exit 0, also with --strict.
+    for strict in [false, true] {
+        let mut args = vec!["--schema", schema];
+        if strict {
+            args.push("--strict");
+        }
+        let (text, json, code) = text_and_json(
+            &args,
+            "alter table `orders` alter check `chk_amount` enforced;
+             alter table `orders` alter constraint `chk_off` not enforced;",
+        );
+        assert_eq!(
+            impacts_of(&json),
+            ["writes_continue", "writes_continue"],
+            "{text}"
+        );
+        for statement in json["sources"][0]["statements"].as_array().unwrap() {
+            assert_eq!(statement["case"], "alter-check-constraint", "{text}");
+        }
+        assert_eq!(code, Some(0), "strict {strict}: {text}");
+    }
+}
+
+#[test]
+fn drop_check_without_a_name_is_unknown_and_only_strict_exits_with_3() {
+    let schema = write_schema_with_checks("schema-for-nameless-drop-check.sql");
+    let schema = schema.to_str().unwrap();
+    for sql in [
+        "alter table `orders` drop check;",
+        "alter table `orders` drop check, algorithm=instant;",
+    ] {
+        let (text, json, code) = text_and_json(&["--schema", schema], sql);
+        let statement = &json["sources"][0]["statements"][0];
+        assert_eq!(statement["impact"], "unknown", "{sql}\n{text}");
+        assert!(
+            statement["reason"]
+                .as_str()
+                .unwrap()
+                .starts_with(REFUSED_NAME),
+            "{sql}\n{statement}"
+        );
+        assert!(text.contains(&format!("UNKNOWN: {REFUSED_NAME}")), "{text}");
+        // Not a column drop named CHECK.
+        assert!(!text.contains("drop-column"), "{text}");
+        assert_eq!(code, Some(0), "{sql}\n{text}");
+        assert_eq!(json["exit_code"], 0, "{sql}");
+
+        let (text, json, code) = text_and_json(&["--schema", schema, "--strict"], sql);
+        assert_eq!(code, Some(3), "{sql}\n{text}");
+        assert_eq!(json["exit_code"], 3, "{sql}");
+        assert_eq!(json["summary"]["unknown"], 1, "{sql}");
+    }
+}
+
+#[test]
+fn a_check_clause_of_a_name_that_is_no_check_is_unknown_and_exits_with_3_only_with_strict() {
+    let schema = example("mysql-schema.sql");
+    let schema = schema.to_str().unwrap();
+    // The foreign key of Laravel's orders table: MySQL answers 3821 to DROP
+    // CHECK and 3941 to ALTER CONSTRAINT (hand tests).
+    let sql = "alter table `orders` drop check `orders_user_id_foreign`;
+               alter table `orders` alter constraint `orders_user_id_foreign` enforced;";
+    let (text, json, code) = text_and_json(&["--schema", schema], sql);
+    assert_eq!(impacts_of(&json), ["unknown", "unknown"], "{text}");
+    assert_eq!(code, Some(0), "{text}");
+    let (text, _, code) = text_and_json(&["--schema", schema, "--strict"], sql);
+    assert_eq!(code, Some(3), "{text}");
+}

@@ -1,0 +1,3 @@
+title = "Enforce a CHECK constraint that is already enforced, with ALTER CHECK"
+setup = ["ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0)"]
+operation = "ALTER CHECK chk_amount ENFORCED"

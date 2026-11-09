@@ -568,6 +568,40 @@ fn change(table: &mut Table, operation: &Operation) -> Result<(), String> {
                 ));
             }
         },
+        Operation::DropCheck { name } => match table.check_target(name) {
+            CheckTarget::Check(at) => {
+                table.checks.remove(at);
+            }
+            // MySQL 8.0.46 and 8.4.13 refuse the statement: the table stays.
+            CheckTarget::NotACheck(_) => {}
+            CheckTarget::Nothing => {
+                return Err(format!(
+                    "drops the CHECK constraint {name}, which kilit does not know"
+                ));
+            }
+            CheckTarget::Several => {
+                return Err(format!(
+                    "drops the CHECK constraint {name}, a name that several of its constraints \
+                     have"
+                ));
+            }
+        },
+        Operation::AlterCheck { name, enforced, .. } => match table.check_target(name) {
+            CheckTarget::Check(at) => table.checks[at].enforced = *enforced,
+            // MySQL 8.0.46 and 8.4.13 refuse the statement: the table stays.
+            CheckTarget::NotACheck(_) => {}
+            CheckTarget::Nothing => {
+                return Err(format!(
+                    "changes the CHECK constraint {name}, which kilit does not know"
+                ));
+            }
+            CheckTarget::Several => {
+                return Err(format!(
+                    "changes the CHECK constraint {name}, a name that several of its \
+                     constraints have"
+                ));
+            }
+        },
         // The caller moves the table to its new name.
         Operation::RenameTable { .. } => {}
         Operation::Other { sql } => return Err(format!("kilit does not follow `{sql}`")),
@@ -1016,6 +1050,24 @@ pub(crate) enum ConstraintKind {
     PrimaryKey,
 }
 
+/// What `DROP CHECK name`, `ALTER CHECK name` and `ALTER CONSTRAINT name ...
+/// ENFORCED` find in a table. By hand, MySQL 8.0.46 and 8.4.13 refuse each
+/// of them for a name that is not a CHECK constraint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CheckTarget {
+    /// The table's one constraint with the name is a CHECK constraint, at
+    /// this place in [`Table::checks`], and no index has the name.
+    Check(usize),
+    /// No CHECK constraint has the name, but these have: "a foreign key", "a
+    /// unique index", "the primary key", or else "an index".
+    NotACheck(Vec<&'static str>),
+    /// Nothing in the table has the name, as far as kilit can tell.
+    Nothing,
+    /// A CHECK constraint has the name, and so does another constraint or an
+    /// index.
+    Several,
+}
+
 /// A text column's character set and collation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TextSettings {
@@ -1104,6 +1156,36 @@ impl Table {
             kinds.push(ConstraintKind::PrimaryKey);
         }
         kinds
+    }
+
+    /// What a CHECK constraint clause finds under `name`, in any case.
+    pub(crate) fn check_target(&self, name: &str) -> CheckTarget {
+        let kinds = self.constraints_named(name);
+        let index = self
+            .indexes
+            .iter()
+            .any(|index| index.kind != IndexKind::Unique && has_name([&index.name], name));
+        match (kinds.as_slice(), index) {
+            ([ConstraintKind::Check], false) => self
+                .checks
+                .iter()
+                .position(|check| has_name([&check.name], name))
+                .map_or(CheckTarget::Nothing, CheckTarget::Check),
+            ([], false) => CheckTarget::Nothing,
+            ([], true) => CheckTarget::NotACheck(vec!["an index"]),
+            (kinds, _) if kinds.contains(&ConstraintKind::Check) => CheckTarget::Several,
+            (kinds, _) => CheckTarget::NotACheck(
+                kinds
+                    .iter()
+                    .map(|kind| match kind {
+                        ConstraintKind::Check => "a CHECK constraint",
+                        ConstraintKind::ForeignKey => "a foreign key",
+                        ConstraintKind::UniqueIndex => "a unique index",
+                        ConstraintKind::PrimaryKey => "the primary key",
+                    })
+                    .collect(),
+            ),
+        }
     }
 
     /// The character set and collation of a text column: the column's own,
@@ -1780,16 +1862,104 @@ ALTER TABLE t ADD CONSTRAINT C CHECK (a > 1);",
 
     #[test]
     fn a_change_kilit_cannot_read_on_a_check_loses_the_table() {
+        let schema = from_sql(
+            "CREATE TABLE t (a INT, CONSTRAINT c CHECK (a > 0));\n\
+             ALTER TABLE t ADD b INT CHECK (b > 0);",
+        );
+        assert_eq!(schema.lost().count(), 1);
+    }
+
+    const WITH_CHECKS: &str = "CREATE TABLE t (
+           id INT PRIMARY KEY, a INT, b INT, u INT, e VARCHAR(10),
+           CONSTRAINT c CHECK (a > 0), CHECK (b > 0),
+           CONSTRAINT off CHECK (a < 9) NOT ENFORCED,
+           UNIQUE KEY uq (e), KEY ix (b),
+           CONSTRAINT fk FOREIGN KEY (u) REFERENCES p (id)
+         );";
+
+    fn checks_after(sql: &str) -> Vec<(String, bool)> {
+        let schema = from_sql(&format!(
+            "CREATE TABLE p (id INT PRIMARY KEY);\n{WITH_CHECKS}\n{sql};"
+        ));
+        known(&schema, "t")
+            .checks
+            .iter()
+            .map(|check| (check.name.clone().unwrap_or_default(), check.enforced))
+            .collect()
+    }
+
+    #[test]
+    fn drop_check_and_alter_check_change_the_check_they_name() {
+        let all = |changed: &[(&str, bool)]| -> Vec<(String, bool)> {
+            changed
+                .iter()
+                .map(|(name, enforced)| ((*name).to_owned(), *enforced))
+                .collect()
+        };
+        assert_eq!(
+            checks_after("ALTER TABLE t DROP CHECK C"),
+            all(&[("t_chk_1", true), ("off", false)])
+        );
+        assert_eq!(
+            checks_after("ALTER TABLE t DROP CHECK t_chk_1"),
+            all(&[("c", true), ("off", false)])
+        );
+        assert_eq!(
+            checks_after("ALTER TABLE t ALTER CHECK off ENFORCED"),
+            all(&[("c", true), ("t_chk_1", true), ("off", true)])
+        );
+        assert_eq!(
+            checks_after(
+                "ALTER TABLE t ALTER CONSTRAINT c NOT ENFORCED;\n\
+                 ALTER TABLE t ALTER CHECK off ENFORCED, ALTER CHECK off NOT ENFORCED"
+            ),
+            all(&[("c", false), ("t_chk_1", true), ("off", false)])
+        );
+    }
+
+    #[test]
+    fn a_check_clause_on_another_kind_of_name_leaves_the_table_as_it_was() {
+        // MySQL 8.0.46 and 8.4.13 refuse each (run by hand).
+        let table_after = |sql: &str| {
+            let schema = from_sql(&format!(
+                "CREATE TABLE p (id INT PRIMARY KEY);\n{WITH_CHECKS}\n{sql};"
+            ));
+            known(&schema, "t")
+        };
+        let untouched = table_after("SELECT 1");
         for sql in [
-            "ALTER TABLE t DROP CHECK c",
-            "ALTER TABLE t ALTER CHECK c NOT ENFORCED",
-            "ALTER TABLE t ADD b INT CHECK (b > 0)",
+            "ALTER TABLE t DROP CHECK fk",
+            "ALTER TABLE t DROP CHECK uq",
+            "ALTER TABLE t DROP CHECK ix",
+            "ALTER TABLE t DROP CHECK `PRIMARY`",
+            "ALTER TABLE t ALTER CHECK fk NOT ENFORCED",
+            "ALTER TABLE t ALTER CONSTRAINT uq NOT ENFORCED",
+        ] {
+            assert_eq!(table_after(sql), untouched, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_check_clause_on_a_name_kilit_does_not_know_loses_the_table() {
+        for sql in [
+            "ALTER TABLE t DROP CHECK nothing",
+            "ALTER TABLE t ALTER CHECK nothing ENFORCED",
+            "ALTER TABLE t DROP CHECK c, DROP CHECK c",
+            "ALTER TABLE t DROP CHECK c, ALTER CHECK c ENFORCED",
         ] {
             let schema = from_sql(&format!(
-                "CREATE TABLE t (a INT, CONSTRAINT c CHECK (a > 0));\n{sql};"
+                "CREATE TABLE p (id INT PRIMARY KEY);\n{WITH_CHECKS}\n{sql};"
             ));
             assert_eq!(schema.lost().count(), 1, "{sql}");
         }
+        // A CHECK constraint and a foreign key of the same name.
+        let schema = from_sql(
+            "CREATE TABLE p (id INT PRIMARY KEY);\n\
+             CREATE TABLE t (a INT, CONSTRAINT same CHECK (a > 0), \
+               CONSTRAINT same FOREIGN KEY (a) REFERENCES p (id));\n\
+             ALTER TABLE t DROP CHECK same;",
+        );
+        assert_eq!(schema.lost().count(), 1);
     }
 
     #[test]

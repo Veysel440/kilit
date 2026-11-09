@@ -14,9 +14,18 @@ safe.
 ## Input
 
 - sqlparser 0.63 cannot read `CONVERT TO CHARACTER SET`, `RENAME INDEX`,
-  `ALGORITHM=NOCOPY`, `OPTIMIZE TABLE`, `CREATE FULLTEXT INDEX`, `DROP CHECK`
-  or `ALTER CHECK`. Each is `UNKNOWN: kilit cannot read it`. A table named in
-  such a statement is lost from then on.
+  `ALGORITHM=NOCOPY`, `OPTIMIZE TABLE` or `CREATE FULLTEXT INDEX`. Each is
+  `UNKNOWN: kilit cannot read it`. A table named in such a statement is lost
+  from then on.
+- kilit reads `DROP CHECK name`, `ALTER CHECK name [NOT] ENFORCED` and
+  `ALTER CONSTRAINT name [NOT] ENFORCED` itself, alone or with `ALGORITHM` and
+  `LOCK`. Several changes in one statement stay `UNKNOWN`. A name that is an
+  unquoted reserved word is unreadable. `DROP CHECK` without a name, with
+  `IF EXISTS` or with `CASCADE`, and `ALTER CHECK` without `ENFORCED` are
+  `UNKNOWN` because MySQL 8.0.46 and 8.4.13 do not accept them. If the name is
+  a foreign key, an index or missing, the answer is `UNKNOWN` too. Two clauses
+  on the same CHECK in one statement, `RENAME TO` beside a CHECK clause and a
+  clause without a comma before `ALGORITHM` are unreadable.
 - kilit reads an `ALTER TABLE` made only of `COMMENT`, `ENGINE`, `ROW_FORMAT`
   and `KEY_BLOCK_SIZE` itself. Only the comment is measured: changing the
   engine, the row format or the key block size is `UNKNOWN`, though the table
@@ -41,7 +50,7 @@ safe.
 - Some forms are unreadable to kilit, which says it could not read the
   statement: single-quoted table options that MySQL takes, such as
   `ENGINE = 'InnoDB'`, `DROP KEY 'ix'`, `RENAME INDEX` with quotes, and the
-  MariaDB forms `IF EXISTS` and `IF NOT EXISTS` on `DROP CHECK`,
+  MariaDB forms `IF EXISTS` and `IF NOT EXISTS` on
   `DROP FOREIGN KEY`, `DROP INDEX`, `ADD COLUMN` and `ADD INDEX`. A table
   named in such a statement may be lost from then on.
 - Laravel's `migrate --pretend` output turns every run of spaces into one, even

@@ -17,7 +17,9 @@ use crate::knowledge::ServerResults;
 use crate::modify::{Change, changes};
 use crate::parse::REJECTED_BY;
 use crate::results::{Server, Variant, Verdict};
-use crate::schema::{ConstraintKind, Schema, TableState, has_descending, names_foreign_key_index};
+use crate::schema::{
+    CheckTarget, ConstraintKind, Schema, TableState, has_descending, names_foreign_key_index,
+};
 use crate::statement::{
     Alter, Check, CheckColumns, Column, DataType, Engine, ForeignKey, ForeignKeyAction, Index,
     IndexKind, IntegerSize, Lock, Operation, Position, RowFormat, Statement, StatementKind, Table,
@@ -671,16 +673,61 @@ const ADD_CHECK_CONSTRAINT: Case = Case {
     }],
 };
 
-/// `DROP CONSTRAINT` of a CHECK constraint: see [`dropped_constraint`].
-/// `DROP CHECK` gets no answer, as the parser cannot read it.
+/// A NOT ENFORCED CHECK constraint, under the conditions of
+/// [`ADD_CHECK_CONSTRAINT`]. MySQL does not read the rows for it.
+const ADD_NOT_ENFORCED_CHECK_CONSTRAINT: Case = Case {
+    id: "add-not-enforced-check-constraint",
+    scenarios: &[
+        "add-check-constraint-not-enforced",
+        "add-check-constraint-not-enforced-rows-break-it",
+    ],
+    exceptions: &[],
+};
+
+/// `DROP CONSTRAINT` and `DROP CHECK` of a CHECK constraint: see
+/// [`dropped_constraint`] and [`named_check`].
 const DROP_CHECK_CONSTRAINT: Case = Case {
     id: "drop-check-constraint",
     scenarios: &[
         "drop-constraint-check",
         "drop-constraint-two-column-check",
         "drop-constraint-not-enforced-check",
+        "drop-check",
+        "drop-check-two-column",
+        "drop-check-not-enforced",
     ],
     exceptions: &[],
+};
+
+/// `ALTER CHECK` or `ALTER CONSTRAINT` of a CHECK constraint, `NOT
+/// ENFORCED` whatever it was, or `ENFORCED` when it already is: see
+/// [`named_check`].
+const ALTER_CHECK_CONSTRAINT: Case = Case {
+    id: "alter-check-constraint",
+    scenarios: &[
+        "alter-check-not-enforced",
+        "alter-check-not-enforced-again",
+        "alter-check-enforced-again",
+        "alter-constraint-not-enforced",
+        "alter-constraint-not-enforced-again",
+        "alter-constraint-enforced-again",
+    ],
+    exceptions: &[],
+};
+
+/// `ALTER CHECK` or `ALTER CONSTRAINT ... ENFORCED` of a NOT ENFORCED CHECK
+/// constraint: MySQL reads every row, as for a new one.
+const ENFORCE_CHECK_CONSTRAINT: Case = Case {
+    id: "enforce-check-constraint",
+    scenarios: &["alter-check-enforced", "alter-constraint-enforced"],
+    exceptions: &[Exception {
+        scenarios: &[
+            "alter-check-enforced-rows-break-it",
+            "alter-constraint-enforced-rows-break-it",
+        ],
+        when: ROW_BREAKS_CHECK,
+        conditions: &[Condition::Hidden],
+    }],
 };
 
 /// `COMMENT = '...'` as the statement's only change. A change of ENGINE,
@@ -695,7 +742,7 @@ const SET_TABLE_COMMENT: Case = Case {
 const MAX_TABLE_COMMENT: usize = 2048;
 
 /// Every case kilit knows.
-pub const CASES: [&Case; 28] = [
+pub const CASES: [&Case; 31] = [
     &ADD_COLUMN,
     &ADD_COLUMN_EXPRESSION_DEFAULT,
     &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT,
@@ -722,7 +769,10 @@ pub const CASES: [&Case; 28] = [
     &ADD_FOREIGN_KEY_CHECKS_OFF,
     &DROP_FOREIGN_KEY,
     &ADD_CHECK_CONSTRAINT,
+    &ADD_NOT_ENFORCED_CHECK_CONSTRAINT,
     &DROP_CHECK_CONSTRAINT,
+    &ALTER_CHECK_CONSTRAINT,
+    &ENFORCE_CHECK_CONSTRAINT,
     &SET_TABLE_COMMENT,
 ];
 
@@ -1497,9 +1547,14 @@ fn options_kilit_cannot_follow(
     let StatementKind::Alter(alter) = &statement.kind else {
         return None;
     };
-    let [Operation::ChangeTableOptions(options)] = alter.operations.as_slice() else {
-        return None;
-    };
+    // CHECK constraint clauses beside the options change no key.
+    let options = alter
+        .operations
+        .iter()
+        .find_map(|operation| match operation {
+            Operation::ChangeTableOptions(options) => Some(options),
+            _ => None,
+        })?;
     let TableState::Known(table) = schema.table(&alter.table) else {
         return None;
     };
@@ -4259,21 +4314,18 @@ fn check_naming<'a>(table: &'a Table, column: &str) -> Option<&'a Check> {
     })
 }
 
-/// The lab measured adding an enforced CHECK constraint with a plain expression
-/// over columns of the table. By hand, MySQL 8.0.46 and 8.4.13 refuse a name
-/// the database already has (error 3822), a column the table does not have
-/// (1054), an AUTO_INCREMENT column (3818), a disallowed function (3814) and a
-/// foreign key column with a referential action (3823), and a NOT ENFORCED
-/// constraint is INSTANT. None of that has a lab fact yet, so kilit gives no
-/// answer when it can see one of them.
+/// The lab measured adding a CHECK constraint, enforced or not, with a plain
+/// expression over columns of the table. By hand, MySQL 8.0.46 and 8.4.13
+/// refuse a name the database already has (error 3822), a column the table
+/// does not have (1054), an AUTO_INCREMENT column (3818), a disallowed
+/// function (3814) and a foreign key column with a referential action
+/// (3823). None of that has a lab fact yet, so kilit gives no answer when it
+/// can see one of them.
 fn check_new_constraint(
     check: &Check,
     table: TableState<'_>,
     schema: &Schema,
 ) -> Result<(), String> {
-    if !check.enforced {
-        return Err("adding a NOT ENFORCED CHECK constraint has not been measured yet".into());
-    }
     let CheckColumns::Plain(columns) = &check.columns else {
         return Err(format!(
             "adding a CHECK constraint on ({}) has not been measured yet; the lab measured \
@@ -4369,6 +4421,45 @@ fn dropped_constraint(name: &str, table: TableState<'_>) -> Result<&'static Case
     Err(format!(
         "{name} is {kind}, and dropping one with DROP CONSTRAINT has not been measured yet"
     ))
+}
+
+/// The CHECK constraint that `clause` (`DROP CHECK`, `ALTER CHECK` or `ALTER
+/// CONSTRAINT`) names. MySQL takes these clauses for a CHECK constraint
+/// only: by hand, MySQL 8.0.46 and 8.4.13 refuse each of them for a foreign
+/// key, a unique index, the primary key or another index.
+fn named_check<'t>(clause: &str, name: &str, table: TableState<'t>) -> Result<&'t Check, String> {
+    let table = match table {
+        TableState::Known(table) => table,
+        TableState::Lost { reason, .. } => {
+            return Err(format!(
+                "kilit lost track of this table ({reason}), so it cannot tell whether {name} \
+                 is one of its CHECK constraints"
+            ));
+        }
+        TableState::Missing => {
+            return Err(format!(
+                "kilit does not know this table, so it cannot tell whether {name} is one of \
+                 its CHECK constraints"
+            ));
+        }
+    };
+    match table.check_target(name) {
+        CheckTarget::Check(at) => Ok(&table.checks[at]),
+        CheckTarget::NotACheck(what) => Err(format!(
+            "{name} is {} of {}, not a CHECK constraint, and {REJECTED_BY} {clause} for it",
+            what.join(" and "),
+            table.name
+        )),
+        CheckTarget::Nothing => Err(format!(
+            "{} has no CHECK constraint {name}, as far as kilit can tell",
+            table.name
+        )),
+        CheckTarget::Several => Err(format!(
+            "{} has a CHECK constraint {name} and another constraint or index of that name, \
+             and {clause} has not been measured then",
+            table.name
+        )),
+    }
 }
 
 /// The TEXT and BLOB types the lab measured an index on, without a prefix
@@ -4669,9 +4760,34 @@ fn classify(
         }
         Operation::AddCheck(check) => {
             check_new_constraint(check, table, schema)?;
-            &ADD_CHECK_CONSTRAINT
+            if check.enforced {
+                &ADD_CHECK_CONSTRAINT
+            } else {
+                &ADD_NOT_ENFORCED_CHECK_CONSTRAINT
+            }
         }
         Operation::DropConstraint { name } => dropped_constraint(name, table)?,
+        Operation::DropCheck { name } => {
+            named_check("DROP CHECK", name, table)?;
+            &DROP_CHECK_CONSTRAINT
+        }
+        Operation::AlterCheck {
+            name,
+            enforced,
+            constraint,
+        } => {
+            let clause = if *constraint {
+                "ALTER CONSTRAINT"
+            } else {
+                "ALTER CHECK"
+            };
+            let check = named_check(clause, name, table)?;
+            if *enforced && !check.enforced {
+                &ENFORCE_CHECK_CONSTRAINT
+            } else {
+                &ALTER_CHECK_CONSTRAINT
+            }
+        }
         Operation::AddPrimaryKey { .. } | Operation::DropPrimaryKey => {
             return Err("changing the primary key has not been measured yet".into());
         }
@@ -9318,11 +9434,20 @@ mod tests {
     #[test]
     fn adding_a_check_the_lab_has_not_measured_is_unknown() {
         let add = |check: &str| format!("ALTER TABLE orders ADD CONSTRAINT chk CHECK ({check})");
-        // Measured by hand, or in no scenario of the repository: MySQL runs a
-        // NOT ENFORCED constraint as INSTANT, and refuses some expressions.
+        // Measured by hand, or in no scenario of the repository: MySQL refuses
+        // some expressions. NOT ENFORCED changes none of it.
         assert_eq!(
-            reason(on_shop("", &format!("{} NOT ENFORCED", add("amount > 0")))),
-            "adding a NOT ENFORCED CHECK constraint has not been measured yet"
+            reason(on_shop(
+                "",
+                &format!("{} NOT ENFORCED", add("char_length(note) > 0"))
+            )),
+            "adding a CHECK constraint on (char_length(note) > 0) has not been measured yet; \
+             the lab measured expressions of column names, numbers and arithmetic, comparison \
+             and logical operators only"
+        );
+        assert_eq!(
+            reason(on_shop("", &format!("{} NOT ENFORCED", add("nosuch > 0")))),
+            "orders has no column nosuch, as far as kilit can tell"
         );
         for check in [
             "note IN ('a', 'b')",
@@ -9543,27 +9668,156 @@ mod tests {
     }
 
     #[test]
-    fn drop_check_and_alter_check_stay_unread_and_lose_the_table() {
-        for sql in [
-            "ALTER TABLE orders DROP CHECK chk_amount",
-            "ALTER TABLE orders ALTER CHECK chk_amount NOT ENFORCED",
-            "ALTER TABLE orders ALTER CONSTRAINT chk_amount ENFORCED",
+    fn drop_check_and_alter_check_get_the_lab_answer_and_keep_the_table() {
+        for (setup, sql, case, answer) in [
+            (
+                CHECK_ALONE,
+                "ALTER TABLE orders DROP CHECK chk_amount",
+                "drop-check-constraint",
+                INSTANT_ANSWER,
+            ),
+            (
+                CHECK_TWO_OFF,
+                "alter table orders drop check `CHK_AMOUNT`",
+                "drop-check-constraint",
+                INSTANT_ANSWER,
+            ),
+            (
+                CHECK_ALONE,
+                "ALTER TABLE orders ALTER CHECK chk_amount NOT ENFORCED",
+                "alter-check-constraint",
+                INSTANT_ANSWER,
+            ),
+            (
+                CHECK_ALONE_OFF,
+                "ALTER TABLE orders ALTER CONSTRAINT chk_amount NOT ENFORCED",
+                "alter-check-constraint",
+                INSTANT_ANSWER,
+            ),
+            (
+                CHECK_ALONE,
+                "ALTER TABLE orders ALTER CONSTRAINT chk_amount ENFORCED",
+                "alter-check-constraint",
+                INSTANT_ANSWER,
+            ),
+            (
+                CHECK_ALONE_OFF,
+                "ALTER TABLE orders ALTER CHECK chk_amount ENFORCED",
+                "enforce-check-constraint",
+                COPY_ANSWER,
+            ),
         ] {
             let predictions = predictions_with(
-                &format!("{SHOP}\n{CHECK_ALONE}"),
-                &format!("{sql};\nALTER TABLE orders DROP COLUMN note;"),
+                &format!("{SHOP}\n{setup}"),
+                &format!("{sql};\nALTER TABLE orders ADD COLUMN coupon INT NULL;"),
             );
-            assert!(
-                reason(predictions[0].clone()).starts_with("kilit could not read this statement"),
-                "{sql}"
-            );
-            // The note says what the lab measured for a table kilit lost.
+            assert_eq!(said(&predictions[0]), answer, "{sql}");
+            assert_eq!(measured(predictions[0].clone()).0, case, "{sql}");
+            // The table stays known: no note for a table kilit lost.
             let (_, _, notes) = measured(predictions[1].clone());
             assert!(
-                notes.iter().any(|note| note.contains("error 3959")),
-                "{sql}"
+                notes.iter().all(|note| !note.contains("FULLTEXT")),
+                "{sql}: {notes:?}"
             );
         }
+    }
+
+    #[test]
+    fn enforcing_a_check_again_follows_what_the_statements_before_did() {
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{CHECK_ALONE}"),
+            "ALTER TABLE orders ALTER CHECK chk_amount NOT ENFORCED;
+             ALTER TABLE orders ALTER CHECK chk_amount ENFORCED;
+             ALTER TABLE orders ALTER CONSTRAINT chk_amount ENFORCED;",
+        );
+        assert_eq!(said(&predictions[0]), INSTANT_ANSWER);
+        assert_eq!(said(&predictions[1]), COPY_ANSWER);
+        let (_, _, notes) = measured(predictions[1].clone());
+        assert!(
+            notes.iter().any(|note| note.contains("error 3819")),
+            "{notes:?}"
+        );
+        assert_eq!(said(&predictions[2]), INSTANT_ANSWER);
+        // A table created in a dump with the constraint off.
+        let dump = "CREATE TABLE `orders` (
+              `id` bigint unsigned NOT NULL,
+              `amount` int NOT NULL,
+              PRIMARY KEY (`id`),
+              CONSTRAINT `orders_chk_1` CHECK ((`amount` > 0)) /*!80016 NOT ENFORCED */
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;";
+        assert_eq!(
+            said(
+                &predictions_with(dump, "ALTER TABLE orders ALTER CHECK orders_chk_1 ENFORCED")[0]
+            ),
+            COPY_ANSWER
+        );
+    }
+
+    #[test]
+    fn a_dropped_check_no_longer_stops_a_column_drop() {
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{CHECK_TWO}"),
+            &format!("ALTER TABLE orders DROP CHECK chk_amount;\n{DROP_AMOUNT};"),
+        );
+        assert_eq!(said(&predictions[0]), INSTANT_ANSWER);
+        assert_eq!(said(&predictions[1]), INSTANT_ANSWER);
+        // A constraint no longer enforced still stops it (run by hand).
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{CHECK_TWO}"),
+            &format!("ALTER TABLE orders ALTER CHECK chk_amount NOT ENFORCED;\n{DROP_AMOUNT};"),
+        );
+        assert_eq!(fails_with(&predictions[1]), Ok(3959));
+    }
+
+    #[test]
+    fn a_check_clause_kilit_cannot_answer_says_why() {
+        let schema = format!(
+            "{SHOP}\n{CHECK_ALONE}\n\
+             ALTER TABLE orders ADD CONSTRAINT uq_note UNIQUE (note);\n\
+             ALTER TABLE orders ADD INDEX ix_note (note);"
+        );
+        for (sql, why, lost) in [
+            (
+                "ALTER TABLE orders DROP CHECK uq_note",
+                "uq_note is a unique index of orders, not a CHECK constraint, and MySQL 8.0.46 \
+                 and 8.4.13 do not accept DROP CHECK for it",
+                false,
+            ),
+            (
+                "ALTER TABLE orders ALTER CHECK `PRIMARY` NOT ENFORCED",
+                "PRIMARY is the primary key of orders, not a CHECK constraint, and MySQL 8.0.46 \
+                 and 8.4.13 do not accept ALTER CHECK for it",
+                false,
+            ),
+            (
+                "ALTER TABLE orders ALTER CONSTRAINT ix_note ENFORCED",
+                "ix_note is an index of orders, not a CHECK constraint, and MySQL 8.0.46 and \
+                 8.4.13 do not accept ALTER CONSTRAINT for it",
+                false,
+            ),
+            (
+                "ALTER TABLE orders DROP CHECK nosuch",
+                "orders has no CHECK constraint nosuch, as far as kilit can tell",
+                true,
+            ),
+        ] {
+            let predictions = predictions_with(
+                &schema,
+                &format!("{sql};\nALTER TABLE orders ADD COLUMN coupon INT NULL;"),
+            );
+            assert_eq!(reason(predictions[0].clone()), why, "{sql}");
+            let (_, _, notes) = measured(predictions[1].clone());
+            assert_eq!(
+                notes.iter().any(|note| note.contains("FULLTEXT")),
+                lost,
+                "{sql}: {notes:?}"
+            );
+        }
+        assert_eq!(
+            reason(predictions_with("", "ALTER TABLE orders DROP CHECK chk_amount")[0].clone()),
+            "kilit does not know this table, so it cannot tell whether chk_amount is one of its \
+             CHECK constraints"
+        );
     }
 
     #[test]

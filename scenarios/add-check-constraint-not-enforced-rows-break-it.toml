@@ -1,0 +1,2 @@
+title = "Add a NOT ENFORCED CHECK constraint that rows break"
+operation = "ADD CONSTRAINT chk_amount CHECK (amount > 500) NOT ENFORCED"

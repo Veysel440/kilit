@@ -1,10 +1,10 @@
 # Measured behavior
 
 Every row on this page is one kind of change that kilit-lab ran on real MySQL
-servers: 8.0.46 and 8.4.13. The lab ran each of the 225 scenarios in
+servers: 8.0.46 and 8.4.13. The lab ran each of the 240 scenarios in
 [`scenarios/`](../scenarios/) on both servers, in six variants, and kept the
-result in [`matrix/`](../matrix/). The scenarios are grouped into 74 case ids:
-28 for InnoDB, 12 for MyISAM, 26 for row formats and 8 for `old_alter_table`.
+result in [`matrix/`](../matrix/). The scenarios are grouped into 77 case ids:
+31 for InnoDB, 12 for MyISAM, 26 for row formats and 8 for `old_alter_table`.
 
 The tables are InnoDB tables of 1,000 rows (`orders`) and 100 rows (`users`).
 A table whose `CREATE TABLE` names no `ENGINE` is taken as InnoDB, the server
@@ -123,9 +123,14 @@ about it for each statement.
 | Drop a foreign key<br>`$table->dropForeign(['user_id'])` | INPLACE | continue | `drop-foreign-key` |
 | Add a CHECK constraint<br>`ADD CONSTRAINT … CHECK (…)` (raw SQL) | COPY, copies every row | **wait** | `add-check-constraint` |
 | ↳ when a row breaks it | fails, error 3819 | – | `add-check-constraint`, exception: row breaks it |
-| ↳ when its expression has a string, a function call, `IN`, `BETWEEN` or `LIKE`, or it is `NOT ENFORCED` | UNKNOWN | – | none |
-| Drop a CHECK constraint<br>`DROP CONSTRAINT …` (raw SQL) | INSTANT | continue | `drop-check-constraint` |
-| ↳ with `DROP CHECK …`, which sqlparser cannot read | UNKNOWN | – | none |
+| ↳ when its expression has a string, a function call, `IN`, `BETWEEN` or `LIKE` or no column, or kilit sees a missing, AUTO_INCREMENT, generated or foreign key column, or a CHECK name the database has | UNKNOWN | – | none |
+| ↳ with `NOT ENFORCED`<br>`ADD CONSTRAINT … CHECK (…) NOT ENFORCED` (raw SQL), under the same conditions | INSTANT | continue | `add-not-enforced-check-constraint` |
+| Drop a CHECK constraint<br>`DROP CONSTRAINT …` or `DROP CHECK …` (raw SQL) | INSTANT | continue | `drop-check-constraint` |
+| ↳ when the name belongs to a foreign key or an index, does not exist, or is shared by a CHECK and another constraint | UNKNOWN | – | none |
+| Make a CHECK constraint not enforced<br>`ALTER CHECK … NOT ENFORCED` or `ALTER CONSTRAINT … NOT ENFORCED` (raw SQL) | INSTANT | continue | `alter-check-constraint` |
+| ↳ with `ENFORCED` on a CHECK that is already enforced | INSTANT | continue | `alter-check-constraint` |
+| Enforce a CHECK constraint again<br>`ALTER CHECK … ENFORCED` or `ALTER CONSTRAINT … ENFORCED` (raw SQL) | COPY, copies every row | **wait** | `enforce-check-constraint` |
+| ↳ when a row breaks it | fails, error 3819 | – | `enforce-check-constraint`, exception: row breaks it |
 | Set the table comment<br>`$table->comment('Orders placed by users')` | INPLACE | continue | `set-table-comment` |
 
 ¹ Seven ways of adding a column were measured, and all are INSTANT: nullable,

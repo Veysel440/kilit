@@ -1,0 +1,2 @@
+title = "Add a NOT ENFORCED CHECK constraint"
+operation = "ADD CONSTRAINT chk_amount CHECK (amount >= 0) NOT ENFORCED"

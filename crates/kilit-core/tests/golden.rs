@@ -7844,3 +7844,948 @@ fn a_number_as_a_key_part_is_refused_on_both_servers() {
         }
     }
 }
+
+// Step 13b: DROP CHECK, ALTER CHECK and ALTER CONSTRAINT [NOT] ENFORCED, and
+// ADD CONSTRAINT ... CHECK (...) NOT ENFORCED. Laravel has no call for any of
+// them; they come as DB::statement('alter table ...') or in a schema dump.
+// The answers are the lab's (drop-check, alter-check-*, alter-constraint-*,
+// add-check-constraint-not-enforced; both servers agree on every scenario),
+// the refusals are hand tests on MySQL 8.0.46 and 8.4.13 (same result on
+// both): the 1064 forms, error 3821 for DROP CHECK and ALTER CHECK of a name
+// that is no CHECK, 3941 and 3940 for ALTER CONSTRAINT of one.
+
+/// A mysqldump of `orders`: a foreign key, a unique and a plain index, an
+/// enforced CHECK on one column (chk_amount), an enforced CHECK on two columns
+/// (chk_two) and a NOT ENFORCED CHECK (chk_off).
+const S13B_SCHEMA: &str = "\
+CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  `qty` int NOT NULL,
+  `price` int NOT NULL,
+  `stock` int NOT NULL,
+  `email` varchar(255) DEFAULT NULL,
+  `note` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_email` (`email`),
+  KEY `ix_note` (`note`),
+  KEY `fk_orders_user` (`user_id`),
+  CONSTRAINT `fk_orders_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`),
+  CONSTRAINT `chk_amount` CHECK ((`amount` > 0)),
+  CONSTRAINT `chk_two` CHECK ((`qty` > `price`)),
+  CONSTRAINT `chk_off` CHECK ((`stock` > 0)) /*!80016 NOT ENFORCED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+
+/// An `orders` whose CHECK names need backticks.
+const S13B_NAMED: &str = "\
+CREATE TABLE `orders` (
+  `id` bigint NOT NULL,
+  `amount` int NOT NULL,
+  PRIMARY KEY (`id`),
+  CONSTRAINT `ck amount` CHECK ((`amount` > 0)),
+  CONSTRAINT `ck``q` CHECK ((`amount` > 1)),
+  CONSTRAINT `check` CHECK ((`amount` > 3)) /*!80016 NOT ENFORCED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+";
+
+const ADD_COUPON: &str = "ALTER TABLE orders ADD COLUMN coupon INT NULL";
+
+/// The measured answer of the last statement: (case, verdict text, notes).
+fn measured_13b(server: &str, schema: &str, sql: &str) -> (&'static str, String, Vec<String>) {
+    match predictions_on(server, schema, sql).pop().unwrap() {
+        Prediction::Measured {
+            case,
+            verdict,
+            notes,
+            ..
+        } => (case, verdict.to_string(), notes),
+        other => panic!("{server}: {sql}\n    expected a measured answer, got {other:?}"),
+    }
+}
+
+/// kilit's answer to each statement of `sql` against `schema` is `expected`,
+/// on both servers.
+fn assert_13b(schema: &str, sql: &str, expected: &[&str]) {
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(
+            statements_on(server, schema, &parse(sql)),
+            expected,
+            "{server}: {sql}"
+        );
+    }
+}
+
+/// The last statement of `sql` is unknown with a reason that starts with
+/// `NOT_ACCEPTED` or contains `part`, on both servers. Returns the reason.
+fn assert_unknown_13b(schema: &str, sql: &str, part: &str) -> String {
+    let mut reason = String::new();
+    for server in [MYSQL_80, MYSQL_84] {
+        match predictions_on(server, schema, sql).pop() {
+            Some(Prediction::Unknown { reason: found }) => {
+                assert!(
+                    found.contains(part),
+                    "{server}: {sql}\n    reason {found:?} lacks {part:?}"
+                );
+                reason = found;
+            }
+            other => panic!("{server}: {sql}\n    expected unknown, got {other:?}"),
+        }
+    }
+    reason
+}
+
+#[test]
+fn dropping_a_check_with_drop_check_is_instant_and_writes_continue() {
+    // DROP CHECK chk_amount (one column), chk_two (two columns) and chk_off
+    // (NOT ENFORCED): INSTANT on both servers, the case of DROP CONSTRAINT.
+    for name in ["chk_amount", "chk_two", "chk_off"] {
+        for form in ["DROP CHECK", "DROP CONSTRAINT"] {
+            for server in [MYSQL_80, MYSQL_84] {
+                let sql = format!("ALTER TABLE orders {form} {name}");
+                let (case, verdict, _) = measured_13b(server, S13B_SCHEMA, &sql);
+                assert_eq!(case, "drop-check-constraint", "{server}: {sql}");
+                assert_eq!(verdict, INSTANT, "{server}: {sql}");
+            }
+        }
+    }
+}
+
+#[test]
+fn changing_whether_a_check_is_enforced_is_instant_and_writes_continue() {
+    // alter-check-not-enforced, alter-check-not-enforced-again,
+    // alter-check-enforced-again and the same three with ALTER CONSTRAINT.
+    for form in ["ALTER CHECK", "ALTER CONSTRAINT"] {
+        for (name, state) in [
+            ("chk_amount", "NOT ENFORCED"),
+            ("chk_two", "NOT ENFORCED"),
+            ("chk_off", "NOT ENFORCED"),
+            ("chk_amount", "ENFORCED"),
+            ("chk_two", "ENFORCED"),
+        ] {
+            for server in [MYSQL_80, MYSQL_84] {
+                let sql = format!("ALTER TABLE orders {form} {name} {state}");
+                let (case, verdict, notes) = measured_13b(server, S13B_SCHEMA, &sql);
+                assert_eq!(case, "alter-check-constraint", "{server}: {sql}");
+                assert_eq!(verdict, INSTANT, "{server}: {sql}");
+                assert!(
+                    !notes.iter().any(|note| note.contains("3819")),
+                    "{server}: {sql}\n    {notes:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn enforcing_a_not_enforced_check_copies_the_table_and_notes_the_rows_that_break_it() {
+    // alter-check-enforced and alter-constraint-enforced: COPY on both
+    // servers; the rows-break-it scenarios fail with 3819, which no schema
+    // shows, so it is a note, as for ADD CHECK.
+    for form in ["ALTER CHECK", "ALTER CONSTRAINT"] {
+        for server in [MYSQL_80, MYSQL_84] {
+            let sql = format!("ALTER TABLE orders {form} chk_off ENFORCED");
+            let (case, verdict, notes) = measured_13b(server, S13B_SCHEMA, &sql);
+            assert_eq!(case, "enforce-check-constraint", "{server}: {sql}");
+            assert_eq!(verdict, COPY, "{server}: {sql}");
+            assert!(
+                notes
+                    .iter()
+                    .any(|note| note.starts_with("if a row breaks the constraint")
+                        && note.contains("fails with error 3819")),
+                "{server}: {sql}\n    {notes:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn forcing_an_algorithm_or_lock_on_enforcing_a_check_gets_the_answer_of_that_variant() {
+    // alter-check-enforced and alter-constraint-enforced, six variants: the
+    // as-written run and ALGORITHM=COPY copy the table; INSTANT, INPLACE and
+    // INPLACE with LOCK=NONE fail with 1845; LOCK=NONE alone with 1846.
+    for form in ["ALTER CHECK", "ALTER CONSTRAINT"] {
+        let base = format!("ALTER TABLE orders {form} chk_off ENFORCED");
+        for (clause, answer) in [
+            ("", COPY),
+            (", ALGORITHM=COPY", COPY),
+            (", ALGORITHM=INSTANT", "fails with error 1845"),
+            (", ALGORITHM=INPLACE", "fails with error 1845"),
+            (", ALGORITHM=INPLACE, LOCK=NONE", "fails with error 1845"),
+            (", LOCK=NONE", "fails with error 1846"),
+        ] {
+            assert_13b(S13B_SCHEMA, &format!("{base}{clause}"), &[answer]);
+        }
+    }
+}
+
+#[test]
+fn forcing_an_algorithm_or_lock_on_the_instant_check_changes_keeps_the_lab_s_variants() {
+    // drop-check, alter-check-not-enforced, add-check-constraint-not-enforced
+    // and the others: accepted in every variant without a rebuild, except
+    // ALGORITHM=COPY, which copies the table.
+    for base in [
+        "ALTER TABLE orders DROP CHECK chk_amount",
+        "ALTER TABLE orders ALTER CHECK chk_amount NOT ENFORCED",
+        "ALTER TABLE orders ALTER CONSTRAINT chk_off NOT ENFORCED",
+        "ALTER TABLE orders ADD CONSTRAINT chk_new CHECK (amount >= 0) NOT ENFORCED",
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            for (clause, starts) in [
+                (", ALGORITHM=INSTANT", "INSTANT"),
+                (", ALGORITHM=INPLACE", "INPLACE"),
+                (", ALGORITHM=INPLACE, LOCK=NONE", "INPLACE"),
+                (", LOCK=NONE", ""),
+            ] {
+                let sql = format!("{base}{clause}");
+                let (_, verdict, _) = measured_13b(server, S13B_SCHEMA, &sql);
+                assert!(
+                    verdict.starts_with(starts)
+                        && verdict.ends_with(", no rebuild, writes continue"),
+                    "{server}: {sql}\n    got {verdict}"
+                );
+            }
+            // A forced COPY run has no write measurement in the lab.
+            let sql = format!("{base}, ALGORITHM=COPY");
+            let (_, verdict, _) = measured_13b(server, S13B_SCHEMA, &sql);
+            assert_eq!(verdict, COPY_NOT_MEASURED, "{server}: {sql}");
+        }
+    }
+}
+
+#[test]
+fn the_enforced_state_of_a_check_is_followed_from_statement_to_statement() {
+    let enforce =
+        |name: &str, state: &str| format!("ALTER TABLE orders ALTER CHECK {name} {state};");
+    // Not enforced, then enforced again: the second copies the table.
+    assert_13b(
+        S13B_SCHEMA,
+        &format!(
+            "{}{}",
+            enforce("chk_amount", "NOT ENFORCED"),
+            enforce("chk_amount", "ENFORCED")
+        ),
+        &[INSTANT, COPY],
+    );
+    // Enforced twice on an enforced CHECK: both INSTANT.
+    assert_13b(
+        S13B_SCHEMA,
+        &format!(
+            "{}{}",
+            enforce("chk_amount", "ENFORCED"),
+            enforce("chk_amount", "ENFORCED")
+        ),
+        &[INSTANT, INSTANT],
+    );
+    // The CHECK of the dump that is NOT ENFORCED: enforcing copies the table
+    // once, then it is enforced.
+    assert_13b(
+        S13B_SCHEMA,
+        &format!(
+            "{}{}{}{}",
+            enforce("chk_off", "ENFORCED"),
+            enforce("chk_off", "ENFORCED"),
+            enforce("chk_off", "NOT ENFORCED"),
+            enforce("chk_off", "ENFORCED")
+        ),
+        &[COPY, INSTANT, INSTANT, COPY],
+    );
+    // ALTER CONSTRAINT and ALTER CHECK set the same state.
+    assert_13b(
+        S13B_SCHEMA,
+        "ALTER TABLE orders ALTER CONSTRAINT chk_amount NOT ENFORCED;
+         ALTER TABLE orders ALTER CHECK chk_amount ENFORCED;
+         ALTER TABLE orders ALTER CHECK chk_off ENFORCED;
+         ALTER TABLE orders ALTER CONSTRAINT chk_off ENFORCED;",
+        &[INSTANT, COPY, COPY, INSTANT],
+    );
+    // Changing the state keeps the CHECK: it can still be dropped.
+    assert_13b(
+        S13B_SCHEMA,
+        "ALTER TABLE orders ALTER CHECK chk_amount NOT ENFORCED;
+         ALTER TABLE orders DROP CHECK chk_amount;",
+        &[INSTANT, INSTANT],
+    );
+}
+
+#[test]
+fn a_failed_enforcing_leaves_the_check_not_enforced() {
+    // ALGORITHM=INSTANT and LOCK=NONE fail on enforcing (1845, 1846), so the
+    // CHECK stays NOT ENFORCED and the next enforcing copies the table.
+    assert_13b(
+        S13B_SCHEMA,
+        "ALTER TABLE orders ALTER CHECK chk_off ENFORCED, ALGORITHM=INSTANT;
+         ALTER TABLE orders ALTER CHECK chk_off ENFORCED, LOCK=NONE;
+         ALTER TABLE orders ALTER CHECK chk_off ENFORCED;
+         ALTER TABLE orders ALTER CHECK chk_off ENFORCED;",
+        &[
+            "fails with error 1845",
+            "fails with error 1846",
+            COPY,
+            INSTANT,
+        ],
+    );
+}
+
+#[test]
+fn a_check_that_is_not_enforced_still_keeps_the_columns_it_uses() {
+    // Hand test: after ALTER CHECK chk_two NOT ENFORCED, DROP COLUMN of its
+    // column fails with 3959 still; after DROP CHECK it does not.
+    assert_13b(
+        S13B_SCHEMA,
+        "ALTER TABLE orders ALTER CHECK chk_two NOT ENFORCED;
+         ALTER TABLE orders DROP COLUMN qty;
+         ALTER TABLE orders DROP CHECK chk_two;
+         ALTER TABLE orders DROP COLUMN qty;",
+        &[INSTANT, "fails with error 3959", INSTANT, INSTANT],
+    );
+}
+
+#[test]
+fn dropping_a_check_with_drop_check_frees_the_column_it_used_with_another() {
+    // chk_two uses qty and price: DROP COLUMN qty fails with 3959 until the
+    // CHECK is gone. The failed DROP COLUMN changes nothing.
+    for form in ["DROP CHECK", "DROP CONSTRAINT"] {
+        assert_13b(
+            S13B_SCHEMA,
+            &format!(
+                "ALTER TABLE orders DROP COLUMN qty;
+                 ALTER TABLE orders {form} chk_two;
+                 ALTER TABLE orders DROP COLUMN qty;
+                 ALTER TABLE orders DROP COLUMN price;"
+            ),
+            &["fails with error 3959", INSTANT, INSTANT, INSTANT],
+        );
+    }
+}
+
+#[test]
+fn after_a_check_clause_the_table_is_still_known() {
+    // Before step 13b the statement was unreadable and the table lost, and
+    // the ADD COLUMN after it carried the note about a FULLTEXT index.
+    for statement in [
+        "ALTER TABLE orders DROP CHECK chk_amount",
+        "ALTER TABLE orders DROP CHECK chk_two",
+        "ALTER TABLE orders DROP CHECK chk_off",
+        "ALTER TABLE orders ALTER CHECK chk_amount NOT ENFORCED",
+        "ALTER TABLE orders ALTER CHECK chk_off ENFORCED",
+        "ALTER TABLE orders ALTER CONSTRAINT chk_amount NOT ENFORCED",
+        "ALTER TABLE orders ALTER CONSTRAINT chk_off ENFORCED",
+        "ALTER TABLE orders ADD CONSTRAINT chk_new CHECK (amount > 10) NOT ENFORCED",
+    ] {
+        let sql = format!("{statement};\n{ADD_COUPON}");
+        for server in [MYSQL_80, MYSQL_84] {
+            let predictions = predictions_on(server, S13B_SCHEMA, &sql);
+            assert_eq!(predictions.len(), 2, "{server}: {sql}");
+            assert!(
+                !mentions_fulltext(&predictions[1]),
+                "{server}: {sql}\n    {:?}",
+                predictions[1]
+            );
+        }
+        assert_13b(S13B_SCHEMA, &sql, &[statements_after(statement), INSTANT]);
+    }
+}
+
+/// The answer the first statement of `after_a_check_clause_the_table_is_still_known`
+/// gets, by its operation.
+fn statements_after(statement: &str) -> &'static str {
+    if statement.contains("ENFORCED") && !statement.contains("NOT ENFORCED") {
+        COPY
+    } else {
+        INSTANT
+    }
+}
+
+#[test]
+fn adding_a_not_enforced_check_is_instant_and_has_no_note_about_rows() {
+    // add-check-constraint-not-enforced and its rows-break-it twin: INSTANT
+    // on both servers, whatever the rows hold.
+    for sql in [
+        "ALTER TABLE orders ADD CONSTRAINT chk_new CHECK (amount >= 0) NOT ENFORCED",
+        "ALTER TABLE orders ADD CONSTRAINT chk_new CHECK (amount > 10) NOT ENFORCED",
+        "ALTER TABLE orders ADD CONSTRAINT chk_new CHECK (qty > price) NOT ENFORCED",
+        "alter table `orders` add constraint `chk_new` check (`amount` > 0) not enforced",
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            let (case, verdict, notes) = measured_13b(server, S13B_SCHEMA, sql);
+            assert_eq!(case, "add-not-enforced-check-constraint", "{server}: {sql}");
+            assert_eq!(verdict, INSTANT, "{server}: {sql}");
+            assert!(
+                !notes.iter().any(|note| note.contains("3819")),
+                "{server}: {sql}\n    {notes:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn adding_a_check_without_not_enforced_keeps_its_copy_answer_and_its_note() {
+    // The nearest existing answer: add-check-constraint.
+    for sql in [
+        "ALTER TABLE orders ADD CONSTRAINT chk_new CHECK (amount >= 0)",
+        "ALTER TABLE orders ADD CONSTRAINT chk_new CHECK (amount >= 0) ENFORCED",
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            let (case, verdict, notes) = measured_13b(server, S13B_SCHEMA, sql);
+            assert_eq!(case, "add-check-constraint", "{server}: {sql}");
+            assert_eq!(verdict, COPY, "{server}: {sql}");
+            assert!(
+                notes
+                    .iter()
+                    .any(|note| note.contains("fails with error 3819")),
+                "{server}: {sql}\n    {notes:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_not_enforced_check_that_add_check_would_not_answer_stays_unknown() {
+    // Everything ADD CHECK keeps unknown stays unknown with NOT ENFORCED: an
+    // expression that is not plain, a name the table already has, a column
+    // the table does not have.
+    for shape in [
+        "CONSTRAINT chk_new CHECK (LOWER(note) = 'a')",
+        "CONSTRAINT chk_new CHECK (nosuch > 0)",
+        "CONSTRAINT chk_amount CHECK (amount > 5)",
+    ] {
+        for state in ["", " NOT ENFORCED"] {
+            let sql = format!("ALTER TABLE orders ADD {shape}{state}");
+            assert_unknown_13b(S13B_SCHEMA, &sql, "");
+        }
+    }
+}
+
+#[test]
+fn a_check_added_not_enforced_is_followed_as_not_enforced() {
+    assert_13b(
+        S13B_SCHEMA,
+        "ALTER TABLE orders ADD CONSTRAINT chk_new CHECK (amount > 10) NOT ENFORCED;
+         ALTER TABLE orders ALTER CHECK chk_new ENFORCED;
+         ALTER TABLE orders ALTER CHECK chk_new ENFORCED;",
+        &[INSTANT, COPY, INSTANT],
+    );
+    // An enforced one is enforced already.
+    assert_13b(
+        S13B_SCHEMA,
+        "ALTER TABLE orders ADD CONSTRAINT chk_new CHECK (amount > 10);
+         ALTER TABLE orders ALTER CHECK chk_new ENFORCED;
+         ALTER TABLE orders DROP CHECK chk_new;",
+        &[COPY, INSTANT, INSTANT],
+    );
+}
+
+#[test]
+fn clauses_mysql_rejects_are_unknown_and_leave_the_table_known_and_unchanged() {
+    // Each one is error 1064 on both servers (hand tests), whatever the CHECK
+    // names. The table stays as it was: ADD COLUMN gets the answer of a known
+    // table, and the CHECK named in the statement can still be dropped.
+    for statement in [
+        "ALTER TABLE orders DROP CHECK",
+        "ALTER TABLE orders DROP CHECK, ALGORITHM=INSTANT",
+        "ALTER TABLE orders DROP CHECK, ALGORITHM=INPLACE, LOCK=NONE",
+        "ALTER TABLE orders DROP CHECK IF EXISTS chk_amount",
+        "ALTER TABLE orders DROP CHECK IF EXISTS nosuch",
+        "ALTER TABLE orders ALTER CHECK chk_amount",
+        "ALTER TABLE orders ALTER CHECK chk_amount, ALGORITHM=INSTANT",
+        "ALTER TABLE orders ALTER CHECK ENFORCED",
+        "ALTER TABLE orders ALTER CHECK NOT ENFORCED",
+        "ALTER TABLE orders ALTER CHECK",
+        "ALTER TABLE orders ALTER CONSTRAINT chk_amount",
+        "ALTER TABLE orders ALTER CONSTRAINT ENFORCED",
+        "ALTER TABLE orders ALTER CONSTRAINT",
+        "ALTER TABLE orders ALTER CHECK IF EXISTS chk_amount ENFORCED",
+        "ALTER TABLE orders DROP CHECK chk_amount CASCADE",
+        "ALTER TABLE orders DROP CHECK chk_amount RESTRICT",
+        "ALTER TABLE orders ALTER CHECK chk_amount NOT ENFORCED CASCADE",
+        "ALTER TABLE orders ALTER CONSTRAINT chk_amount NOT ENFORCED RESTRICT",
+        "ALTER TABLE orders DROP CHECK chk_amount,",
+        "ALTER TABLE orders ALTER CHECK chk_amount ENFORCED ENFORCED",
+        "ALTER TABLE orders ALTER CHECK chk_amount NOT NOT ENFORCED",
+        "ALTER TABLE orders DROP CHECK (chk_amount)",
+        "ALTER TABLE orders DROP CHECK PRIMARY",
+        "ALTER TABLE orders ALTER CONSTRAINT PRIMARY ENFORCED",
+        "ALTER TABLE orders DROP CHECK 'chk_amount'",
+        "ALTER TABLE orders ALTER CHECK 'chk_amount' ENFORCED",
+        "ALTER TABLE orders ALTER CHECK 'chk_amount' NOT ENFORCED",
+        "ALTER TABLE orders ALTER CONSTRAINT 'chk_amount' NOT ENFORCED",
+        "alter table `orders` drop check",
+        "alter table `orders` drop check if exists `chk_amount`",
+    ] {
+        let sql = format!(
+            "{statement};\n{ADD_COUPON};\nALTER TABLE orders DROP CHECK chk_amount;\n\
+             ALTER TABLE orders DROP COLUMN qty"
+        );
+        for server in [MYSQL_80, MYSQL_84] {
+            let predictions = predictions_on(server, S13B_SCHEMA, &sql);
+            assert_eq!(predictions.len(), 4, "{server}: {sql}");
+            match &predictions[0] {
+                Prediction::Unknown { reason } if reason.starts_with(NOT_ACCEPTED) => {}
+                other => panic!("{server}: {statement}\n    got {other:?}"),
+            }
+            assert!(
+                !mentions_fulltext(&predictions[1]),
+                "{server}: {statement}: the table was lost"
+            );
+        }
+        // Not a column drop, and nothing else changes: the rest as for a
+        // table that nothing happened to.
+        assert_13b(
+            S13B_SCHEMA,
+            &sql,
+            &["unknown", INSTANT, INSTANT, "fails with error 3959"],
+        );
+    }
+}
+
+#[test]
+fn drop_check_without_a_name_is_not_a_column_drop() {
+    // sqlparser reads `DROP CHECK` as dropping a column named CHECK, which
+    // would be "INSTANT, writes continue, drop-column" (hand test: error 1064).
+    for statement in [
+        "ALTER TABLE orders DROP CHECK",
+        "ALTER TABLE orders DROP CHECK, ALGORITHM=INSTANT",
+    ] {
+        let reason = assert_unknown_13b(S13B_SCHEMA, statement, NOT_ACCEPTED);
+        assert!(reason.starts_with(NOT_ACCEPTED), "{reason}");
+    }
+}
+
+#[test]
+fn a_double_quoted_check_name_is_unknown_because_of_ansi_quotes_and_leaves_the_table_known() {
+    // Error 1064 by default (hand test): a double-quoted word is a string.
+    // Under ANSI_QUOTES it would be a name; kilit does not know the sql_mode.
+    for statement in [
+        "ALTER TABLE orders DROP CHECK \"chk_amount\"",
+        "ALTER TABLE orders ALTER CHECK \"chk_amount\" NOT ENFORCED",
+        "ALTER TABLE orders ALTER CONSTRAINT \"chk_amount\" NOT ENFORCED",
+    ] {
+        assert_unknown_13b(S13B_SCHEMA, statement, "ANSI_QUOTES");
+        assert_13b(
+            S13B_SCHEMA,
+            &format!("{statement};\n{ADD_COUPON};\nALTER TABLE orders DROP CHECK chk_amount"),
+            &["unknown", INSTANT, INSTANT],
+        );
+        for server in [MYSQL_80, MYSQL_84] {
+            let predictions =
+                predictions_on(server, S13B_SCHEMA, &format!("{statement};\n{ADD_COUPON}"));
+            assert!(!mentions_fulltext(&predictions[1]), "{server}: {statement}");
+        }
+    }
+}
+
+#[test]
+fn a_name_that_is_no_check_of_the_table_is_unknown_and_the_table_unchanged() {
+    // A foreign key, a unique index, PRIMARY or a plain index: error 3821
+    // (DROP CHECK, ALTER CHECK) or 3941 / 3940 (ALTER CONSTRAINT) on both
+    // servers. kilit gives no error number; the table stays as it was, so the
+    // foreign key still fails the drop of its column (1828) and the CHECK is
+    // still there.
+    let names = ["fk_orders_user", "uq_email", "`PRIMARY`", "ix_note"];
+    let mut forms: Vec<(String, &str)> = Vec::new();
+    for name in names {
+        forms.push((format!("DROP CHECK {name}"), "do not accept DROP CHECK"));
+        for state in ["ENFORCED", "NOT ENFORCED"] {
+            forms.push((
+                format!("ALTER CHECK {name} {state}"),
+                "do not accept ALTER CHECK",
+            ));
+            forms.push((
+                format!("ALTER CONSTRAINT {name} {state}"),
+                "do not accept ALTER CONSTRAINT",
+            ));
+        }
+    }
+    for (clause, part) in forms {
+        let statement = format!("ALTER TABLE orders {clause}");
+        let reason = assert_unknown_13b(S13B_SCHEMA, &statement, part);
+        assert!(
+            reason.contains("MySQL 8.0.46 and 8.4.13 do not accept"),
+            "{statement}: {reason}"
+        );
+        assert_13b(
+            S13B_SCHEMA,
+            &format!(
+                "{statement};
+                 ALTER TABLE orders DROP COLUMN user_id;
+                 {ADD_COUPON};
+                 ALTER TABLE orders DROP CHECK chk_amount;"
+            ),
+            &["unknown", "fails with error 1828", INSTANT, INSTANT],
+        );
+        for server in [MYSQL_80, MYSQL_84] {
+            let predictions =
+                predictions_on(server, S13B_SCHEMA, &format!("{statement};\n{ADD_COUPON}"));
+            assert!(!mentions_fulltext(&predictions[1]), "{server}: {statement}");
+        }
+    }
+}
+
+#[test]
+fn a_name_the_table_has_no_constraint_or_index_of_is_unknown_and_the_table_is_lost() {
+    // Error 3821 / 3940 on both servers (hand tests). kilit loses the table
+    // as it does for DROP CONSTRAINT of an unknown name, so the ADD COLUMN
+    // after it gets the notes of a table kilit does not know.
+    for statement in [
+        "ALTER TABLE orders DROP CHECK nosuch",
+        "ALTER TABLE orders DROP CHECK note",
+        "ALTER TABLE orders ALTER CHECK nosuch NOT ENFORCED",
+        "ALTER TABLE orders ALTER CHECK nosuch ENFORCED",
+        "ALTER TABLE orders ALTER CONSTRAINT nosuch ENFORCED",
+        "ALTER TABLE orders ALTER CONSTRAINT nosuch NOT ENFORCED",
+    ] {
+        assert_unknown_13b(S13B_SCHEMA, statement, "");
+        for server in [MYSQL_80, MYSQL_84] {
+            let predictions =
+                predictions_on(server, S13B_SCHEMA, &format!("{statement};\n{ADD_COUPON}"));
+            assert!(mentions_fulltext(&predictions[1]), "{server}: {statement}");
+        }
+    }
+}
+
+#[test]
+fn a_check_dropped_twice_is_unknown_the_second_time_and_loses_the_table() {
+    // Hand test: DROP CHECK of a name the table no longer has is error 3821.
+    let sql = "ALTER TABLE orders DROP CHECK chk_amount;
+               ALTER TABLE orders DROP CHECK chk_amount;";
+    assert_13b(S13B_SCHEMA, sql, &[INSTANT, "unknown"]);
+    for server in [MYSQL_80, MYSQL_84] {
+        let predictions = predictions_on(server, S13B_SCHEMA, &format!("{sql}\n{ADD_COUPON};"));
+        assert!(mentions_fulltext(&predictions[2]), "{server}");
+    }
+}
+
+#[test]
+fn a_check_and_a_foreign_key_with_the_same_name_make_the_clause_unknown_and_lose_the_table() {
+    let schema = "\
+CREATE TABLE users (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL);
+CREATE TABLE orders (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, \
+amount INT NOT NULL, KEY dup (user_id), CONSTRAINT dup FOREIGN KEY (user_id) REFERENCES users (id), \
+CONSTRAINT dup CHECK (amount > 0));
+";
+    for statement in [
+        "ALTER TABLE orders DROP CHECK dup",
+        "ALTER TABLE orders ALTER CHECK dup NOT ENFORCED",
+        "ALTER TABLE orders ALTER CONSTRAINT dup ENFORCED",
+    ] {
+        assert_unknown_13b(schema, statement, "");
+        for server in [MYSQL_80, MYSQL_84] {
+            let predictions =
+                predictions_on(server, schema, &format!("{statement};\n{ADD_COUPON};"));
+            assert!(mentions_fulltext(&predictions[1]), "{server}: {statement}");
+        }
+    }
+}
+
+#[test]
+fn a_check_clause_on_a_lost_or_missing_table_is_unknown_and_never_a_failure() {
+    // Lost: an earlier clause on an unknown name took the table. Missing: the
+    // table is in no schema and no statement.
+    let lost = "ALTER TABLE orders DROP CHECK nosuch;\n";
+    for clause in [
+        "DROP CHECK chk_amount",
+        "ALTER CHECK chk_amount NOT ENFORCED",
+        "ALTER CHECK chk_off ENFORCED",
+        "ALTER CONSTRAINT chk_off ENFORCED",
+        "ALTER CONSTRAINT fk_orders_user ENFORCED",
+    ] {
+        assert_13b(
+            S13B_SCHEMA,
+            &format!("{lost}ALTER TABLE orders {clause}"),
+            &["unknown", "unknown"],
+        );
+        assert_13b(
+            S13B_SCHEMA,
+            &format!("ALTER TABLE ghosts {clause}"),
+            &["unknown"],
+        );
+        assert_13b("", &format!("ALTER TABLE orders {clause}"), &["unknown"]);
+    }
+}
+
+#[test]
+fn several_check_clauses_in_one_statement_are_unknown_and_each_check_leaves_the_schema() {
+    // Hand test: DROP CHECK a, DROP CHECK b is accepted and drops both.
+    let reason = assert_unknown_13b(
+        S13B_SCHEMA,
+        "ALTER TABLE orders DROP CHECK chk_amount, DROP CHECK chk_two",
+        "2 changes in one statement",
+    );
+    assert!(!reason.is_empty());
+    assert_13b(
+        S13B_SCHEMA,
+        "ALTER TABLE orders DROP CHECK chk_amount, DROP CHECK chk_two;
+         ALTER TABLE orders DROP COLUMN qty;",
+        &["unknown", INSTANT],
+    );
+    // A CHECK clause next to a table option: unknown, the table stays known.
+    let sql = "ALTER TABLE orders DROP CHECK chk_amount, COMMENT = 'x';";
+    assert_unknown_13b(S13B_SCHEMA, sql, "");
+    for server in [MYSQL_80, MYSQL_84] {
+        let predictions = predictions_on(server, S13B_SCHEMA, &format!("{sql}\n{ADD_COUPON};"));
+        assert!(!mentions_fulltext(&predictions[1]), "{server}");
+    }
+}
+
+#[test]
+fn the_check_clauses_are_read_in_every_spelling_mysql_accepts() {
+    // Hand tests on both servers: backticks, lower and mixed case, the name in
+    // another letter case, the schema before the table, a comment between the
+    // words, the options before and after.
+    for (statement, answer) in [
+        ("ALTER TABLE `orders` DROP CHECK `chk_amount`", INSTANT),
+        ("alter table orders drop check chk_amount", INSTANT),
+        ("Alter Table orders Drop Check chk_amount", INSTANT),
+        ("ALTER TABLE orders DROP CHECK CHK_AMOUNT", INSTANT),
+        ("ALTER TABLE orders DROP /* x */ CHECK chk_amount", INSTANT),
+        (
+            "ALTER TABLE orders DROP CHECK chk_amount, ALGORITHM=INSTANT",
+            INSTANT,
+        ),
+        (
+            "ALTER TABLE orders ALTER CHECK `chk_amount` NOT ENFORCED",
+            INSTANT,
+        ),
+        ("alter table orders alter check chk_off enforced", COPY),
+        (
+            "alter table `orders` alter constraint `chk_off` not enforced",
+            INSTANT,
+        ),
+        ("Alter Table orders Alter Constraint CHK_OFF Enforced", COPY),
+        (
+            "ALTER TABLE orders ALTER /* x */ CHECK chk_off ENFORCED",
+            COPY,
+        ),
+        (
+            "ALTER TABLE orders ALGORITHM = INSTANT, ALTER CHECK chk_amount NOT ENFORCED",
+            INSTANT,
+        ),
+        (
+            "ALTER TABLE orders LOCK=DEFAULT, ALGORITHM=DEFAULT, ALTER /* x */ CHECK chk_off ENFORCED",
+            COPY,
+        ),
+    ] {
+        assert_13b(S13B_SCHEMA, statement, &[answer]);
+    }
+}
+
+#[test]
+fn a_schema_qualified_table_is_read_but_not_known_so_the_check_clause_is_unknown() {
+    // Schema-qualified names are a limitation older than this step: shop.orders
+    // is not the --schema table orders. The clause is read (it is not "could
+    // not read") and the table is unknown, as for DROP CONSTRAINT.
+    for statement in [
+        "ALTER TABLE shop.orders DROP CHECK chk_amount",
+        "ALTER TABLE `shop`.`orders` DROP CHECK `chk_amount`",
+        "ALTER TABLE shop.orders ALTER CHECK chk_off ENFORCED",
+        "ALTER TABLE shop.orders ALTER CONSTRAINT chk_off NOT ENFORCED",
+    ] {
+        let reason = assert_unknown_13b(S13B_SCHEMA, statement, "kilit does not know this table");
+        assert!(!reason.contains("could not read"), "{statement}: {reason}");
+    }
+    assert_unknown_13b(
+        S13B_SCHEMA,
+        "ALTER TABLE shop.orders DROP CHECK chk_amount",
+        "kilit does not know this table, so it cannot tell whether chk_amount is one of its CHECK constraints",
+    );
+}
+
+#[test]
+fn a_check_name_with_a_space_or_a_doubled_backtick_is_read_whole() {
+    for (statement, answer) in [
+        ("ALTER TABLE orders DROP CHECK `ck amount`", INSTANT),
+        (
+            "ALTER TABLE orders ALTER CHECK `ck amount` NOT ENFORCED",
+            INSTANT,
+        ),
+        (
+            "ALTER TABLE orders ALTER CONSTRAINT `ck amount` ENFORCED",
+            INSTANT,
+        ),
+        ("ALTER TABLE orders DROP CHECK `ck``q`", INSTANT),
+        (
+            "ALTER TABLE orders ALTER CHECK `ck``q` NOT ENFORCED",
+            INSTANT,
+        ),
+        // `check` is a reserved word as a name; backticked it is a name.
+        ("ALTER TABLE orders DROP CHECK `check`", INSTANT),
+        ("ALTER TABLE orders ALTER CHECK `check` ENFORCED", COPY),
+    ] {
+        assert_13b(S13B_NAMED, statement, &[answer]);
+    }
+    // The name is the whole backticked text: `ck` alone is no CHECK.
+    assert_unknown_13b(S13B_NAMED, "ALTER TABLE orders DROP CHECK `ck`", "");
+}
+
+#[test]
+fn a_check_named_after_a_longer_word_with_check_in_it_is_read_as_that_name() {
+    let schema = "CREATE TABLE orders (id INT PRIMARY KEY, amount INT NOT NULL, \
+                  CONSTRAINT my_check_1 CHECK (amount > 0), CONSTRAINT checked CHECK (amount > 1));";
+    assert_13b(
+        schema,
+        "ALTER TABLE orders DROP CHECK my_check_1;
+         ALTER TABLE orders ALTER CHECK checked NOT ENFORCED;
+         ALTER TABLE orders DROP CHECK checked;",
+        &[INSTANT, INSTANT, INSTANT],
+    );
+}
+
+#[test]
+fn an_unnamed_check_has_the_name_mysql_gave_it_and_a_renamed_table_the_new_one() {
+    // Hand test: the first unnamed CHECK of orders is orders_chk_1. After
+    // RENAME TABLE orders TO orders2 it is orders2_chk_1, and orders_chk_1 is
+    // error 3821.
+    let add = "ALTER TABLE orders ADD CHECK (amount > 10);\n";
+    for server in [MYSQL_80, MYSQL_84] {
+        let sql = format!("{add}ALTER TABLE orders DROP CHECK orders_chk_1");
+        assert_eq!(
+            statements_on(server, S13B_SCHEMA, &parse(&sql)),
+            [COPY, INSTANT],
+            "{server}"
+        );
+        let sql = format!(
+            "{add}RENAME TABLE orders TO orders2;\nALTER TABLE orders2 DROP CHECK orders2_chk_1"
+        );
+        assert_eq!(
+            statements_on(server, S13B_SCHEMA, &parse(&sql))
+                .last()
+                .map(String::as_str),
+            Some(INSTANT),
+            "{server}"
+        );
+        let sql = format!(
+            "{add}RENAME TABLE orders TO orders2;\nALTER TABLE orders2 DROP CHECK orders_chk_1"
+        );
+        assert_unknown_13b(S13B_SCHEMA, &sql, "");
+        let sql = format!(
+            "{add}RENAME TABLE orders TO orders2;\nALTER TABLE orders2 DROP CHECK orders_chk_1;\n\
+             ALTER TABLE orders2 ADD COLUMN coupon INT NULL;"
+        );
+        assert!(
+            mentions_fulltext(predictions_on(server, S13B_SCHEMA, &sql).last().unwrap()),
+            "{server}: the table should be lost"
+        );
+    }
+    // A CHECK written in a column definition has the same kind of name.
+    assert_eq!(
+        on_mysql_84(
+            "",
+            "CREATE TABLE t (a INT CHECK (a > 0), b INT);\nALTER TABLE t ALTER CHECK t_chk_1 NOT ENFORCED;\n\
+             ALTER TABLE t DROP CHECK t_chk_1;"
+        )[1..],
+        [INSTANT, INSTANT]
+    );
+}
+
+#[test]
+fn a_check_clause_on_a_table_created_earlier_in_the_input_is_a_new_table() {
+    // alter table on a table this input creates: nothing waits for it.
+    let create = "CREATE TABLE gifts (id INT PRIMARY KEY, amount INT NOT NULL, \
+                  CONSTRAINT chk_gift CHECK (amount > 0) NOT ENFORCED);\n";
+    for server in [MYSQL_80, MYSQL_84] {
+        for clause in [
+            "ALTER CHECK chk_gift ENFORCED",
+            "ALTER CONSTRAINT chk_gift ENFORCED",
+            "ALTER CHECK chk_gift NOT ENFORCED",
+            "DROP CHECK chk_gift",
+        ] {
+            assert_eq!(
+                impacts_on(server, "", &format!("{create}ALTER TABLE gifts {clause}")),
+                [Impact::NotChecked, Impact::NewTable],
+                "{server}: {clause}"
+            );
+        }
+    }
+}
+
+#[test]
+fn laravel_raw_check_statements_get_the_lab_answers() {
+    // DB::statement('alter table `orders` add constraint ... check (...)'),
+    // then the same with `alter check` and `drop check`. Laravel has no call
+    // for a CHECK constraint; --pretend prints a raw statement as written.
+    assert_eq!(
+        pretend_on_mysql_84(
+            LARAVEL_TABLES,
+            &pretend(
+                "2026_11_09_101000_manage_amount_check_on_orders_table",
+                &[
+                    "alter table `orders` add constraint `orders_amount_check` check (`amount` > 0) not enforced",
+                    "alter table `orders` alter check `orders_amount_check` enforced",
+                    "alter table `orders` alter check `orders_amount_check` not enforced",
+                    "alter table `orders` drop check `orders_amount_check`",
+                    "alter table `orders` add `coupon` varchar(255) null",
+                ]
+            )
+        ),
+        [INSTANT, COPY, INSTANT, INSTANT, INSTANT,]
+    );
+}
+
+#[test]
+fn an_unquoted_reserved_word_as_a_check_name_is_unreadable_but_in_backticks_it_is_answered() {
+    // By hand on both servers: DROP CHECK check, ALTER CHECK key ENFORCED and
+    // DROP CHECK select are error 1064 even when the table has a CHECK with
+    // that name (created in backticks).
+    let schema = "\
+CREATE TABLE `rw` (
+  `id` int NOT NULL,
+  `a` int NOT NULL,
+  PRIMARY KEY (`id`),
+  CONSTRAINT `check` CHECK ((`a` > 0)),
+  CONSTRAINT `key` CHECK ((`a` > 1)),
+  CONSTRAINT `select` CHECK ((`a` > 2))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+";
+    for statement in [
+        "ALTER TABLE rw DROP CHECK check",
+        "ALTER TABLE rw DROP CHECK key",
+        "ALTER TABLE rw DROP CHECK select",
+        "ALTER TABLE rw ALTER CHECK key ENFORCED",
+        "ALTER TABLE rw ALTER CHECK check NOT ENFORCED",
+        "ALTER TABLE rw ALTER CONSTRAINT select ENFORCED",
+        "ALTER TABLE rw ALTER CONSTRAINT select NOT ENFORCED",
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            match predictions_on(server, schema, statement).last() {
+                Some(Prediction::Unknown { reason })
+                    if reason.starts_with("kilit could not read this statement") => {}
+                other => panic!("{server}: {statement}\n    got {other:?}"),
+            }
+        }
+    }
+    for (statement, case, answer) in [
+        (
+            "ALTER TABLE rw DROP CHECK `check`",
+            "drop-check-constraint",
+            INSTANT,
+        ),
+        (
+            "ALTER TABLE rw DROP CHECK `select`",
+            "drop-check-constraint",
+            INSTANT,
+        ),
+        (
+            "ALTER TABLE rw ALTER CHECK `key` NOT ENFORCED",
+            "alter-check-constraint",
+            INSTANT,
+        ),
+        (
+            "ALTER TABLE rw ALTER CONSTRAINT `select` ENFORCED",
+            "alter-check-constraint",
+            INSTANT,
+        ),
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            let (found, verdict, _) = measured_13b(server, schema, statement);
+            assert_eq!(found, case, "{server}: {statement}");
+            assert_eq!(verdict, answer, "{server}: {statement}");
+        }
+    }
+}

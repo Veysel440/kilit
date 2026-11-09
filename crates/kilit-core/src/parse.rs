@@ -221,15 +221,18 @@ pub(crate) fn alters_named_table(sql: &str) -> bool {
     )
 }
 
-/// An `ALTER TABLE` whose only changes are the table options `COMMENT`,
-/// `ENGINE`, `ROW_FORMAT` and `KEY_BLOCK_SIZE`, which the parser cannot
-/// read, with `ALGORITHM` and `LOCK` if written: `ALTER TABLE notes COMMENT
-/// = 'Notes'`. The options come in any order, with or without `=`, between
-/// commas or spaces; `ALGORITHM` and `LOCK` between commas, as MySQL takes
-/// them. `None` for anything else, and for forms MySQL 8.0.46 and 8.4.13 do
-/// not accept or kilit does not follow: a quoted `ENGINE`, `ROW_FORMAT` or
-/// `KEY_BLOCK_SIZE`, a `COMMENT` that is not one quoted string, a comment
-/// MySQL runs (`/*! ... */`).
+/// An `ALTER TABLE` whose only changes are ones the parser cannot read: the
+/// table options `COMMENT`, `ENGINE`, `ROW_FORMAT` and `KEY_BLOCK_SIZE`, as
+/// in `ALTER TABLE notes COMMENT = 'Notes'`, and the CHECK constraint
+/// clauses `DROP CHECK name`, `ALTER CHECK name [NOT] ENFORCED` and `ALTER
+/// CONSTRAINT name [NOT] ENFORCED`, with `ALGORITHM` and `LOCK` if written.
+/// The options come in any order, with or without `=`, between commas or
+/// spaces; the CHECK clauses, `ALGORITHM` and `LOCK` between commas, as
+/// MySQL takes them. `None` for anything else, and for forms kilit does not
+/// follow: a quoted `ENGINE`, `ROW_FORMAT` or `KEY_BLOCK_SIZE`, a `COMMENT`
+/// that is not one quoted string, a comment MySQL runs (`/*! ... */`). A
+/// CHECK clause in a form MySQL 8.0.46 and 8.4.13 do not accept, run by hand
+/// on both, gives the reason, and no table changes: see [`check_clause`].
 fn table_options_alter(sql: &str) -> Option<StatementKind> {
     if sql.contains("/*!") {
         return None;
@@ -254,7 +257,8 @@ fn table_options_alter(sql: &str) -> Option<StatementKind> {
         ..Alter::default()
     };
     let mut options = TableOptions::default();
-    let mut any_option = false;
+    // Where the table options go among the operations: at the first one.
+    let mut options_at = None;
     // Whether the clause before is a table option, which the next one may
     // follow without a comma.
     let mut after_option = false;
@@ -263,6 +267,50 @@ fn table_options_alter(sql: &str) -> Option<StatementKind> {
             return None;
         }
         let name = word.value.to_ascii_uppercase();
+        if !after_option && matches!(name.as_str(), "DROP" | "ALTER") {
+            let (operation, after) = match check_clause(&name, after) {
+                CheckClause::Read(operation, after) => (operation, after),
+                CheckClause::Rejected(reason) => {
+                    // As in `convert`: no table changes.
+                    return Some(StatementKind::Unparsed {
+                        error: reason,
+                        table: None,
+                    });
+                }
+                CheckClause::Other => return None,
+            };
+            alter.operations.push(*operation);
+            rest = match after {
+                [] => &[],
+                [Token::Comma, next @ ..] if !next.is_empty() => next,
+                [Token::Comma] => {
+                    return Some(StatementKind::Unparsed {
+                        error: format!("{REJECTED_BY} a comma at the end of the statement"),
+                        table: None,
+                    });
+                }
+                [Token::Word(next), ..] if next.quote_style.is_none() => {
+                    let next = next.value.to_ascii_uppercase();
+                    if matches!(next.as_str(), "CASCADE" | "RESTRICT") {
+                        return Some(StatementKind::Unparsed {
+                            error: format!("{REJECTED_BY} {next} after DROP CHECK or ALTER CHECK"),
+                            table: None,
+                        });
+                    }
+                    if next == "ENFORCED"
+                        && matches!(alter.operations.last(), Some(Operation::AlterCheck { .. }))
+                    {
+                        return Some(StatementKind::Unparsed {
+                            error: format!("{REJECTED_BY} ENFORCED written twice"),
+                            table: None,
+                        });
+                    }
+                    return None;
+                }
+                _ => return None,
+            };
+            continue;
+        }
         let is_option = matches!(
             name.as_str(),
             "COMMENT" | "ENGINE" | "ROW_FORMAT" | "KEY_BLOCK_SIZE"
@@ -309,7 +357,9 @@ fn table_options_alter(sql: &str) -> Option<StatementKind> {
             }
             _ => return None,
         }
-        any_option |= is_option;
+        if is_option && options_at.is_none() {
+            options_at = Some(alter.operations.len());
+        }
         rest = match after {
             [] => &[],
             [Token::Comma, next @ ..] if !next.is_empty() => {
@@ -323,13 +373,386 @@ fn table_options_alter(sql: &str) -> Option<StatementKind> {
             _ => return None,
         };
     }
-    if !rest.is_empty() || !any_option {
+    if !rest.is_empty() {
         return None;
     }
-    alter
-        .operations
-        .push(Operation::ChangeTableOptions(options));
+    if let Some(at) = options_at {
+        alter
+            .operations
+            .insert(at, Operation::ChangeTableOptions(options));
+    }
+    if alter.operations.is_empty() {
+        return None;
+    }
     Some(StatementKind::Alter(alter))
+}
+
+/// The words MySQL 8.0.46 or 8.4.13 refuses as a name without backticks:
+/// each was run by hand as a column name on both servers, and failed on one
+/// or both. Sorted, in upper case.
+const RESERVED: [&str; 264] = [
+    "ACCESSIBLE",
+    "ADD",
+    "ALL",
+    "ALTER",
+    "ANALYZE",
+    "AND",
+    "AS",
+    "ASC",
+    "ASENSITIVE",
+    "BEFORE",
+    "BETWEEN",
+    "BIGINT",
+    "BINARY",
+    "BLOB",
+    "BOTH",
+    "BY",
+    "CALL",
+    "CASCADE",
+    "CASE",
+    "CHANGE",
+    "CHAR",
+    "CHARACTER",
+    "CHECK",
+    "COLLATE",
+    "COLUMN",
+    "CONDITION",
+    "CONSTRAINT",
+    "CONTINUE",
+    "CONVERT",
+    "CREATE",
+    "CROSS",
+    "CUBE",
+    "CUME_DIST",
+    "CURRENT_DATE",
+    "CURRENT_TIME",
+    "CURRENT_TIMESTAMP",
+    "CURRENT_USER",
+    "CURSOR",
+    "DATABASE",
+    "DATABASES",
+    "DAY_HOUR",
+    "DAY_MICROSECOND",
+    "DAY_MINUTE",
+    "DAY_SECOND",
+    "DEC",
+    "DECIMAL",
+    "DECLARE",
+    "DEFAULT",
+    "DELAYED",
+    "DELETE",
+    "DENSE_RANK",
+    "DESC",
+    "DESCRIBE",
+    "DETERMINISTIC",
+    "DISTINCT",
+    "DISTINCTROW",
+    "DIV",
+    "DOUBLE",
+    "DROP",
+    "DUAL",
+    "EACH",
+    "ELSE",
+    "ELSEIF",
+    "EMPTY",
+    "ENCLOSED",
+    "ESCAPED",
+    "EXCEPT",
+    "EXISTS",
+    "EXIT",
+    "EXPLAIN",
+    "FALSE",
+    "FETCH",
+    "FIRST_VALUE",
+    "FLOAT",
+    "FLOAT4",
+    "FLOAT8",
+    "FOR",
+    "FORCE",
+    "FOREIGN",
+    "FROM",
+    "FULLTEXT",
+    "FUNCTION",
+    "GENERATED",
+    "GET",
+    "GRANT",
+    "GROUP",
+    "GROUPING",
+    "GROUPS",
+    "HAVING",
+    "HIGH_PRIORITY",
+    "HOUR_MICROSECOND",
+    "HOUR_MINUTE",
+    "HOUR_SECOND",
+    "IF",
+    "IGNORE",
+    "IN",
+    "INDEX",
+    "INFILE",
+    "INNER",
+    "INOUT",
+    "INSENSITIVE",
+    "INSERT",
+    "INT",
+    "INT1",
+    "INT2",
+    "INT3",
+    "INT4",
+    "INT8",
+    "INTEGER",
+    "INTERSECT",
+    "INTERVAL",
+    "INTO",
+    "IO_AFTER_GTIDS",
+    "IO_BEFORE_GTIDS",
+    "IS",
+    "ITERATE",
+    "JOIN",
+    "JSON_TABLE",
+    "KEY",
+    "KEYS",
+    "KILL",
+    "LAG",
+    "LAST_VALUE",
+    "LATERAL",
+    "LEAD",
+    "LEADING",
+    "LEAVE",
+    "LEFT",
+    "LIKE",
+    "LIMIT",
+    "LINEAR",
+    "LINES",
+    "LOAD",
+    "LOCALTIME",
+    "LOCALTIMESTAMP",
+    "LOCK",
+    "LONG",
+    "LONGBLOB",
+    "LONGTEXT",
+    "LOOP",
+    "LOW_PRIORITY",
+    "MASTER_BIND",
+    "MASTER_SSL_VERIFY_SERVER_CERT",
+    "MATCH",
+    "MAXVALUE",
+    "MEDIUMBLOB",
+    "MEDIUMINT",
+    "MEDIUMTEXT",
+    "MIDDLEINT",
+    "MINUTE_MICROSECOND",
+    "MINUTE_SECOND",
+    "MOD",
+    "MODIFIES",
+    "NATURAL",
+    "NOT",
+    "NO_WRITE_TO_BINLOG",
+    "NTH_VALUE",
+    "NTILE",
+    "NULL",
+    "NUMERIC",
+    "OF",
+    "ON",
+    "OPTIMIZE",
+    "OPTIMIZER_COSTS",
+    "OPTION",
+    "OPTIONALLY",
+    "OR",
+    "ORDER",
+    "OUT",
+    "OUTER",
+    "OUTFILE",
+    "OVER",
+    "PARTITION",
+    "PERCENT_RANK",
+    "PRECISION",
+    "PRIMARY",
+    "PROCEDURE",
+    "PURGE",
+    "QUALIFY",
+    "RANGE",
+    "RANK",
+    "READ",
+    "READS",
+    "READ_WRITE",
+    "REAL",
+    "RECURSIVE",
+    "REFERENCES",
+    "REGEXP",
+    "RELEASE",
+    "RENAME",
+    "REPEAT",
+    "REPLACE",
+    "REQUIRE",
+    "RESIGNAL",
+    "RESTRICT",
+    "RETURN",
+    "REVOKE",
+    "RIGHT",
+    "RLIKE",
+    "ROW",
+    "ROWS",
+    "ROW_NUMBER",
+    "SCHEMA",
+    "SCHEMAS",
+    "SECOND_MICROSECOND",
+    "SELECT",
+    "SENSITIVE",
+    "SEPARATOR",
+    "SET",
+    "SHOW",
+    "SIGNAL",
+    "SMALLINT",
+    "SPATIAL",
+    "SPECIFIC",
+    "SQL",
+    "SQLEXCEPTION",
+    "SQLSTATE",
+    "SQLWARNING",
+    "SQL_BIG_RESULT",
+    "SQL_CALC_FOUND_ROWS",
+    "SQL_SMALL_RESULT",
+    "SSL",
+    "STARTING",
+    "STORED",
+    "STRAIGHT_JOIN",
+    "SYSTEM",
+    "TABLE",
+    "TABLESAMPLE",
+    "TERMINATED",
+    "THEN",
+    "TINYBLOB",
+    "TINYINT",
+    "TINYTEXT",
+    "TO",
+    "TRAILING",
+    "TRIGGER",
+    "TRUE",
+    "UNDO",
+    "UNION",
+    "UNIQUE",
+    "UNLOCK",
+    "UNSIGNED",
+    "UPDATE",
+    "USAGE",
+    "USE",
+    "USING",
+    "UTC_DATE",
+    "UTC_TIME",
+    "UTC_TIMESTAMP",
+    "VALUES",
+    "VARBINARY",
+    "VARCHAR",
+    "VARCHARACTER",
+    "VARYING",
+    "VIRTUAL",
+    "WHEN",
+    "WHERE",
+    "WHILE",
+    "WINDOW",
+    "WITH",
+    "WRITE",
+    "XOR",
+    "YEAR_MONTH",
+    "ZEROFILL",
+];
+
+/// A CHECK constraint clause of an `ALTER TABLE`, read from the words after
+/// its `DROP` or `ALTER`.
+enum CheckClause<'a> {
+    /// The operation, and the words after the clause.
+    Read(Box<Operation>, &'a [Token]),
+    /// Why MySQL 8.0.46 and 8.4.13 do not accept the clause.
+    Rejected(String),
+    /// Not a CHECK clause, or one kilit does not read.
+    Other,
+}
+
+/// `DROP CHECK name`, `ALTER CHECK name [NOT] ENFORCED` or `ALTER CONSTRAINT
+/// name [NOT] ENFORCED`, after `verb` (`DROP` or `ALTER`). MySQL 8.0.46 and
+/// 8.4.13 refuse each clause without a name, `IF EXISTS`, `ALTER` without
+/// `ENFORCED`, `NOT` without it, a name in single quotes and `DROP CHECK
+/// (name)` with a syntax error (run by hand), and so does kilit; a
+/// double-quoted name works only under ANSI_QUOTES.
+fn check_clause<'a>(verb: &str, words: &'a [Token]) -> CheckClause<'a> {
+    let Some((Token::Word(what), after)) = words.split_first() else {
+        return CheckClause::Other;
+    };
+    if what.quote_style.is_some() {
+        return CheckClause::Other;
+    }
+    let what = what.value.to_ascii_uppercase();
+    let clause = match (verb, what.as_str()) {
+        ("DROP", "CHECK") => "DROP CHECK",
+        ("ALTER", "CHECK") => "ALTER CHECK",
+        ("ALTER", "CONSTRAINT") => "ALTER CONSTRAINT",
+        _ => return CheckClause::Other,
+    };
+    let rejected = |what: String| CheckClause::Rejected(format!("{REJECTED_BY} {what}"));
+    let (name, after) = match after.split_first() {
+        None | Some((Token::Comma, _)) => return rejected(format!("{clause} without a name")),
+        Some((Token::SingleQuotedString(_), _)) => {
+            return rejected("a name in single quotes; a quoted name takes backticks".into());
+        }
+        Some((Token::DoubleQuotedString(_), _)) => {
+            return CheckClause::Rejected(
+                "a double-quoted column, index or constraint name works only when sql_mode \
+                 has ANSI_QUOTES, and kilit does not know the server's sql_mode"
+                    .into(),
+            );
+        }
+        Some((Token::LParen, _)) if clause == "DROP CHECK" => {
+            return rejected(format!("{clause} with its name in parentheses"));
+        }
+        Some((Token::Word(name), after)) => match name.quote_style {
+            Some('`') => (name.value.clone(), after),
+            Some(_) => return CheckClause::Other,
+            None => match name.value.to_ascii_uppercase().as_str() {
+                "IF" if clause != "ALTER CONSTRAINT" => {
+                    return rejected(format!("{clause} IF EXISTS"));
+                }
+                "NOT" if clause != "DROP CHECK" => {
+                    return rejected(format!("{clause} without a name"));
+                }
+                "PRIMARY" if clause != "ALTER CHECK" => {
+                    return rejected(format!("{clause} PRIMARY without backticks"));
+                }
+                // MySQL refuses the name; kilit reads no more of it.
+                word if RESERVED.binary_search(&word).is_ok() => return CheckClause::Other,
+                _ => (name.value.clone(), after),
+            },
+        },
+        Some(_) => return CheckClause::Other,
+    };
+    if clause == "DROP CHECK" {
+        return CheckClause::Read(Box::new(Operation::DropCheck { name }), after);
+    }
+    let state = |token: Option<&Token>| match token {
+        Some(Token::Word(word)) if word.quote_style.is_none() => {
+            Some(word.value.to_ascii_uppercase())
+        }
+        _ => None,
+    };
+    let (enforced, after) = match state(after.first()).as_deref() {
+        Some("ENFORCED") => (true, &after[1..]),
+        Some("NOT") => match state(after.get(1)).as_deref() {
+            Some("ENFORCED") => (false, &after[2..]),
+            Some("NOT") => return rejected(format!("NOT NOT ENFORCED in {clause}")),
+            _ => return CheckClause::Other,
+        },
+        _ if matches!(after.first(), None | Some(Token::Comma)) => {
+            return rejected(format!("{clause} without ENFORCED or NOT ENFORCED"));
+        }
+        _ => return CheckClause::Other,
+    };
+    CheckClause::Read(
+        Box::new(Operation::AlterCheck {
+            name,
+            enforced,
+            constraint: clause == "ALTER CONSTRAINT",
+        }),
+        after,
+    )
 }
 
 /// The reason kilit gives no answer for a statement it could not read.
@@ -602,6 +1025,18 @@ fn rejected_words(statement: &ast::Statement, sql: &str, written: &Written) -> V
                     AlterTableOperation::DropColumn {
                         if_exists: true, ..
                     } => words.push("DROP COLUMN IF EXISTS"),
+                    // The parser reads `DROP CHECK` without a name as a
+                    // column named CHECK, a word MySQL reserves.
+                    AlterTableOperation::DropColumn {
+                        has_column_keyword: false,
+                        column_names,
+                        ..
+                    } if column_names.iter().any(|name| {
+                        name.quote_style.is_none() && name.value.eq_ignore_ascii_case("CHECK")
+                    }) =>
+                    {
+                        words.push("DROP CHECK without a name");
+                    }
                     AlterTableOperation::AddConstraint {
                         not_valid: true, ..
                     } => words.push("NOT VALID"),
@@ -2716,20 +3151,275 @@ mod tests {
     }
 
     #[test]
-    fn check_constraints_sqlparser_cannot_read_stay_unparsed() {
+    fn check_clauses_the_parser_cannot_read_are_read_by_their_words() {
         // All valid MySQL 8.0.46 and 8.4.13 (run by hand). sqlparser 0.63 takes
         // the word after DROP or ALTER for a column's name.
+        let drop = |name: &str| Operation::DropCheck { name: name.into() };
+        let set = |name: &str, enforced: bool, constraint: bool| Operation::AlterCheck {
+            name: name.into(),
+            enforced,
+            constraint,
+        };
+        for (sql, table, operations, algorithm, lock) in [
+            (
+                "ALTER TABLE t DROP CHECK c",
+                "t",
+                vec![drop("c")],
+                None,
+                None,
+            ),
+            (
+                "alter table `t` drop check `c`",
+                "t",
+                vec![drop("c")],
+                None,
+                None,
+            ),
+            (
+                "ALTER TABLE t ALTER CHECK c NOT ENFORCED",
+                "t",
+                vec![set("c", false, false)],
+                None,
+                None,
+            ),
+            (
+                "Alter Table t Alter Constraint CHK_AMOUNT Enforced",
+                "t",
+                vec![set("CHK_AMOUNT", true, true)],
+                None,
+                None,
+            ),
+            (
+                "ALTER TABLE shop.t DROP CHECK `c two`",
+                "shop.t",
+                vec![drop("c two")],
+                None,
+                None,
+            ),
+            (
+                "ALTER TABLE `shop`.`t` DROP CHECK `c``q`",
+                "shop.t",
+                vec![drop("c`q")],
+                None,
+                None,
+            ),
+            (
+                "ALTER TABLE t DROP CHECK `check`",
+                "t",
+                vec![drop("check")],
+                None,
+                None,
+            ),
+            (
+                "ALTER TABLE t ALTER /* x */ CHECK -- y\n c NOT ENFORCED",
+                "t",
+                vec![set("c", false, false)],
+                None,
+                None,
+            ),
+            (
+                "ALTER TABLE t DROP CHECK c, ALGORITHM=INSTANT",
+                "t",
+                vec![drop("c")],
+                Some(Algorithm::Instant),
+                None,
+            ),
+            (
+                "ALTER TABLE t ALTER CHECK c ENFORCED, ALGORITHM=INPLACE, LOCK=NONE",
+                "t",
+                vec![set("c", true, false)],
+                Some(Algorithm::Inplace),
+                Some(Lock::None),
+            ),
+            (
+                "ALTER TABLE t ALGORITHM = COPY, ALTER CONSTRAINT c NOT ENFORCED",
+                "t",
+                vec![set("c", false, true)],
+                Some(Algorithm::Copy),
+                None,
+            ),
+            (
+                "ALTER TABLE t LOCK=DEFAULT, ALGORITHM=DEFAULT, ALTER CHECK c ENFORCED",
+                "t",
+                vec![set("c", true, false)],
+                None,
+                None,
+            ),
+            (
+                "ALTER TABLE t DROP CHECK c, DROP CHECK d",
+                "t",
+                vec![drop("c"), drop("d")],
+                None,
+                None,
+            ),
+            (
+                "ALTER TABLE t DROP CHECK c, COMMENT = 'x', ALTER CHECK d ENFORCED",
+                "t",
+                vec![
+                    drop("c"),
+                    Operation::ChangeTableOptions(TableOptions {
+                        comment: Some("x".into()),
+                        ..TableOptions::default()
+                    }),
+                    set("d", true, false),
+                ],
+                None,
+                None,
+            ),
+        ] {
+            let alter = alter(sql);
+            assert_eq!(alter.table, table, "{sql}");
+            assert_eq!(alter.operations, operations, "{sql}");
+            assert_eq!(alter.algorithm, algorithm, "{sql}");
+            assert_eq!(alter.lock, lock, "{sql}");
+        }
+    }
+
+    #[test]
+    fn the_reserved_words_are_sorted_and_in_upper_case() {
+        assert!(RESERVED.is_sorted());
+        assert!(
+            RESERVED
+                .iter()
+                .all(|word| *word == word.to_ascii_uppercase())
+        );
+    }
+
+    #[test]
+    fn check_clauses_mysql_refuses_give_the_reason_and_change_no_table() {
+        // Each fails with 1064 on MySQL 8.0.46 and 8.4.13 (run by hand).
+        for (sql, words) in [
+            ("ALTER TABLE t DROP CHECK", "DROP CHECK without a name"),
+            (
+                "ALTER TABLE t DROP CHECK, ALGORITHM=INSTANT",
+                "DROP CHECK without a name",
+            ),
+            (
+                "alter table t drop check, algorithm=inplace, lock=none",
+                "DROP CHECK without a name",
+            ),
+            (
+                "ALTER TABLE t DROP CHECK IF EXISTS c",
+                "DROP CHECK IF EXISTS",
+            ),
+            (
+                "ALTER TABLE t ALTER CHECK IF EXISTS c ENFORCED",
+                "ALTER CHECK IF EXISTS",
+            ),
+            (
+                "ALTER TABLE t ALTER CHECK c",
+                "ALTER CHECK without ENFORCED or NOT ENFORCED",
+            ),
+            (
+                "ALTER TABLE t ALTER CHECK c, ALGORITHM=INSTANT",
+                "ALTER CHECK without ENFORCED or NOT ENFORCED",
+            ),
+            (
+                "ALTER TABLE t ALTER CHECK ENFORCED",
+                "ALTER CHECK without ENFORCED or NOT ENFORCED",
+            ),
+            (
+                "ALTER TABLE t ALTER CHECK NOT ENFORCED",
+                "ALTER CHECK without a name",
+            ),
+            ("ALTER TABLE t ALTER CHECK", "ALTER CHECK without a name"),
+            (
+                "ALTER TABLE t ALTER CONSTRAINT c",
+                "ALTER CONSTRAINT without ENFORCED or NOT ENFORCED",
+            ),
+            (
+                "ALTER TABLE t ALTER CONSTRAINT",
+                "ALTER CONSTRAINT without a name",
+            ),
+            (
+                "ALTER TABLE t DROP CHECK c CASCADE",
+                "CASCADE after DROP CHECK or ALTER CHECK",
+            ),
+            (
+                "ALTER TABLE t DROP CHECK c RESTRICT",
+                "RESTRICT after DROP CHECK or ALTER CHECK",
+            ),
+            (
+                "ALTER TABLE t ALTER CHECK c NOT ENFORCED CASCADE",
+                "CASCADE after DROP CHECK or ALTER CHECK",
+            ),
+            (
+                "ALTER TABLE t ALTER CONSTRAINT c NOT ENFORCED RESTRICT",
+                "RESTRICT after DROP CHECK or ALTER CHECK",
+            ),
+            (
+                "ALTER TABLE t DROP CHECK c,",
+                "a comma at the end of the statement",
+            ),
+            (
+                "ALTER TABLE t ALTER CHECK c ENFORCED ENFORCED",
+                "ENFORCED written twice",
+            ),
+            (
+                "ALTER TABLE t ALTER CHECK c NOT NOT ENFORCED",
+                "NOT NOT ENFORCED in ALTER CHECK",
+            ),
+            (
+                "ALTER TABLE t DROP CHECK (c)",
+                "DROP CHECK with its name in parentheses",
+            ),
+            (
+                "ALTER TABLE t DROP CHECK PRIMARY",
+                "DROP CHECK PRIMARY without backticks",
+            ),
+            (
+                "ALTER TABLE t ALTER CONSTRAINT PRIMARY ENFORCED",
+                "ALTER CONSTRAINT PRIMARY without backticks",
+            ),
+            (
+                "ALTER TABLE t DROP CHECK 'c'",
+                "a name in single quotes; a quoted name takes backticks",
+            ),
+            (
+                "ALTER TABLE t ALTER CONSTRAINT 'c' ENFORCED",
+                "a name in single quotes; a quoted name takes backticks",
+            ),
+        ] {
+            assert_eq!(
+                kind(sql),
+                StatementKind::Unparsed {
+                    error: format!("{REJECTED_BY} {words}"),
+                    table: None,
+                },
+                "{sql}"
+            );
+        }
+        assert!(matches!(
+            kind("ALTER TABLE t ALTER CHECK \"c\" ENFORCED"),
+            StatementKind::Unparsed { error, table: None } if error.contains("ANSI_QUOTES")
+        ));
+    }
+
+    #[test]
+    fn check_clauses_with_words_kilit_does_not_read_stay_unparsed() {
         for sql in [
-            "ALTER TABLE t DROP CHECK c",
-            "ALTER TABLE t ALTER CHECK c NOT ENFORCED",
-            "ALTER TABLE t ALTER CONSTRAINT c ENFORCED",
+            "ALTER TABLE t DROP CHECK c ALGORITHM=INSTANT",
+            "ALTER TABLE t COMMENT='x' DROP CHECK c",
+            "ALTER TABLE t DROP CHECK c, ALGORITHM=NOCOPY",
+            "ALTER TABLE t DROP CHECK c, ADD COLUMN y INT",
+            "ALTER TABLE t RENAME TO u, DROP CHECK c",
+            "ALTER TABLE t ALTER CHECK c SOMETHING",
+            "ALTER TABLE t ALTER CHECK (c) ENFORCED",
+            "ALTER TABLE t ALTER CONSTRAINT IF EXISTS c ENFORCED",
+            // A word MySQL reserves, without backticks: 1064 by hand.
+            "ALTER TABLE t DROP CHECK check",
+            "ALTER TABLE t DROP CHECK Select",
+            "ALTER TABLE t ALTER CHECK key ENFORCED",
+            "ALTER TABLE t ALTER CONSTRAINT qualify NOT ENFORCED",
+            "ALTER TABLE t DROP CHECK c /*!80016 , DROP CHECK d */",
         ] {
             assert!(
                 matches!(
                     kind(sql),
                     StatementKind::Unparsed { ref table, .. } if table.as_deref() == Some("t")
                 ),
-                "{sql}"
+                "{sql}: {:?}",
+                kind(sql)
             );
         }
     }

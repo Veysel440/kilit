@@ -135,7 +135,7 @@ flowchart LR
     check --> status["exit status"]
 ```
 
-The lab runs each of 225 scenarios six ways on fresh tables. kilit follows your
+The lab runs each of 240 scenarios six ways on fresh tables. kilit follows your
 tables through the migration and answers each change from the matching
 measurement: [architecture](docs/architecture.md).
 
