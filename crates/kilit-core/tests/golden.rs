@@ -6814,3 +6814,1033 @@ fn when_no_answer_of_a_run_depends_on_the_server_every_other_server_answers_the_
     assert!(dependent_runs > 0, "no run depends on the server");
     assert!(independent_runs > dependent_runs, "{independent_runs}");
 }
+
+// Step 13a: forms MySQL 8.0.46 and 8.4.13 reject, which kilit used to answer.
+// Every refused statement below was run by hand on both servers (error 1064,
+// 1067, 1294 or 1391 on each; manual/step13a.sql), and so was every twin that
+// must keep its answer. A refused statement changes no table.
+
+/// What every refusal of this step starts with. The rest of the reason is the
+/// lead's wording.
+const NOT_ACCEPTED: &str = "MySQL 8.0.46 and 8.4.13 do not accept";
+
+/// The tables of the hand tests: users, orders (with an index, a foreign key
+/// and a DATETIME), d (every column type, a DATE and a TIME), k, k2 and kt.
+const S13A_TABLES: &str = "\
+CREATE TABLE users (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL);
+CREATE TABLE orders (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, amount INT NOT NULL, email VARCHAR(255) NULL, note VARCHAR(50) NULL, seen DATETIME NULL, KEY ix (amount), CONSTRAINT fk_x FOREIGN KEY (user_id) REFERENCES users (id));
+CREATE TABLE d (id INT PRIMARY KEY, amount INT NOT NULL, price DECIMAL(5,2) NOT NULL, ratio DOUBLE NOT NULL, note VARCHAR(50) NULL, seen DATETIME NULL, flag TINYINT(1) NOT NULL, bits BIT(2) NOT NULL, raw VARBINARY(4) NOT NULL, day DATE NULL, t TIME NULL);
+CREATE TABLE k (id INT PRIMARY KEY, email VARCHAR(255) NULL, note VARCHAR(50) NULL);
+CREATE TABLE k2 (email VARCHAR(255) NOT NULL, note VARCHAR(50) NOT NULL);
+CREATE TABLE kt (id INT PRIMARY KEY, body TEXT NULL);
+";
+
+/// Every table name a statement of this step may touch or create.
+const S13A_NAMES: [&str; 22] = [
+    "users", "orders", "d", "k", "k2", "kt", "orders2", "tq", "tq1", "tq2", "tq3", "tq4", "tp0",
+    "tp2", "tp3", "g1", "g16", "g17", "g18", "g19", "g20", "g21",
+];
+
+/// How `statement` (one statement) fails to be refused: on a server it is not
+/// unknown with the reason of this step, or it changes a table for kilit.
+fn refusal_problems(statement: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    for server in [MYSQL_80, MYSQL_84] {
+        match predictions_on(server, S13A_TABLES, statement).last() {
+            Some(Prediction::Unknown { reason }) if reason.starts_with(NOT_ACCEPTED) => {}
+            other => problems.push(format!("{server}: {statement}\n    got {other:?}")),
+        }
+    }
+    let before = Schema::from_sql(S13A_TABLES);
+    let after = Schema::from_sql(&format!("{S13A_TABLES}{statement}"));
+    for name in S13A_NAMES {
+        if before.table(name) != after.table(name) {
+            problems.push(format!("{statement}\n    changed the table {name}"));
+        }
+    }
+    problems
+}
+
+/// Every statement is refused on both servers and leaves every table as it was.
+fn assert_all_refused(statements: &[&str]) {
+    let problems: Vec<String> = statements
+        .iter()
+        .flat_map(|statement| refusal_problems(statement))
+        .collect();
+    assert!(problems.is_empty(), "\n{}", problems.join("\n"));
+}
+
+/// The same for statements made of a pattern.
+fn assert_all_refused_owned(statements: &[String]) {
+    let borrowed: Vec<&str> = statements.iter().map(String::as_str).collect();
+    assert_all_refused(&borrowed);
+}
+
+/// The statement is not refused for the reason of this step, on either server.
+fn assert_not_refused(statements: &[&str]) {
+    let mut problems = Vec::new();
+    for statement in statements {
+        for server in [MYSQL_80, MYSQL_84] {
+            if let Some(Prediction::Unknown { reason }) =
+                predictions_on(server, S13A_TABLES, statement).last()
+                && reason.starts_with(NOT_ACCEPTED)
+            {
+                problems.push(format!("{server}: {statement}\n    refused: {reason}"));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "\n{}", problems.join("\n"));
+}
+
+/// kilit's answer to each statement, one at a time against the hand-test
+/// tables, on both servers: (statement, expected answer).
+fn assert_answers_on_both(statements: &[(&str, &str)]) {
+    let mut problems = Vec::new();
+    for (statement, expected) in statements {
+        for server in [MYSQL_80, MYSQL_84] {
+            let got = statements_on(server, S13A_TABLES, &parse(statement));
+            if got.last().map(String::as_str) != Some(*expected) {
+                problems.push(format!(
+                    "{server}: {statement}\n    expected {expected}, got {got:?}"
+                ));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "\n{}", problems.join("\n"));
+}
+
+fn impacts_on(server: &str, schema: &str, sql: &str) -> Vec<Impact> {
+    let statements = parse(sql);
+    let results = Knowledge::built_in().server(server).unwrap();
+    let findings = check(&statements, &Schema::from_sql(schema), results);
+    impacts(&statements, &findings)
+}
+
+#[test]
+fn a_table_name_in_single_quotes_is_refused_wherever_a_table_goes() {
+    // A table name in single quotes is error 1064 at ALTER TABLE, CREATE INDEX
+    // ON, DROP INDEX ON, CREATE TABLE, REFERENCES, RENAME TO and RENAME TABLE.
+    assert_all_refused(&[
+        "ALTER TABLE 'orders' ADD COLUMN b1 INT NULL",
+        "CREATE INDEX ix_b1 ON 'orders' (amount)",
+        "DROP INDEX ix ON 'orders'",
+        "CREATE TABLE 'tq' (id INT PRIMARY KEY)",
+        "ALTER TABLE orders ADD CONSTRAINT fk_b1 FOREIGN KEY (user_id) REFERENCES 'users' (id)",
+        "ALTER TABLE orders RENAME TO 'orders2'",
+        "ALTER TABLE orders RENAME AS 'orders2'",
+        "RENAME TABLE orders TO 'orders2'",
+        "RENAME TABLE 'orders' TO orders2",
+    ]);
+}
+
+#[test]
+fn a_column_name_in_single_quotes_is_refused_wherever_a_column_goes() {
+    assert_all_refused(&[
+        "ALTER TABLE orders ADD COLUMN 'b2' INT NULL",
+        "ALTER TABLE orders ADD COLUMN b3 INT NULL AFTER 'note'",
+        "ALTER TABLE orders MODIFY 'note' VARCHAR(60) NULL",
+        "ALTER TABLE orders MODIFY COLUMN 'note' VARCHAR(60) NULL",
+        "ALTER TABLE orders CHANGE 'note' memo VARCHAR(60) NULL",
+        "ALTER TABLE orders CHANGE note 'memo' VARCHAR(60) NULL",
+        "ALTER TABLE orders RENAME COLUMN 'note' TO memo",
+        "ALTER TABLE orders RENAME COLUMN note TO 'memo'",
+        "ALTER TABLE orders ALTER COLUMN 'amount' SET DEFAULT 0",
+        "ALTER TABLE orders ALTER 'amount' DROP DEFAULT",
+        "ALTER TABLE orders DROP COLUMN 'note'",
+        "ALTER TABLE orders DROP 'note'",
+        "ALTER TABLE orders ADD CONSTRAINT fk_b2 FOREIGN KEY ('user_id') REFERENCES users (id)",
+        "ALTER TABLE orders ADD CONSTRAINT fk_b3 FOREIGN KEY (user_id) REFERENCES users ('id')",
+        "ALTER TABLE orders ADD COLUMN b4 INT NULL, ADD INDEX ix_b4 (b4), \
+         ALTER COLUMN 'b4' SET DEFAULT 1",
+    ]);
+}
+
+#[test]
+fn an_index_name_in_single_quotes_is_refused_wherever_an_index_goes() {
+    assert_all_refused(&[
+        "ALTER TABLE orders ADD INDEX 'ix_b2' (amount)",
+        "ALTER TABLE orders ADD KEY 'ix_b3' (amount)",
+        "ALTER TABLE orders ADD UNIQUE 'uq_b1' (email)",
+        "ALTER TABLE orders ADD UNIQUE INDEX 'uq_b2' (email)",
+        "ALTER TABLE orders ADD FULLTEXT INDEX 'ft_b1' (note)",
+        "CREATE INDEX 'ix_b4' ON orders (amount)",
+        "ALTER TABLE orders DROP INDEX 'ix'",
+        "DROP INDEX 'ix' ON orders",
+        "ALTER TABLE orders ADD CONSTRAINT fk_b4 FOREIGN KEY 'ix_b6' (user_id) REFERENCES users (id)",
+    ]);
+}
+
+#[test]
+fn a_key_part_in_single_quotes_is_refused_in_every_kind_of_index() {
+    assert_all_refused(&[
+        "ALTER TABLE orders ADD INDEX ix_b7 ('amount')",
+        "ALTER TABLE orders ADD UNIQUE INDEX uq_b3 ('email')",
+        "ALTER TABLE k2 ADD PRIMARY KEY ('email')",
+        "CREATE INDEX ix_b8 ON orders ('amount')",
+    ]);
+}
+
+#[test]
+fn a_constraint_name_in_single_quotes_is_refused_wherever_a_constraint_goes() {
+    // $table->check('amount > 0', 'ck') in a hand-written migration, and the
+    // drops by name.
+    assert_all_refused(&[
+        "ALTER TABLE orders ADD CONSTRAINT 'ck_b1' CHECK (amount > 0)",
+        "ALTER TABLE orders ADD CONSTRAINT 'uq_b4' UNIQUE (email)",
+        "ALTER TABLE orders ADD CONSTRAINT 'fk_b5' FOREIGN KEY (user_id) REFERENCES users (id)",
+        "ALTER TABLE k2 ADD CONSTRAINT 'pk_b1' PRIMARY KEY (email)",
+        "ALTER TABLE orders ADD COLUMN b5 INT NULL CONSTRAINT 'ck_b2' CHECK (b5 > 0)",
+        "ALTER TABLE orders DROP FOREIGN KEY 'fk_x'",
+        "ALTER TABLE orders DROP CONSTRAINT 'fk_x'",
+    ]);
+}
+
+#[test]
+fn a_name_in_single_quotes_inside_create_table_is_refused_and_creates_no_table() {
+    assert_all_refused(&[
+        "CREATE TABLE tq1 (id INT PRIMARY KEY, KEY 'k' (id))",
+        "CREATE TABLE tq2 (id INT PRIMARY KEY, KEY k ('id'))",
+        "CREATE TABLE tq3 (id INT PRIMARY KEY, CONSTRAINT 'c' CHECK (id > 0))",
+        "CREATE TABLE tq4 (id INT PRIMARY KEY, n INT NULL CONSTRAINT 'c' CHECK (n > 0))",
+        "CREATE TABLE g17 (id INT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, \
+         FOREIGN KEY (user_id) REFERENCES 'users' (id))",
+        "CREATE TABLE g18 (id INT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, \
+         FOREIGN KEY ('user_id') REFERENCES users (id))",
+        "CREATE TABLE g19 (id INT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, \
+         FOREIGN KEY (user_id) REFERENCES users ('id'))",
+        "CREATE TABLE g20 (id INT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, \
+         CONSTRAINT 'fk' FOREIGN KEY (user_id) REFERENCES users (id))",
+        "CREATE TABLE g21 (id INT, PRIMARY KEY ('id'))",
+    ]);
+}
+
+#[test]
+fn text_mysql_takes_in_single_quotes_keeps_its_answer() {
+    // COMMENT, COLLATE, CHARACTER SET, DEFAULT, ENUM and SET values are no
+    // names: all accepted by both servers.
+    assert_answers_on_both(&[
+        (
+            "ALTER TABLE orders ADD COLUMN bw1 INT NULL COMMENT 'x'",
+            INSTANT,
+        ),
+        (
+            "ALTER TABLE orders ADD INDEX ix_bw1 (amount) COMMENT 'x'",
+            INPLACE,
+        ),
+        ("ALTER TABLE orders COMMENT 'x'", INPLACE),
+        ("ALTER TABLE orders COMMENT = 'x'", INPLACE),
+        (
+            "ALTER TABLE orders ADD COLUMN bw2 VARCHAR(10) COLLATE 'utf8mb4_bin' NULL",
+            INSTANT,
+        ),
+        (
+            "ALTER TABLE orders ADD COLUMN bw3 VARCHAR(10) CHARACTER SET 'utf8mb4' NULL",
+            INSTANT,
+        ),
+        (
+            "ALTER TABLE orders ADD COLUMN bw4 VARCHAR(10) CHARACTER SET 'utf8mb4' \
+             COLLATE 'utf8mb4_bin' NULL",
+            INSTANT,
+        ),
+        (
+            "ALTER TABLE orders ADD COLUMN bw5 VARCHAR(10) NOT NULL DEFAULT 'x'",
+            INSTANT,
+        ),
+        (
+            "ALTER TABLE orders ADD COLUMN bw6 ENUM('a', 'b') NULL",
+            INSTANT,
+        ),
+        (
+            "ALTER TABLE orders ADD COLUMN bw7 SET('a', 'b') NULL",
+            INSTANT,
+        ),
+        // Laravel's collate 'utf8mb4_bin' and a doubled quote in a comment.
+        (
+            "alter table `orders` add `bw8` varchar(255) collate 'utf8mb4_bin' not null",
+            INSTANT,
+        ),
+        (
+            "alter table `orders` add `bw9` varchar(255) not null comment 'it''s'",
+            INSTANT,
+        ),
+    ]);
+    // Laravel's create table, and a create table with the same text in a
+    // column, an index and the table.
+    assert_answers_on_both(&[
+        (
+            "create table `tw1` (`id` bigint unsigned not null auto_increment primary key, \
+             `name` varchar(255) not null) default character set utf8mb4 \
+             collate 'utf8mb4_unicode_ci'",
+            "not checked",
+        ),
+        (
+            "CREATE TABLE tw2 (id INT PRIMARY KEY, s VARCHAR(10) CHARACTER SET 'utf8mb4' \
+             COLLATE 'utf8mb4_bin' NULL COMMENT 'x', KEY k (s) COMMENT 'x') COMMENT = 'x'",
+            "not checked",
+        ),
+    ]);
+}
+
+#[test]
+fn a_key_part_that_is_not_a_column_a_prefix_or_an_expression_in_parentheses_is_refused() {
+    // Error 1064 on both servers for each.
+    assert_all_refused(&[
+        "ALTER TABLE orders ADD INDEX c1 (orders.amount)",
+        "ALTER TABLE orders ADD INDEX c2 (1)",
+        "ALTER TABLE orders ADD INDEX c3 (-amount)",
+        "ALTER TABLE orders ADD INDEX c4 (amount IS NULL)",
+        "ALTER TABLE orders ADD INDEX c5 (amount + 0)",
+        "ALTER TABLE orders ADD INDEX c6 (note COLLATE utf8mb4_bin)",
+        "ALTER TABLE orders ADD INDEX c7 (note->'$.a')",
+        "ALTER TABLE orders ADD INDEX c8 (CAST(note AS CHAR(5)))",
+        "ALTER TABLE orders ADD INDEX c9 (`orders`.`amount`)",
+        "ALTER TABLE k ADD INDEX k22 (id + 1)",
+    ]);
+}
+
+#[test]
+fn a_prefix_length_of_zero_or_above_2147483647_is_refused_in_every_kind_of_index() {
+    // 0 is error 1391; 2147483648 and more (4294967295, 4294967296, 25 digits,
+    // 2147483648 padded with zeros) are error 1064. 2147483647 is not refused.
+    assert_all_refused(&[
+        "ALTER TABLE k ADD INDEX p0 (note(0))",
+        "ALTER TABLE k ADD INDEX p3 (note(2147483648))",
+        "ALTER TABLE k ADD INDEX p4 (note(4294967295))",
+        "ALTER TABLE k ADD INDEX k21 (note(4294967296))",
+        "ALTER TABLE k ADD INDEX p7 (note(1000000000000000000000000))",
+        "ALTER TABLE k ADD INDEX p10 (note(0000000000000002147483648))",
+        "ALTER TABLE k ADD INDEX p11 (note(00))",
+        "ALTER TABLE k ADD INDEX p15 (note(18446744073709551615))",
+        "ALTER TABLE k ADD INDEX p16 (note(18446744073709551616))",
+        "ALTER TABLE kt ADD INDEX q0 (body(0))",
+        "ALTER TABLE kt ADD INDEX q4 (body(2147483648))",
+        "ALTER TABLE kt ADD INDEX q5 (body(4294967295))",
+        "ALTER TABLE k ADD UNIQUE INDEX pu0 (note(0))",
+        "ALTER TABLE k ADD UNIQUE INDEX pu2 (note(2147483648))",
+        "ALTER TABLE k ADD UNIQUE INDEX pu3 (note(4294967296))",
+        "ALTER TABLE k2 ADD PRIMARY KEY (note(0))",
+        "ALTER TABLE k2 ADD PRIMARY KEY (note(2147483648))",
+        "ALTER TABLE k2 ADD PRIMARY KEY (note(4294967296))",
+        "CREATE INDEX pc0 ON k (note(0))",
+        "CREATE INDEX pc2 ON k (note(2147483648))",
+        "CREATE INDEX pc3 ON k (note(4294967296))",
+        "ALTER TABLE orders ADD FULLTEXT INDEX pf0 (note(0))",
+        "CREATE TABLE tp0 (id INT PRIMARY KEY, note VARCHAR(50) NULL, KEY k (note(0)))",
+        "CREATE TABLE tp2 (id INT PRIMARY KEY, note VARCHAR(50) NULL, KEY k (note(2147483648)))",
+        "CREATE TABLE tp3 (id INT PRIMARY KEY, note VARCHAR(50) NULL, KEY k (note(4294967296)))",
+    ]);
+}
+
+#[test]
+fn key_parts_mysql_accepts_are_not_refused() {
+    // Accepted twins: an expression in its own parentheses, prefixes of 1, of
+    // 2147483647 (MySQL then fails for another reason, which kilit does not
+    // claim to know) and with leading zeros, a descending prefix, a prefix in
+    // capitals, with a space and in backticks.
+    assert_not_refused(&[
+        "ALTER TABLE orders ADD INDEX c11 ((amount + 0))",
+        "ALTER TABLE orders ADD INDEX c12 ((-amount))",
+        "ALTER TABLE orders ADD INDEX c13 ((amount IS NULL))",
+        "ALTER TABLE orders ADD INDEX c14 ((note COLLATE utf8mb4_bin))",
+        "ALTER TABLE orders ADD INDEX c15 ((CAST(note AS CHAR(5))))",
+        "ALTER TABLE orders ADD INDEX c16 ((1))",
+        "ALTER TABLE k ADD INDEX p1 (note(1))",
+        "ALTER TABLE k ADD INDEX p2 (note(2147483647))",
+        "ALTER TABLE k ADD INDEX p9 (note(0000000000000002147483647))",
+        "CREATE TABLE tp1 (id INT PRIMARY KEY, note VARCHAR(50) NULL, KEY k (note(2147483647)))",
+    ]);
+    assert_answers_on_both(&[
+        ("ALTER TABLE k ADD INDEX p6 (note(0000000000010))", INPLACE),
+        (
+            "ALTER TABLE k ADD INDEX p8 (note(0000000000000000000000010))",
+            INPLACE,
+        ),
+        ("ALTER TABLE k ADD INDEX w1 (note(10) DESC)", INPLACE),
+        ("ALTER TABLE k ADD INDEX w2 (NOTE(10))", INPLACE),
+        ("ALTER TABLE k ADD INDEX w3 (note (10))", INPLACE),
+        ("ALTER TABLE k ADD INDEX w4 (`note`(10))", INPLACE),
+        (
+            "ALTER TABLE k ADD INDEX w6 (note(10) ASC, email(20) DESC)",
+            INPLACE,
+        ),
+        // The functional index kilit measured: LOWER() of a VARCHAR column.
+        (
+            "ALTER TABLE k ADD INDEX w5 ((lower(email)))",
+            "INPLACE, no rebuild, writes wait",
+        ),
+        (
+            "alter table `k` add index `w7`((lower(`email`)))",
+            "INPLACE, no rebuild, writes wait",
+        ),
+    ]);
+}
+
+#[test]
+fn on_update_with_anything_but_the_current_timestamp_functions_is_refused() {
+    // Error 1064 on both servers for each, on a DATETIME column.
+    let forms = [
+        "CURRENT_DATE",
+        "CURDATE()",
+        "UTC_TIMESTAMP()",
+        "UTC_TIMESTAMP",
+        "SYSDATE()",
+        "(NOW())",
+        "NULL",
+        "1",
+        "CURRENT_TIMESTAMP + 0",
+        "NOW",
+        "'2020-01-01 00:00:00'",
+        "(CURRENT_TIMESTAMP)",
+    ];
+    let statements: Vec<String> = forms
+        .iter()
+        .map(|form| format!("ALTER TABLE d ADD COLUMN u3 DATETIME NULL ON UPDATE {form}"))
+        .collect();
+    assert_all_refused_owned(&statements);
+    // The same on a DATE column, which the nine forms of step 5b measured.
+    assert_all_refused(&["ALTER TABLE d ADD COLUMN u2 DATE NULL ON UPDATE CURRENT_DATE"]);
+}
+
+#[test]
+fn a_current_timestamp_function_on_another_column_type_is_refused() {
+    // DEFAULT is error 1067, ON UPDATE error 1294, for each function on DATE,
+    // TIME, INT, VARCHAR and TEXT. YEAR is measured too; kilit leaves it as it
+    // was (see below).
+    let mut statements = Vec::new();
+    for column in ["DATE", "TIME", "INT", "VARCHAR(20)", "TEXT"] {
+        for function in ["CURRENT_TIMESTAMP", "NOW()", "LOCALTIME", "LOCALTIMESTAMP"] {
+            for clause in ["DEFAULT", "ON UPDATE"] {
+                statements.push(format!(
+                    "ALTER TABLE d ADD COLUMN e1 {column} NULL {clause} {function}"
+                ));
+            }
+        }
+    }
+    assert_eq!(statements.len(), 40);
+    assert_all_refused_owned(&statements);
+}
+
+#[test]
+fn a_current_timestamp_function_of_another_precision_than_its_column_is_refused() {
+    // Measured pairs of (column, function) that MySQL rejects: the precision
+    // of a bare name or () is 0; 7 is above the maximum of 6.
+    let pairs = [
+        ("DATETIME(3)", "CURRENT_TIMESTAMP()"),
+        ("DATETIME(3)", "NOW()"),
+        ("DATETIME(3)", "LOCALTIME()"),
+        ("DATETIME(3)", "LOCALTIMESTAMP()"),
+        ("DATETIME", "CURRENT_TIMESTAMP(3)"),
+        ("DATETIME", "NOW(3)"),
+        ("DATETIME", "LOCALTIME(3)"),
+        ("DATETIME", "LOCALTIMESTAMP(3)"),
+        ("DATETIME(3)", "CURRENT_TIMESTAMP(6)"),
+        ("DATETIME(3)", "NOW(6)"),
+        ("DATETIME(6)", "CURRENT_TIMESTAMP(3)"),
+        ("DATETIME(6)", "LOCALTIMESTAMP(3)"),
+        ("DATETIME(6)", "CURRENT_TIMESTAMP"),
+        ("DATETIME(6)", "NOW()"),
+        ("DATETIME(6)", "LOCALTIME"),
+        ("DATETIME(6)", "LOCALTIMESTAMP"),
+        ("DATETIME(6)", "CURRENT_TIMESTAMP(7)"),
+        ("DATETIME(6)", "NOW(7)"),
+        ("TIMESTAMP(3)", "CURRENT_TIMESTAMP()"),
+        ("TIMESTAMP(3)", "NOW()"),
+        ("TIMESTAMP", "CURRENT_TIMESTAMP(3)"),
+        ("TIMESTAMP", "LOCALTIMESTAMP(3)"),
+        ("TIMESTAMP(3)", "CURRENT_TIMESTAMP(6)"),
+        ("TIMESTAMP(6)", "CURRENT_TIMESTAMP(3)"),
+        ("TIMESTAMP(6)", "CURRENT_TIMESTAMP"),
+        ("TIMESTAMP(6)", "NOW()"),
+        ("TIMESTAMP(6)", "CURRENT_TIMESTAMP(7)"),
+        ("TIMESTAMP(6)", "LOCALTIME(7)"),
+    ];
+    let mut statements = Vec::new();
+    for (column, function) in pairs {
+        for clause in ["DEFAULT", "ON UPDATE"] {
+            statements.push(format!(
+                "ALTER TABLE d ADD COLUMN e1 {column} NULL {clause} {function}"
+            ));
+        }
+    }
+    // Both clauses in one definition, one of them not matching.
+    statements.extend([
+        "ALTER TABLE d ADD COLUMN e900 DATETIME(6) NULL DEFAULT CURRENT_TIMESTAMP(6) \
+         ON UPDATE CURRENT_TIMESTAMP"
+            .to_owned(),
+        "ALTER TABLE d ADD COLUMN e901 DATETIME(6) NULL DEFAULT CURRENT_TIMESTAMP \
+         ON UPDATE CURRENT_TIMESTAMP(6)"
+            .to_owned(),
+        "ALTER TABLE d ADD COLUMN e902 TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) \
+         ON UPDATE CURRENT_TIMESTAMP(6)"
+            .to_owned(),
+        // The servers' own wording for a DATETIME(6) column, as in the nine forms.
+        "ALTER TABLE d ADD COLUMN c24 DATETIME(6) NULL DEFAULT CURRENT_TIMESTAMP".to_owned(),
+        "ALTER TABLE d ADD COLUMN c25 DATETIME NULL DEFAULT CURRENT_TIMESTAMP(7)".to_owned(),
+    ]);
+    assert_all_refused_owned(&statements);
+}
+
+#[test]
+fn a_current_timestamp_function_in_modify_and_change_follows_the_same_rule() {
+    assert_all_refused(&[
+        "ALTER TABLE d MODIFY seen DATETIME(6) NULL DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE d MODIFY seen DATE NULL ON UPDATE CURRENT_TIMESTAMP",
+        "ALTER TABLE d MODIFY day DATE NULL DEFAULT NOW()",
+        "ALTER TABLE d CHANGE seen seen2 DATETIME(3) NULL DEFAULT CURRENT_TIMESTAMP(6)",
+        "ALTER TABLE d CHANGE seen seen2 DATE NULL ON UPDATE LOCALTIMESTAMP",
+        "ALTER TABLE d CHANGE day day DATE NULL DEFAULT CURRENT_TIMESTAMP",
+    ]);
+}
+
+#[test]
+fn a_current_timestamp_function_that_matches_its_column_keeps_the_instant_answer() {
+    // Accepted by both servers (e49 to e256, u15 to u23 of the hand tests):
+    // no precision, () and (0) are the same; 06 is 6; TIMESTAMP too.
+    let accepted = [
+        "DATETIME NULL DEFAULT CURRENT_TIMESTAMP()",
+        "DATETIME NULL ON UPDATE CURRENT_TIMESTAMP()",
+        "DATETIME NULL DEFAULT NOW()",
+        "DATETIME NULL DEFAULT LOCALTIME()",
+        "DATETIME NULL DEFAULT LOCALTIMESTAMP()",
+        "DATETIME(0) NULL DEFAULT CURRENT_TIMESTAMP",
+        "DATETIME(0) NULL ON UPDATE NOW()",
+        "DATETIME NULL DEFAULT CURRENT_TIMESTAMP(0)",
+        "DATETIME NULL ON UPDATE LOCALTIME(0)",
+        "DATETIME(3) NULL DEFAULT CURRENT_TIMESTAMP(3)",
+        "DATETIME(3) NULL ON UPDATE NOW(3)",
+        "DATETIME(6) NULL DEFAULT NOW(6)",
+        "DATETIME(6) NULL ON UPDATE LOCALTIMESTAMP(6)",
+        "DATETIME(06) NULL DEFAULT CURRENT_TIMESTAMP(6)",
+        "DATETIME(6) NULL DEFAULT CURRENT_TIMESTAMP(06)",
+        "DATETIME NULL ON UPDATE NOW()",
+        "DATETIME NULL ON UPDATE LOCALTIME",
+        "DATETIME(6) NULL ON UPDATE now(6)",
+        "TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP()",
+        "TIMESTAMP NULL ON UPDATE CURRENT_TIMESTAMP",
+        "TIMESTAMP(0) NULL DEFAULT NOW()",
+        "TIMESTAMP(3) NULL DEFAULT CURRENT_TIMESTAMP(3)",
+        "TIMESTAMP(6) NULL ON UPDATE LOCALTIME(6)",
+        "TIMESTAMP(06) NULL DEFAULT CURRENT_TIMESTAMP(6)",
+        "TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)",
+        // $table->timestamp('t', 3)->useCurrent()->useCurrentOnUpdate()
+        "TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) on update CURRENT_TIMESTAMP(3)",
+    ];
+    let expected: Vec<(String, &str)> = accepted
+        .iter()
+        .map(|column| (format!("ALTER TABLE d ADD COLUMN e1 {column}"), INSTANT))
+        .collect();
+    let borrowed: Vec<(&str, &str)> = expected
+        .iter()
+        .map(|(statement, answer)| (statement.as_str(), *answer))
+        .collect();
+    assert_answers_on_both(&borrowed);
+}
+
+#[test]
+fn a_year_column_with_a_current_timestamp_function_is_left_as_it_was() {
+    // MySQL gives 1067 and 1294; step 13a does not take YEAR (a decision), so
+    // the answer stays the add-column one and is not the refusal.
+    let statements = [
+        "ALTER TABLE d ADD COLUMN e17 YEAR NULL DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE d ADD COLUMN e18 YEAR NULL ON UPDATE CURRENT_TIMESTAMP",
+        "ALTER TABLE d ADD COLUMN e19 YEAR NULL DEFAULT NOW()",
+    ];
+    assert_not_refused(&statements);
+    assert_answers_on_both(&[
+        (statements[0], INSTANT),
+        (statements[1], INSTANT),
+        (statements[2], INSTANT),
+    ]);
+}
+
+#[test]
+fn modify_and_change_with_a_matching_current_timestamp_function_are_not_refused() {
+    assert_not_refused(&[
+        "ALTER TABLE d MODIFY seen DATETIME(6) NULL DEFAULT CURRENT_TIMESTAMP(6) \
+         ON UPDATE CURRENT_TIMESTAMP(6)",
+        "ALTER TABLE d CHANGE seen seen DATETIME NULL DEFAULT CURRENT_TIMESTAMP \
+         ON UPDATE CURRENT_TIMESTAMP",
+    ]);
+}
+
+#[test]
+fn set_default_with_a_date_or_time_literal_in_parentheses_is_refused() {
+    // Error 1067 for each, on a DATE, a TIME, a DATETIME and an INT column.
+    let mut statements = Vec::new();
+    for column in ["day", "t", "seen", "amount"] {
+        for literal in [
+            "(DATE '2020-01-01')",
+            "(TIME '10:00:00')",
+            "(TIMESTAMP '2020-01-01 00:00:00')",
+            "((DATE '2020-01-01'))",
+        ] {
+            statements.push(format!(
+                "ALTER TABLE d ALTER COLUMN {column} SET DEFAULT {literal}"
+            ));
+        }
+    }
+    assert_eq!(statements.len(), 16);
+    assert_all_refused_owned(&statements);
+}
+
+#[test]
+fn the_same_literal_in_a_column_definition_and_other_set_defaults_keep_their_answers() {
+    // MODIFY, CHANGE and ADD COLUMN with DEFAULT (DATE '...') work on both
+    // servers, and so do the SET DEFAULTs below; kilit has measured none of
+    // them, so each stays unknown for that reason and is not the refusal.
+    let statements = [
+        "ALTER TABLE d MODIFY day DATE NULL DEFAULT (DATE '2020-01-01')",
+        "ALTER TABLE d CHANGE day day DATE NULL DEFAULT (DATE '2020-01-02')",
+        "ALTER TABLE d ADD COLUMN f1 DATE NULL DEFAULT (DATE '2020-01-01')",
+        "ALTER TABLE d ALTER COLUMN day SET DEFAULT (DATE '2020-01-01' + INTERVAL 1 DAY)",
+        "ALTER TABLE d ALTER COLUMN day SET DEFAULT (CURRENT_DATE)",
+        "ALTER TABLE d ALTER COLUMN day SET DEFAULT ('2020-01-01')",
+    ];
+    assert_not_refused(&statements);
+    for statement in statements {
+        for server in [MYSQL_80, MYSQL_84] {
+            let reason = unknown_reason_on(server, S13A_TABLES, statement);
+            assert!(
+                reason.contains(NOTHING_MEASURED),
+                "{server}: {statement}: {reason}"
+            );
+        }
+    }
+    assert_answers_on_both(&[(
+        "CREATE TABLE tf1 (id INT PRIMARY KEY, day DATE NULL DEFAULT (DATE '2020-01-01'), \
+         t TIME NULL DEFAULT (TIME '10:00:00'), \
+         s DATETIME NULL DEFAULT (TIMESTAMP '2020-01-01 00:00:00'))",
+        "not checked",
+    )]);
+}
+
+#[test]
+fn create_table_is_refused_for_every_default_and_key_part_alter_table_refuses() {
+    assert_all_refused(&[
+        // Defaults without parentheses (step 5b).
+        "CREATE TABLE g1 (id INT PRIMARY KEY, day DATE NULL DEFAULT CURRENT_DATE)",
+        "CREATE TABLE g1 (id INT PRIMARY KEY, n INT NULL DEFAULT 1+1)",
+        "CREATE TABLE g1 (id INT PRIMARY KEY, u CHAR(36) NULL DEFAULT UUID())",
+        // Key parts without parentheses, and a prefix of 0.
+        "CREATE TABLE g1 (id INT PRIMARY KEY, n VARCHAR(20) NULL, KEY (lower(n)))",
+        "CREATE TABLE g1 (id INT PRIMARY KEY, KEY (id + 1))",
+        "CREATE TABLE g1 (id INT PRIMARY KEY, n VARCHAR(20) NULL, UNIQUE KEY (lower(n)))",
+        "CREATE TABLE g1 (id INT, PRIMARY KEY (id + 1))",
+        "CREATE TABLE g1 (id INT PRIMARY KEY, KEY (g1.id))",
+        "CREATE TABLE g1 (id INT PRIMARY KEY, n VARCHAR(20) NULL, KEY (n(0)))",
+        "CREATE TABLE g1 (id INT PRIMARY KEY, n VARCHAR(20) NULL, KEY (n(4294967296)))",
+        // ON UPDATE, CURRENT_TIMESTAMP on another type or precision.
+        "CREATE TABLE g1 (id INT PRIMARY KEY, day DATE NULL ON UPDATE CURRENT_DATE)",
+        "CREATE TABLE g1 (id INT PRIMARY KEY, day DATE NULL DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE g1 (id INT PRIMARY KEY, s DATETIME(6) NULL DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE g1 (id INT PRIMARY KEY, day DATE NULL ON UPDATE CURRENT_TIMESTAMP)",
+        "CREATE TABLE g1 (id INT PRIMARY KEY, s DATETIME(3) NULL ON UPDATE CURRENT_TIMESTAMP(6))",
+        "CREATE TABLE g1 (id INT PRIMARY KEY, s DATETIME NULL ON UPDATE UTC_TIMESTAMP())",
+        "CREATE TABLE g1 (id INT PRIMARY KEY, s DATETIME NULL DEFAULT CURRENT_TIMESTAMP(7))",
+        // NO INHERIT.
+        "CREATE TABLE g1 (id INT PRIMARY KEY, n INT NULL CHECK (n > 0) NO INHERIT)",
+        "CREATE TABLE g1 (id INT PRIMARY KEY, n INT NULL, CONSTRAINT c30 CHECK (n > 0) NO INHERIT)",
+    ]);
+}
+
+#[test]
+fn create_table_with_a_double_quoted_name_is_refused_for_ansi_quotes_not_for_the_servers() {
+    // Error 1064 without ANSI_QUOTES. The reason is the ANSI_QUOTES one: with
+    // that sql_mode the same text is accepted.
+    for statement in [
+        "CREATE TABLE \"g11\" (id INT PRIMARY KEY)",
+        "CREATE TABLE g1 (id INT PRIMARY KEY, KEY \"k\" (id))",
+        "CREATE TABLE g1 (id INT PRIMARY KEY, KEY k (\"id\"))",
+        "CREATE TABLE g1 (id INT PRIMARY KEY, CONSTRAINT \"c\" CHECK (id > 0))",
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            let reason = unknown_reason_on(server, S13A_TABLES, statement);
+            assert!(
+                reason.contains("ANSI_QUOTES"),
+                "{server}: {statement}: {reason}"
+            );
+            assert!(
+                !reason.starts_with(NOT_ACCEPTED),
+                "{server}: {statement}: {reason}"
+            );
+        }
+        let after = Schema::from_sql(&format!("{S13A_TABLES}{statement}"));
+        assert!(
+            matches!(after.table("g1"), TableState::Missing),
+            "{statement}"
+        );
+    }
+}
+
+#[test]
+fn laravel_s_create_table_shapes_are_not_refused() {
+    // Schema::create with timestamps, useCurrent, useCurrentOnUpdate, a
+    // default expression, a collation and a comment, unique and foreign keys.
+    assert_answers_on_both(&[
+        (
+            "create table `gl1` (`id` bigint unsigned not null auto_increment primary key, \
+             `user_id` bigint unsigned not null, `title` varchar(255) not null, `body` text null, \
+             `created_at` timestamp null, `updated_at` timestamp null) default character set \
+             utf8mb4 collate 'utf8mb4_unicode_ci'",
+            "not checked",
+        ),
+        (
+            "create table `gl2` (`id` bigint unsigned not null auto_increment primary key, \
+             `t` timestamp(3) not null default CURRENT_TIMESTAMP(3) on update CURRENT_TIMESTAMP(3), \
+             `d` date not null default (CURDATE()), \
+             `s` varchar(255) collate 'utf8mb4_bin' not null comment 'x', \
+             `u` timestamp not null default CURRENT_TIMESTAMP, \
+             `v` datetime(6) null default CURRENT_TIMESTAMP(6)) default character set utf8mb4 \
+             collate 'utf8mb4_unicode_ci' engine = InnoDB",
+            "not checked",
+        ),
+        (
+            "create table `gl3` (`id` bigint unsigned not null auto_increment primary key, \
+             `email` varchar(255) not null, `n` json null, `price` decimal(8, 2) not null \
+             default '0', `status` enum('a', 'b') not null default 'a', \
+             unique key `gl3_email_unique` (`email`)) default character set utf8mb4 \
+             collate 'utf8mb4_unicode_ci'",
+            "not checked",
+        ),
+        (
+            "create table `gl4` (`id` bigint unsigned not null auto_increment primary key, \
+             `user_id` bigint unsigned not null, index `gl4_user_id_index`(`user_id`), \
+             constraint `gl4_user_id_foreign` foreign key (`user_id`) references `users` (`id`)) \
+             default character set utf8mb4 collate 'utf8mb4_unicode_ci'",
+            "not checked",
+        ),
+    ]);
+}
+
+#[test]
+fn a_table_dump_with_mysqldump_forms_stays_known() {
+    // The forms mysqldump and SHOW CREATE TABLE write: backticks, capitals,
+    // _utf8mb4'..' strings, a doubled quote in a comment, ((..)) defaults,
+    // expression keys, descending prefixes and automatic names. None of them
+    // may be refused as a table, or the table would be gone.
+    let dump = "CREATE TABLE `things` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `kind` varchar(20) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT _utf8mb4'new',
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp(3) NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  `note` varchar(50) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT 'it''s',
+  `day` date DEFAULT (curdate()),
+  `n` int DEFAULT ((1 + 1)),
+  PRIMARY KEY (`id`),
+  KEY `things_kind_index` (`kind`),
+  KEY `fn` ((lower(`kind`))),
+  KEY `pfx` (`note`(10) DESC),
+  CONSTRAINT `things_chk_1` CHECK ((`n` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='it''s a table';
+";
+    let schema = Schema::from_sql(dump);
+    assert!(matches!(schema.table("things"), TableState::Known(_)));
+    for server in [MYSQL_80, MYSQL_84] {
+        let predictions =
+            predictions_on(server, dump, "ALTER TABLE things ADD COLUMN zz INT NULL;");
+        assert_eq!(predictions.len(), 1);
+        assert!(!mentions_fulltext(&predictions[0]), "{server}");
+    }
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(
+            statements_on(
+                server,
+                dump,
+                &parse("ALTER TABLE things ADD COLUMN zz INT NULL;")
+            ),
+            [INSTANT],
+            "{server}"
+        );
+    }
+}
+
+#[test]
+fn constraint_and_index_drops_with_words_mysql_rejects_are_refused() {
+    // Error 1064 on both servers: IF EXISTS after DROP CONSTRAINT, CASCADE and
+    // RESTRICT after a drop (but not after DROP COLUMN), NO INHERIT.
+    assert_all_refused(&[
+        "ALTER TABLE orders DROP CONSTRAINT IF EXISTS ck_h",
+        "ALTER TABLE orders DROP CONSTRAINT ck_h CASCADE",
+        "ALTER TABLE orders DROP CONSTRAINT ck_h RESTRICT",
+        "ALTER TABLE orders DROP CONSTRAINT fk_x CASCADE",
+        "ALTER TABLE orders ADD CONSTRAINT ck_h2 CHECK (amount > 0) NO INHERIT",
+        "ALTER TABLE orders ADD COLUMN h1 INT NULL CHECK (h1 > 0) NO INHERIT",
+        "ALTER TABLE orders DROP FOREIGN KEY fk_x CASCADE",
+        "ALTER TABLE orders DROP FOREIGN KEY fk_x RESTRICT",
+        "ALTER TABLE orders DROP INDEX ix CASCADE",
+        "ALTER TABLE orders DROP INDEX ix RESTRICT",
+        "ALTER TABLE orders DROP KEY ix CASCADE",
+        "ALTER TABLE k DROP PRIMARY KEY CASCADE",
+        "ALTER TABLE k DROP PRIMARY KEY RESTRICT",
+    ]);
+}
+
+#[test]
+fn dropping_an_index_with_a_trailing_cascade_in_its_own_statement_is_refused() {
+    // DROP INDEX ix ON orders CASCADE is error 1064 on both servers too
+    // (hand test, not in the list of rules).
+    assert_all_refused(&["DROP INDEX ix ON orders CASCADE"]);
+}
+
+#[test]
+fn drop_column_with_cascade_or_restrict_keeps_the_measured_drop_column_answer() {
+    // MySQL accepts the word and ignores it (SHOW CREATE TABLE: the column is
+    // gone).
+    assert_answers_on_both(&[
+        ("ALTER TABLE orders DROP COLUMN note CASCADE", INSTANT),
+        ("ALTER TABLE orders DROP COLUMN email RESTRICT", INSTANT),
+        ("ALTER TABLE orders DROP seen CASCADE", INSTANT),
+    ]);
+}
+
+#[test]
+fn a_refused_alter_leaves_the_table_known_so_the_next_add_column_has_no_fulltext_note() {
+    // A table kilit lost carries the note about a FULLTEXT index it cannot
+    // see; a table it still knows does not. After a refusal the table is as
+    // before, whatever family the refused statement belongs to.
+    for refused in [
+        "ALTER TABLE orders ADD COLUMN 'coupon' INT NULL",
+        "ALTER TABLE orders ADD INDEX ix_amount ('amount')",
+        "ALTER TABLE orders ADD INDEX ix_b4 (note(4294967296))",
+        "ALTER TABLE orders ADD CONSTRAINT 'ck' CHECK (amount > 0)",
+        "ALTER TABLE orders ADD COLUMN u2 DATETIME NULL ON UPDATE CURRENT_DATE",
+        "ALTER TABLE orders ADD COLUMN c24 DATETIME(6) NULL DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE orders ADD COLUMN q INT NULL CHECK (q > 0) NO INHERIT",
+        "ALTER TABLE orders DROP CONSTRAINT IF EXISTS ck_h",
+        "ALTER TABLE orders DROP CONSTRAINT ck_h CASCADE",
+        "ALTER TABLE orders DROP FOREIGN KEY fk_x CASCADE",
+        "ALTER TABLE orders DROP INDEX ix CASCADE",
+    ] {
+        let sql = format!("{refused};\nALTER TABLE orders ADD COLUMN zz INT NULL;");
+        for server in [MYSQL_80, MYSQL_84] {
+            let predictions = predictions_on(server, S13A_TABLES, &sql);
+            assert_eq!(predictions.len(), 2, "{refused}");
+            assert!(
+                matches!(&predictions[0], Prediction::Unknown { reason } if reason.starts_with(NOT_ACCEPTED)),
+                "{server}: {refused}: {:?}",
+                predictions[0]
+            );
+            assert!(!mentions_fulltext(&predictions[1]), "{server}: {refused}");
+            assert_eq!(
+                statements_on(server, S13A_TABLES, &parse(&sql))[1],
+                INSTANT,
+                "{server}: {refused}"
+            );
+        }
+        assert!(
+            matches!(
+                Schema::from_sql(&format!("{S13A_TABLES}{refused};")).table("orders"),
+                TableState::Known(_)
+            ),
+            "{refused}"
+        );
+    }
+}
+
+#[test]
+fn a_refused_create_table_creates_no_table_for_the_statements_after_it() {
+    // MySQL never creates the table, so the next ALTER is an ALTER of a table
+    // kilit does not know: no "created earlier" answer, not a new table.
+    let accepted = "CREATE TABLE tq (id INT PRIMARY KEY);\nALTER TABLE tq ADD COLUMN c INT NULL;";
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(
+            impacts_on(server, S13A_TABLES, accepted),
+            [Impact::NotChecked, Impact::NewTable],
+            "{server}: control"
+        );
+    }
+    for refused in [
+        "CREATE TABLE tq (id INT PRIMARY KEY, KEY k (id + 1))",
+        "CREATE TABLE tq (id INT PRIMARY KEY, day DATE NULL DEFAULT CURRENT_DATE)",
+        "CREATE TABLE tq (id INT PRIMARY KEY, s DATETIME(6) NULL DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE tq (id INT PRIMARY KEY, n INT NULL CHECK (n > 0) NO INHERIT)",
+        "CREATE TABLE 'tq' (id INT PRIMARY KEY)",
+        "CREATE TABLE tq (id INT PRIMARY KEY, KEY 'k' (id))",
+        "CREATE TABLE \"tq\" (id INT PRIMARY KEY)",
+    ] {
+        let sql = format!("{refused};\nALTER TABLE tq ADD COLUMN c INT NULL;");
+        for server in [MYSQL_80, MYSQL_84] {
+            assert_eq!(
+                impacts_on(server, S13A_TABLES, &sql),
+                [Impact::Unknown, Impact::WritesContinue],
+                "{server}: {refused}"
+            );
+            assert!(
+                matches!(Schema::from_sql(&sql).table("tq"), TableState::Missing),
+                "{refused}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_refused_statement_is_unknown_in_the_impact_on_both_servers() {
+    for server in [MYSQL_80, MYSQL_84] {
+        for refused in [
+            "ALTER TABLE orders ADD CONSTRAINT 'ck' CHECK (amount > 0)",
+            "CREATE TABLE tq (id INT PRIMARY KEY, day DATE NULL DEFAULT CURRENT_DATE)",
+            "ALTER TABLE d ALTER COLUMN day SET DEFAULT (DATE '2020-01-01')",
+        ] {
+            assert_eq!(
+                impacts_on(server, S13A_TABLES, refused),
+                [Impact::Unknown],
+                "{server}: {refused}"
+            );
+        }
+    }
+}
+
+// Step 13a, review findings: key parts that look like a function call but are
+// a column name with a prefix length, or a column name that looks like a
+// number. Hand tests on MySQL 8.0.46 and 8.4.13 (same result on both):
+// manual/step13a/review/h1.sql, h2.sql and h3.sql.
+
+/// The table of the review hand tests: the names are words MySQL reads as a
+/// function in some places, or as a number.
+const KW_TABLE: &str = "\
+CREATE TABLE kw (id INT PRIMARY KEY, ceil VARCHAR(20), floor VARCHAR(20), substr VARCHAR(20), trim VARCHAR(20), `2e` VARCHAR(20), `1e` VARCHAR(20));
+";
+
+/// The statement, one at a time against `kw`, is not refused on either server
+/// and gets the measured add-index answer (INPLACE, no rebuild, writes
+/// continue); the unique form has the same verdict.
+fn assert_accepted_as_an_index(statements: &[&str]) {
+    let mut problems = Vec::new();
+    for statement in statements {
+        for server in [MYSQL_80, MYSQL_84] {
+            let got = statements_on(server, KW_TABLE, &parse(statement));
+            if got.last().map(String::as_str) != Some(INPLACE) {
+                problems.push(format!(
+                    "{server}: {statement}\n    expected {INPLACE}, got {got:?}"
+                ));
+            }
+            if let Some(Prediction::Unknown { reason }) =
+                predictions_on(server, KW_TABLE, statement).last()
+                && reason.contains("do not accept")
+            {
+                problems.push(format!("{server}: {statement}\n    refused: {reason}"));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "\n{}", problems.join("\n"));
+}
+
+#[test]
+fn a_column_named_ceil_or_floor_with_a_prefix_length_is_an_index_mysql_accepts() {
+    // ALTER TABLE kw ADD INDEX (ceil(5)) and (floor(5)): accepted; SHOW CREATE
+    // TABLE shows KEY ceil (ceil(5)).
+    assert_accepted_as_an_index(&[
+        "ALTER TABLE kw ADD INDEX (ceil(5))",
+        "ALTER TABLE kw ADD INDEX (floor(5))",
+        "ALTER TABLE kw ADD INDEX (ceil ( 5 ))",
+        "ALTER TABLE kw ADD UNIQUE (floor(5))",
+        "CREATE INDEX i7 ON kw (ceil(4))",
+    ]);
+}
+
+#[test]
+fn a_column_named_substr_or_trim_with_a_space_before_the_prefix_length_is_accepted() {
+    // ALTER TABLE kw ADD INDEX (substr (5)) and (trim (5)): accepted.
+    assert_accepted_as_an_index(&[
+        "ALTER TABLE kw ADD INDEX (substr (5))",
+        "ALTER TABLE kw ADD INDEX (trim (5))",
+    ]);
+}
+
+#[test]
+fn a_create_table_with_prefix_keys_on_ceil_floor_and_trim_is_not_refused() {
+    // CREATE TABLE t3 (id INT PRIMARY KEY, ceil VARCHAR(20), floor VARCHAR(20),
+    // trim VARCHAR(20), KEY (ceil(5)), KEY (floor(3)), KEY (trim (4))): accepted.
+    let create = "CREATE TABLE t3 (id INT PRIMARY KEY, ceil VARCHAR(20), floor VARCHAR(20), \
+                  trim VARCHAR(20), KEY (ceil(5)), KEY (floor(3)), KEY (trim (4)))";
+    let sql = format!("{create};\nALTER TABLE t3 ADD COLUMN c INT NULL;");
+    for server in [MYSQL_80, MYSQL_84] {
+        match predictions_on(server, KW_TABLE, create).last() {
+            Some(Prediction::Unknown { reason }) if reason.contains("do not accept") => {
+                panic!("{server}: refused: {reason}")
+            }
+            _ => {}
+        }
+        assert_eq!(
+            impacts_on(server, KW_TABLE, &sql),
+            [Impact::NotChecked, Impact::NewTable],
+            "{server}"
+        );
+    }
+    assert!(matches!(
+        Schema::from_sql(&sql).table("t3"),
+        TableState::Known(_)
+    ));
+}
+
+#[test]
+fn a_table_with_a_ceil_prefix_key_is_created_earlier_in_the_input() {
+    // The shape Laravel writes for $table->string('ceil', 100) with an index
+    // named posts_ceil_index, here with a prefix length: accepted by MySQL, so
+    // the table exists for the ALTER after it (not Missing, not unknown).
+    let create = "CREATE TABLE posts (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, \
+                  ceil VARCHAR(100) NOT NULL, KEY posts_ceil_index (ceil(10)))";
+    let sql = format!("{create};\nALTER TABLE posts ADD COLUMN c INT NULL;");
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(
+            impacts_on(server, KW_TABLE, &sql),
+            [Impact::NotChecked, Impact::NewTable],
+            "{server}"
+        );
+    }
+    assert!(matches!(
+        Schema::from_sql(&sql).table("posts"),
+        TableState::Known(_)
+    ));
+}
+
+#[test]
+fn a_schema_file_with_a_ceil_prefix_key_makes_the_table_known() {
+    // The same CREATE TABLE in the --schema file: the table is known, so the
+    // ALTER after it is answered from the table (an added column is INSTANT).
+    let schema = "CREATE TABLE posts (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, \
+                  ceil VARCHAR(100) NOT NULL, KEY posts_ceil_index (ceil(10)));\n";
+    assert!(matches!(
+        Schema::from_sql(schema).table("posts"),
+        TableState::Known(_)
+    ));
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(
+            statements_on(
+                server,
+                schema,
+                &parse("ALTER TABLE posts ADD COLUMN c INT NULL")
+            ),
+            [INSTANT],
+            "{server}"
+        );
+    }
+}
+
+#[test]
+fn a_column_named_2e_or_1e_is_an_index_column_mysql_accepts() {
+    // ALTER TABLE kw ADD INDEX (2e) and ADD INDEX (1e DESC): accepted; the
+    // column names look like numbers in scientific form.
+    assert_accepted_as_an_index(&[
+        "ALTER TABLE kw ADD INDEX (2e)",
+        "ALTER TABLE kw ADD INDEX (1e DESC)",
+    ]);
+}
+
+#[test]
+fn a_number_as_a_key_part_is_refused_on_both_servers() {
+    // ALTER TABLE kw ADD INDEX (9), (1e5), (0x1): error 1064 on both servers,
+    // whatever columns the table has.
+    for statement in [
+        "ALTER TABLE kw ADD INDEX (9)",
+        "ALTER TABLE kw ADD INDEX (1e5)",
+        "ALTER TABLE kw ADD INDEX (0x1)",
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            match predictions_on(server, KW_TABLE, statement).last() {
+                Some(Prediction::Unknown { reason }) if reason.starts_with(NOT_ACCEPTED) => {}
+                other => panic!("{server}: {statement}\n    got {other:?}"),
+            }
+        }
+    }
+}

@@ -6481,3 +6481,139 @@ fn truncating_a_double_quoted_name_is_rejected_at_once_and_gives_no_warning() {
     let (text, json, _) = lock_run(&[], "truncate table \"orders\";");
     assert_not_locked(&text, &json);
 }
+
+// Step 13a: a statement MySQL 8.0.46 and 8.4.13 reject is unknown, never an
+// answer. By hand, on both servers, `ADD CONSTRAINT 'ck_b1' CHECK (amount > 0)`
+// is error 1064 and `ADD CONSTRAINT ck_b1 CHECK (amount > 0)` runs.
+
+const REFUSED_NAME: &str = "MySQL 8.0.46 and 8.4.13 do not accept";
+
+/// kilit's JSON and text for `sql` against the example's tables, with `extra`
+/// options: (text, json, exit status of the text run).
+fn example_text_and_json(extra: &[&str], sql: &str) -> (String, serde_json::Value, Option<i32>) {
+    let schema = example("mysql-schema.sql");
+    let mut args = vec!["--schema", schema.to_str().unwrap()];
+    args.extend(extra);
+    text_and_json(&args, sql)
+}
+
+#[test]
+fn a_refused_statement_is_unknown_in_text_and_json_and_only_a_wider_fail_on_counts_it() {
+    // $table->check('amount > 0', 'ck') written with a name in single quotes.
+    let sql = "alter table `orders` add constraint 'ck' check (`amount` > 0);";
+    let (text, json, code) = example_text_and_json(&[], sql);
+    assert!(text.contains(&format!("UNKNOWN: {REFUSED_NAME}")), "{text}");
+    assert!(
+        text.contains("1 unknown statement is not counted in the exit status"),
+        "{text}"
+    );
+    assert_eq!(code, Some(0), "{text}");
+    let statement = &json["sources"][0]["statements"][0];
+    assert_eq!(statement["impact"], "unknown", "{json}");
+    assert!(
+        statement["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with(REFUSED_NAME),
+        "{statement}"
+    );
+    assert!(statement.get("case").is_none(), "{statement}");
+    assert_eq!(json["summary"]["unknown"], 1);
+    assert_eq!(json["summary"]["writes_wait"], 0);
+    assert_eq!(json["exit_code"], 0);
+    assert_eq!(json["fail_on"], serde_json::json!(["fails", "waits"]));
+    // The wider lists count it: exit 3, the exit status of unknown alone.
+    for extra in [vec!["--strict"], vec!["--fail-on", "unknown"]] {
+        let (text, json, code) = example_text_and_json(&extra, sql);
+        assert_eq!(code, Some(3), "{extra:?}: {text}");
+        assert_eq!(json["exit_code"], 3, "{extra:?}");
+    }
+}
+
+#[test]
+fn the_same_statement_without_the_quotes_makes_writes_wait_and_exits_with_1() {
+    let sql = "alter table `orders` add constraint `ck` check (`amount` > 0);";
+    let (text, json, code) = example_text_and_json(&[], sql);
+    assert!(
+        text.contains("COPY, copies every row, writes wait"),
+        "{text}"
+    );
+    assert!(!text.contains(REFUSED_NAME), "{text}");
+    assert_eq!(code, Some(1), "{text}");
+    let statement = &json["sources"][0]["statements"][0];
+    assert_eq!(statement["impact"], "writes_wait", "{json}");
+    assert!(statement.get("reason").is_none(), "{statement}");
+    assert_eq!(json["summary"]["unknown"], 0);
+    assert_eq!(json["exit_code"], 1);
+    let (_, json, code) = example_text_and_json(&["--strict"], sql);
+    assert_eq!(code, Some(1));
+    assert_eq!(json["exit_code"], 1);
+}
+
+#[test]
+fn a_refused_create_table_makes_no_table_so_the_next_alter_is_not_on_a_new_table() {
+    let accepted = "create table `tq` (`id` int primary key);
+                    alter table `tq` add `c` int null;";
+    let (text, json, code) = text_and_json(&[], accepted);
+    assert_eq!(impacts_of(&json), ["not_checked", "new_table"], "{text}");
+    assert_eq!(code, Some(0));
+
+    // DEFAULT CURRENT_DATE without parentheses: error 1064 on both servers.
+    let refused = "create table `tq` (`id` int primary key, `d` date null default CURRENT_DATE);
+                   alter table `tq` add `c` int null;";
+    let (text, json, code) = text_and_json(&[], refused);
+    assert_eq!(impacts_of(&json), ["unknown", "writes_continue"], "{text}");
+    let first = &json["sources"][0]["statements"][0];
+    assert!(
+        first["reason"].as_str().unwrap().starts_with(REFUSED_NAME),
+        "{first}"
+    );
+    assert!(
+        !text.contains("created earlier in these migrations"),
+        "{text}"
+    );
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(json["summary"]["unknown"], 1);
+    assert_eq!(json["summary"]["new_table"], 0);
+}
+
+#[test]
+fn laravel_s_date_default_raw_current_date_is_unknown_for_the_create_and_the_table() {
+    // Schema::create and Schema::table with
+    // $table->date('d')->default(DB::raw('CURRENT_DATE')) (real pretend output
+    // of Laravel 12.71.0; MySQL refuses both with error 1064).
+    let migrations: [(&str, &[&str]); 2] = [
+        (
+            "2026_05_01_000001_create_date-current-date",
+            &[
+                "create table `t_date_current_date` (`id` bigint unsigned not null auto_increment \
+                 primary key, `d` date not null default CURRENT_DATE) default character set \
+                 utf8mb4 collate 'utf8mb4_unicode_ci'",
+            ],
+        ),
+        (
+            "2026_05_01_000002_table_date-current-date",
+            &["alter table `orders` add `d` date not null default CURRENT_DATE"],
+        ),
+    ];
+    for (form, input) in laravel_forms(&migrations) {
+        let (text, json, code) = example_text_and_json(&[], &input);
+        assert_eq!(json["sources"].as_array().unwrap().len(), 2, "{form}");
+        for source in json["sources"].as_array().unwrap() {
+            let statement = &source["statements"][0];
+            assert_eq!(statement["impact"], "unknown", "{form}: {statement}");
+            assert!(
+                statement["reason"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(REFUSED_NAME),
+                "{form}: {statement}"
+            );
+        }
+        assert_eq!(json["summary"]["unknown"], 2, "{form}");
+        assert_eq!(json["summary"]["new_table"], 0, "{form}");
+        assert_eq!(code, Some(0), "{form}: {text}");
+        let (_, _, strict) = example_text_and_json(&["--strict"], &input);
+        assert_eq!(strict, Some(3), "{form}");
+    }
+}

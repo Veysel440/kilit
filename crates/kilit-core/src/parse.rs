@@ -8,11 +8,11 @@
 
 use sqlparser::ast::{
     self, AlterColumnOperation, AlterTableAlgorithm, AlterTableLock, AlterTableOperation,
-    BinaryOperator, CharacterLength, CheckConstraint, ColumnOption, ContextModifier,
-    CreateTableOptions, Expr, ForeignKeyConstraint, Function, FunctionArg, FunctionArgExpr,
-    FunctionArguments, GeneratedExpressionMode, Ident, IndexColumn, MySQLColumnPosition,
-    ObjectName, ObjectNamePart, ObjectType, ReferentialAction, RenameTableNameKind, Spanned,
-    SqlOption, TableConstraint, UnaryOperator, Value,
+    BinaryOperator, CeilFloorKind, CharacterLength, CheckConstraint, ColumnOption, ContextModifier,
+    CreateTableOptions, DateTimeField, DropBehavior, Expr, ForeignKeyConstraint, Function,
+    FunctionArg, FunctionArgExpr, FunctionArguments, GeneratedExpressionMode, Ident, IndexColumn,
+    MySQLColumnPosition, ObjectName, ObjectNamePart, ObjectType, ReferentialAction,
+    RenameTableNameKind, Spanned, SqlOption, TableConstraint, TimezoneInfo, UnaryOperator, Value,
 };
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::keywords::Keyword;
@@ -54,10 +54,19 @@ fn read(sql: &str) -> StatementKind {
                 table: table_named_in(sql),
             },
         },
-        Err(err) => table_options_alter(sql).unwrap_or_else(|| StatementKind::Unparsed {
-            error: unreadable(parser_message(err)),
-            table: table_named_in(sql),
-        }),
+        Err(err) => {
+            if let Some(words) = rejected_drop_index_words(sql) {
+                // As in `convert`: no table changes.
+                return StatementKind::Unparsed {
+                    error: format!("{REJECTED_BY} {words}"),
+                    table: None,
+                };
+            }
+            table_options_alter(sql).unwrap_or_else(|| StatementKind::Unparsed {
+                error: unreadable(parser_message(err)),
+                table: table_named_in(sql),
+            })
+        }
     }
 }
 
@@ -127,6 +136,52 @@ pub(crate) fn with_table_for_tables(sql: &str) -> Option<String> {
     };
     tokens[tables] = Token::make_keyword("TABLE");
     Some(tokens.iter().map(ToString::to_string).collect())
+}
+
+/// `CASCADE` or `RESTRICT` after the index an `ALTER TABLE ... DROP INDEX`
+/// (or `DROP KEY`) or a `DROP INDEX ... ON` drops, which MySQL 8.0.46 and
+/// 8.4.13 do not accept and the parser cannot read, as kilit names it.
+fn rejected_drop_index_words(sql: &str) -> Option<&'static str> {
+    if !may_begin_with(sql, &["alter", "drop"]) {
+        return None;
+    }
+    let words = words(sql);
+    let behavior = |word: &Token| match keyword(word) {
+        Keyword::CASCADE => Some("CASCADE"),
+        Keyword::RESTRICT => Some("RESTRICT"),
+        _ => None,
+    };
+    let first: [Keyword; 2] =
+        std::array::from_fn(|at| words.get(at).map_or(Keyword::NoKeyword, keyword));
+    match first {
+        [Keyword::ALTER, Keyword::TABLE] => words.windows(4).find_map(|window| {
+            let [drop, index, Token::Word(_), word] = window else {
+                return None;
+            };
+            let index = match keyword(index) {
+                Keyword::INDEX => "INDEX",
+                Keyword::KEY => "KEY",
+                _ => return None,
+            };
+            (keyword(drop) == Keyword::DROP)
+                .then(|| behavior(word))
+                .flatten()
+                .map(|behavior| match (behavior, index) {
+                    ("CASCADE", "INDEX") => "CASCADE in DROP INDEX",
+                    ("CASCADE", _) => "CASCADE in DROP KEY",
+                    (_, "INDEX") => "RESTRICT in DROP INDEX",
+                    _ => "RESTRICT in DROP KEY",
+                })
+        }),
+        [Keyword::DROP, Keyword::INDEX] => words.last().and_then(behavior).map(|behavior| {
+            if behavior == "CASCADE" {
+                "CASCADE in DROP INDEX"
+            } else {
+                "RESTRICT in DROP INDEX"
+            }
+        }),
+        _ => None,
+    }
 }
 
 /// Whether `sql` may begin with one of `words`, in any case: a quick look
@@ -437,10 +492,15 @@ fn convert(statement: ast::Statement, sql: &str) -> StatementKind {
 }
 
 /// How kilit's reasons name what MySQL 8.0.46 and 8.4.13 reject. Each form
-/// was run by hand on both servers and failed with error 1064, or 1067 for
-/// a date or time literal as a default; the lab has no fact for it yet, so
-/// kilit says no more than that.
+/// was run by hand on both servers and failed, with a syntax error (1064)
+/// or another error the statement cannot get past, such as an invalid
+/// default (1067) or ON UPDATE value (1294); the lab has no fact for it yet,
+/// so kilit says no more than that.
 pub(crate) const REJECTED_BY: &str = "MySQL 8.0.46 and 8.4.13 do not accept";
+
+/// The largest prefix length MySQL 8.0.46 and 8.4.13 read in a key part,
+/// such as `note(10)`. A longer one is a syntax error there.
+const LONGEST_PREFIX: u64 = 2_147_483_647;
 
 /// Why kilit gives no answer for `statement`, which sqlparser reads from
 /// `sql`: MySQL 8.0.46 and 8.4.13 do not accept it, or kilit has not
@@ -462,21 +522,31 @@ fn no_answer(statement: &ast::Statement, sql: &str) -> Option<String> {
         }
         _ => {}
     }
-    let rejected = rejected_words(statement, sql);
+    let written = Written::of(statement);
+    let rejected = rejected_words(statement, sql, &written);
     if !rejected.is_empty() {
         return Some(format!("{REJECTED_BY} {}", rejected.join(" or ")));
     }
-    if table_names(statement).into_iter().any(double_quoted) {
+    let table_names = table_names(statement, &written);
+    let names = names(statement, &written);
+    let key_parts = key_parts(statement, &written);
+    // No sql_mode makes MySQL read a single-quoted word as a name.
+    if table_names.iter().any(|name| quoted(name, '\''))
+        || names.iter().any(|name| name.quote_style == Some('\''))
+        || key_parts.iter().any(|part| single_quoted_string(part))
+    {
+        return Some(format!(
+            "{REJECTED_BY} a name in single quotes; a quoted name takes backticks"
+        ));
+    }
+    if table_names.into_iter().any(double_quoted) {
         return Some(
             "a double-quoted table name works only when sql_mode has ANSI_QUOTES, \
              and kilit does not know the server's sql_mode"
                 .to_owned(),
         );
     }
-    let key_parts = key_parts(statement);
-    if names(statement)
-        .into_iter()
-        .any(|name| name.quote_style == Some('"'))
+    if names.iter().any(|name| name.quote_style == Some('"'))
         || key_parts.iter().any(|part| double_quoted_string(part))
     {
         return Some(
@@ -485,16 +555,31 @@ fn no_answer(statement: &ast::Statement, sql: &str) -> Option<String> {
                 .to_owned(),
         );
     }
-    if let Some(default) = rejected_default(statement) {
+    if let Some(default) = rejected_default(statement, &written) {
         return Some(format!("{REJECTED_BY} {default} without parentheses"));
     }
-    if let Some(part) = key_parts
-        .into_iter()
-        .find(|part| matches!(part, Expr::Function(function) if prefix(function).is_none()))
-    {
+    if let Some(reason) = rejected_current_time(&written) {
+        return Some(format!("{REJECTED_BY} {reason}"));
+    }
+    if let Some(value) = set_default_time_literal(statement) {
+        return Some(format!(
+            "{REJECTED_BY} SET DEFAULT {value}, a date or time literal in parentheses; \
+             MODIFY and CHANGE take it"
+        ));
+    }
+    if let Some(part) = key_parts.iter().find(|part| !readable_key_part(part, sql)) {
         return Some(format!(
             "{REJECTED_BY} the key part {part}; an expression in an index needs its own \
              parentheses, and a prefix length is a whole number"
+        ));
+    }
+    if let Some(part) = key_parts.into_iter().find(|part| {
+        prefix_length(part)
+            .is_some_and(|length| !matches!(number(length), Some(1..=LONGEST_PREFIX)))
+    }) {
+        return Some(format!(
+            "{REJECTED_BY} the key part {part}; a prefix length is a whole number from 1 \
+             to {LONGEST_PREFIX}"
         ));
     }
     None
@@ -502,7 +587,7 @@ fn no_answer(statement: &ast::Statement, sql: &str) -> Option<String> {
 
 /// The words in `statement`, read from `sql`, that MySQL 8.0.46 and 8.4.13
 /// do not accept, as kilit names them.
-fn rejected_words(statement: &ast::Statement, sql: &str) -> Vec<&'static str> {
+fn rejected_words(statement: &ast::Statement, sql: &str, written: &Written) -> Vec<&'static str> {
     let mut words = Vec::new();
     match statement {
         ast::Statement::AlterTable(alter) => {
@@ -520,6 +605,32 @@ fn rejected_words(statement: &ast::Statement, sql: &str) -> Vec<&'static str> {
                     AlterTableOperation::AddConstraint {
                         not_valid: true, ..
                     } => words.push("NOT VALID"),
+                    AlterTableOperation::DropConstraint {
+                        if_exists,
+                        drop_behavior,
+                        ..
+                    } => {
+                        if *if_exists {
+                            words.push("DROP CONSTRAINT IF EXISTS");
+                        }
+                        words.extend(drop_behavior.map(|behavior| match behavior {
+                            DropBehavior::Cascade => "CASCADE in DROP CONSTRAINT",
+                            DropBehavior::Restrict => "RESTRICT in DROP CONSTRAINT",
+                        }));
+                    }
+                    AlterTableOperation::DropForeignKey {
+                        drop_behavior: Some(behavior),
+                        ..
+                    } => words.push(match behavior {
+                        DropBehavior::Cascade => "CASCADE in DROP FOREIGN KEY",
+                        DropBehavior::Restrict => "RESTRICT in DROP FOREIGN KEY",
+                    }),
+                    AlterTableOperation::DropPrimaryKey {
+                        drop_behavior: Some(behavior),
+                    } => words.push(match behavior {
+                        DropBehavior::Cascade => "CASCADE in DROP PRIMARY KEY",
+                        DropBehavior::Restrict => "RESTRICT in DROP PRIMARY KEY",
+                    }),
                     _ => {}
                 }
             }
@@ -570,23 +681,50 @@ fn rejected_words(statement: &ast::Statement, sql: &str) -> Vec<&'static str> {
         ast::Statement::Lock(_) => words.push("LOCK TABLE without READ or WRITE"),
         _ => {}
     }
+    let no_inherit = |check: &CheckConstraint| check.no_inherit;
+    if written
+        .columns
+        .iter()
+        .flat_map(|(_, options)| options)
+        .any(|option| matches!(option, ColumnOption::Check(check) if no_inherit(check)))
+        || written.constraints.iter().any(
+            |constraint| matches!(constraint, TableConstraint::Check(check) if no_inherit(check)),
+        )
+    {
+        words.push("NO INHERIT");
+    }
     words
 }
 
 /// The tables `statement` names, where MySQL expects a table name.
-fn table_names(statement: &ast::Statement) -> Vec<&ObjectName> {
-    match statement {
-        // With the table a foreign key points at and the new name.
+fn table_names<'a>(statement: &'a ast::Statement, written: &Written<'a>) -> Vec<&'a ObjectName> {
+    // The table a foreign key points at, written on a column or as a
+    // constraint.
+    let referenced = written
+        .columns
+        .iter()
+        .flat_map(|(_, options)| options)
+        .filter_map(|option| match option {
+            ColumnOption::ForeignKey(key) => Some(&key.foreign_table),
+            _ => None,
+        })
+        .chain(
+            written
+                .constraints
+                .iter()
+                .filter_map(|constraint| match constraint {
+                    TableConstraint::ForeignKey(key) => Some(&key.foreign_table),
+                    _ => None,
+                }),
+        );
+    let mut names: Vec<&ObjectName> = match statement {
+        // With the new name.
         ast::Statement::AlterTable(alter) => std::iter::once(&alter.name)
             .chain(
                 alter
                     .operations
                     .iter()
                     .filter_map(|operation| match operation {
-                        AlterTableOperation::AddConstraint {
-                            constraint: TableConstraint::ForeignKey(key),
-                            ..
-                        } => Some(&key.foreign_table),
                         AlterTableOperation::RenameTable {
                             table_name:
                                 RenameTableNameKind::As(name) | RenameTableNameKind::To(name),
@@ -610,20 +748,27 @@ fn table_names(statement: &ast::Statement) -> Vec<&ObjectName> {
             .flat_map(|rename| [&rename.old_name, &rename.new_name])
             .collect(),
         _ => Vec::new(),
-    }
+    };
+    names.extend(referenced);
+    names
 }
 
 /// Whether `name` is written in double quotes, which MySQL reads as a
 /// string unless sql_mode has ANSI_QUOTES.
 fn double_quoted(name: &ObjectName) -> bool {
+    quoted(name, '"')
+}
+
+/// Whether a part of `name` is written in `quote`.
+fn quoted(name: &ObjectName, quote: char) -> bool {
     name.0.iter().any(
-        |part| matches!(part, ObjectNamePart::Identifier(ident) if ident.quote_style == Some('"')),
+        |part| matches!(part, ObjectNamePart::Identifier(ident) if ident.quote_style == Some(quote)),
     )
 }
 
 /// The column, index and constraint names `statement` writes where MySQL
 /// expects a name. The key parts of an index are in [`key_parts`].
-fn names(statement: &ast::Statement) -> Vec<&Ident> {
+fn names<'a>(statement: &'a ast::Statement, written: &Written<'a>) -> Vec<&'a Ident> {
     let mut names = Vec::new();
     match statement {
         ast::Statement::AlterTable(alter) => {
@@ -637,7 +782,29 @@ fn names(statement: &ast::Statement) -> Vec<&Ident> {
             names: indexes,
             ..
         } => names.extend(indexes.iter().flat_map(parts)),
+        ast::Statement::CreateTable(create) => {
+            for column in &create.columns {
+                names.push(&column.name);
+                names.extend(
+                    column
+                        .options
+                        .iter()
+                        .filter_map(|option| option.name.as_ref()),
+                );
+            }
+            for constraint in &create.constraints {
+                constraint_names(constraint, &mut names);
+            }
+        }
         _ => {}
+    }
+    // The columns a foreign key written on a column points at.
+    for (_, options) in &written.columns {
+        for option in options {
+            if let ColumnOption::ForeignKey(key) = option {
+                names.extend(&key.referred_columns);
+            }
+        }
     }
     names
 }
@@ -656,25 +823,9 @@ fn operation_names<'a>(operation: &'a AlterTableOperation, names: &mut Vec<&'a I
         _ => None,
     };
     match operation {
-        AlterTableOperation::AddConstraint { constraint, .. } => match constraint {
-            TableConstraint::Index(index) => names.extend(&index.name),
-            TableConstraint::Unique(unique) => {
-                names.extend(unique.name.iter().chain(&unique.index_name));
-            }
-            TableConstraint::PrimaryKey(key) => {
-                names.extend(key.name.iter().chain(&key.index_name))
-            }
-            TableConstraint::FulltextOrSpatial(index) => names.extend(&index.opt_index_name),
-            TableConstraint::ForeignKey(key) => names.extend(
-                key.name
-                    .iter()
-                    .chain(&key.index_name)
-                    .chain(&key.columns)
-                    .chain(&key.referred_columns),
-            ),
-            TableConstraint::Check(check) => names.extend(&check.name),
-            _ => {}
-        },
+        AlterTableOperation::AddConstraint { constraint, .. } => {
+            constraint_names(constraint, names);
+        }
         AlterTableOperation::AddColumn {
             column_def,
             column_position,
@@ -719,26 +870,106 @@ fn operation_names<'a>(operation: &'a AlterTableOperation, names: &mut Vec<&'a I
     }
 }
 
+/// The names a key or constraint writes, in `ALTER TABLE ... ADD` and in
+/// `CREATE TABLE`: its own, its index's, and a foreign key's columns.
+fn constraint_names<'a>(constraint: &'a TableConstraint, names: &mut Vec<&'a Ident>) {
+    match constraint {
+        TableConstraint::Index(index) => names.extend(&index.name),
+        TableConstraint::Unique(unique) => {
+            names.extend(unique.name.iter().chain(&unique.index_name));
+        }
+        TableConstraint::PrimaryKey(key) => names.extend(key.name.iter().chain(&key.index_name)),
+        TableConstraint::FulltextOrSpatial(index) => names.extend(&index.opt_index_name),
+        TableConstraint::ForeignKey(key) => names.extend(
+            key.name
+                .iter()
+                .chain(&key.index_name)
+                .chain(&key.columns)
+                .chain(&key.referred_columns),
+        ),
+        TableConstraint::Check(check) => names.extend(&check.name),
+        _ => {}
+    }
+}
+
+/// What `statement` writes in its column definitions and keys, read once.
+struct Written<'a> {
+    /// The column definitions, each with its type and options: in `ADD
+    /// COLUMN`, `MODIFY`, `CHANGE` and `CREATE TABLE`.
+    columns: Vec<(&'a ast::DataType, Vec<&'a ColumnOption>)>,
+    /// The keys and constraints it adds: `ALTER TABLE ... ADD ...` and the
+    /// ones a `CREATE TABLE` writes apart from its columns.
+    constraints: Vec<&'a TableConstraint>,
+}
+
+impl<'a> Written<'a> {
+    fn of(statement: &'a ast::Statement) -> Self {
+        let mut written = Written {
+            columns: Vec::new(),
+            constraints: Vec::new(),
+        };
+        match statement {
+            ast::Statement::AlterTable(alter) => {
+                for operation in &alter.operations {
+                    match operation {
+                        AlterTableOperation::AddColumn { column_def, .. } => {
+                            written.columns.push((
+                                &column_def.data_type,
+                                column_def
+                                    .options
+                                    .iter()
+                                    .map(|option| &option.option)
+                                    .collect(),
+                            ));
+                        }
+                        AlterTableOperation::ModifyColumn {
+                            data_type, options, ..
+                        }
+                        | AlterTableOperation::ChangeColumn {
+                            data_type, options, ..
+                        } => written.columns.push((data_type, options.iter().collect())),
+                        AlterTableOperation::AddConstraint { constraint, .. } => {
+                            written.constraints.push(constraint);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            ast::Statement::CreateTable(create) => {
+                written.columns = create
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        (
+                            &column.data_type,
+                            column.options.iter().map(|option| &option.option).collect(),
+                        )
+                    })
+                    .collect();
+                written.constraints = create.constraints.iter().collect();
+            }
+            _ => {}
+        }
+        written
+    }
+}
+
 /// The key parts of the indexes and keys `statement` adds, such as `amount`
 /// and `note(10)` in `ADD INDEX i (amount, note(10))`.
-fn key_parts(statement: &ast::Statement) -> Vec<&Expr> {
+fn key_parts<'a>(statement: &'a ast::Statement, written: &Written<'a>) -> Vec<&'a Expr> {
     let columns: Vec<&IndexColumn> = match statement {
-        ast::Statement::AlterTable(alter) => alter
-            .operations
+        ast::Statement::CreateIndex(index) => index.columns.iter().collect(),
+        _ => written
+            .constraints
             .iter()
-            .flat_map(|operation| match operation {
-                AlterTableOperation::AddConstraint { constraint, .. } => match constraint {
-                    TableConstraint::Index(index) => index.columns.as_slice(),
-                    TableConstraint::Unique(unique) => unique.columns.as_slice(),
-                    TableConstraint::PrimaryKey(key) => key.columns.as_slice(),
-                    TableConstraint::FulltextOrSpatial(index) => index.columns.as_slice(),
-                    _ => &[],
-                },
+            .flat_map(|constraint| match constraint {
+                TableConstraint::Index(index) => index.columns.as_slice(),
+                TableConstraint::Unique(unique) => unique.columns.as_slice(),
+                TableConstraint::PrimaryKey(key) => key.columns.as_slice(),
+                TableConstraint::FulltextOrSpatial(index) => index.columns.as_slice(),
                 _ => &[],
             })
             .collect(),
-        ast::Statement::CreateIndex(index) => index.columns.iter().collect(),
-        _ => Vec::new(),
     };
     columns
         .into_iter()
@@ -752,31 +983,114 @@ fn double_quoted_string(part: &Expr) -> bool {
     matches!(part, Expr::Value(value) if matches!(value.value, Value::DoubleQuotedString(_)))
 }
 
+/// `'amount'` as a key part, which the parser reads as a string.
+fn single_quoted_string(part: &Expr) -> bool {
+    matches!(part, Expr::Value(value) if matches!(value.value, Value::SingleQuotedString(_)))
+}
+
+/// Whether MySQL 8.0.46 and 8.4.13 read `part`, written in `sql`, as a key
+/// part: a column, a prefix of one (`note(10)`; [`no_answer`] checks its
+/// length), or an expression in its own parentheses.
+fn readable_key_part(part: &Expr, sql: &str) -> bool {
+    match part {
+        Expr::Identifier(_) | Expr::Nested(_) => true,
+        // A column named `2e` reaches us as the number 2.
+        Expr::Value(value) if matches!(value.value, Value::Number(..)) => digit_led_name(sql),
+        _ => prefix_length(part).is_some(),
+    }
+}
+
+/// The length of a prefix key part, such as `10` in `note(10)`. A column
+/// named like a function the parser knows, such as `ceil(10)` or `trim
+/// (10)`, reaches us as that function.
+fn prefix_length(part: &Expr) -> Option<&str> {
+    match part {
+        Expr::Function(function) => prefix(function).map(|(_, length)| length),
+        Expr::Ceil {
+            expr,
+            field: CeilFloorKind::DateTimeField(DateTimeField::NoDateTime),
+        }
+        | Expr::Floor {
+            expr,
+            field: CeilFloorKind::DateTimeField(DateTimeField::NoDateTime),
+        }
+        | Expr::Substring {
+            expr,
+            substring_from: None,
+            substring_for: None,
+            ..
+        }
+        | Expr::Trim {
+            expr,
+            trim_where: None,
+            trim_what: None,
+            trim_characters: None,
+        } => whole_digits(expr),
+        _ => None,
+    }
+}
+
+/// The digits of `expr` when it is a whole number, such as `10`.
+fn whole_digits(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Value(value) => match &value.value {
+            Value::Number(digits, _)
+                if !digits.is_empty() && digits.bytes().all(|digit| digit.is_ascii_digit()) =>
+            {
+                Some(digits)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether `sql` writes a name that starts with digits, such as `2e`, which
+/// the tokenizer reads as a number and a word.
+fn digit_led_name(sql: &str) -> bool {
+    Tokenizer::new(&MySqlDialect {}, sql)
+        .tokenize()
+        .is_ok_and(|tokens| {
+            tokens.windows(2).any(|pair| {
+                matches!(pair, [Token::Number(..), Token::Word(word)] if word.quote_style.is_none())
+            })
+        })
+}
+
+/// The value of the digits `digits`, leading zeros and all; `None` when it
+/// does not fit in 64 bits.
+fn number(digits: &str) -> Option<u64> {
+    match digits.trim_start_matches('0') {
+        "" => Some(0),
+        digits => digits.parse().ok(),
+    }
+}
+
 /// The first default in `statement` that MySQL 8.0.46 and 8.4.13 do not
 /// take without parentheses, as kilit names it: `DEFAULT CURRENT_DATE` or
 /// `SET DEFAULT CURRENT_TIMESTAMP`.
-fn rejected_default(statement: &ast::Statement) -> Option<String> {
-    let ast::Statement::AlterTable(alter) = statement else {
-        return None;
-    };
-    alter
-        .operations
-        .iter()
-        .find_map(|operation| match operation {
-            AlterTableOperation::AddColumn { column_def, .. } => column_def
-                .options
+fn rejected_default(statement: &ast::Statement, written: &Written) -> Option<String> {
+    let set_default = match statement {
+        ast::Statement::AlterTable(alter) => {
+            alter
+                .operations
                 .iter()
-                .find_map(|option| rejected_column_default(&option.option)),
-            AlterTableOperation::ModifyColumn { options, .. }
-            | AlterTableOperation::ChangeColumn { options, .. } => {
-                options.iter().find_map(rejected_column_default)
-            }
-            AlterTableOperation::AlterColumn {
-                op: AlterColumnOperation::SetDefault { value },
-                ..
-            } => (!plain_default(value, false)).then(|| format!("SET DEFAULT {value}")),
-            _ => None,
-        })
+                .find_map(|operation| match operation {
+                    AlterTableOperation::AlterColumn {
+                        op: AlterColumnOperation::SetDefault { value },
+                        ..
+                    } => (!plain_default(value, false)).then(|| format!("SET DEFAULT {value}")),
+                    _ => None,
+                })
+        }
+        _ => None,
+    };
+    written
+        .columns
+        .iter()
+        .flat_map(|(_, options)| options)
+        .find_map(|option| rejected_column_default(option))
+        .or(set_default)
 }
 
 fn rejected_column_default(option: &ColumnOption) -> Option<String> {
@@ -786,6 +1100,93 @@ fn rejected_column_default(option: &ColumnOption) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// The first `ON UPDATE` in `statement` that MySQL 8.0.46 and 8.4.13 do not
+/// accept, or `CURRENT_TIMESTAMP` (or a synonym) as a default or `ON
+/// UPDATE` of a column it does not fit, with why.
+fn rejected_current_time(written: &Written) -> Option<String> {
+    written.columns.iter().find_map(|(data_type, options)| {
+        options.iter().find_map(|option| match option {
+            ColumnOption::OnUpdate(Expr::Function(function)) if current_timestamp(function) => {
+                unfit_current_timestamp(data_type, "ON UPDATE", function)
+            }
+            ColumnOption::OnUpdate(value) => Some(format!(
+                "ON UPDATE {value}; ON UPDATE takes only CURRENT_TIMESTAMP and its synonyms"
+            )),
+            ColumnOption::Default(Expr::Function(function)) if current_timestamp(function) => {
+                unfit_current_timestamp(data_type, "DEFAULT", function)
+            }
+            _ => None,
+        })
+    })
+}
+
+/// Why `function`, `CURRENT_TIMESTAMP` or a synonym written after `clause`,
+/// does not fit a column of `data_type`: it needs a DATETIME or TIMESTAMP of
+/// its own precision. `None` when it fits, and for a type the parser does
+/// not know, which kilit leaves as it is.
+fn unfit_current_timestamp(
+    data_type: &ast::DataType,
+    clause: &str,
+    function: &Function,
+) -> Option<String> {
+    use ast::DataType as Parsed;
+    let column = match data_type {
+        Parsed::Datetime(precision) | Parsed::Timestamp(precision, TimezoneInfo::None) => {
+            Some(precision.unwrap_or(0))
+        }
+        Parsed::Custom(..) => return None,
+        _ => None,
+    };
+    let written = match &function.args {
+        FunctionArguments::List(list) => match list.args.as_slice() {
+            [precision] => whole_number(precision).and_then(number),
+            _ => Some(0),
+        },
+        _ => Some(0),
+    };
+    (column.is_none() || column != written).then(|| {
+        format!(
+            "{clause} {function} on a {data_type} column; CURRENT_TIMESTAMP and its \
+             synonyms need a DATETIME or TIMESTAMP column of the same precision"
+        )
+    })
+}
+
+/// The default of an `ALTER COLUMN ... SET DEFAULT` in `statement` that is a
+/// DATE, TIME or TIMESTAMP literal in parentheses, such as `(DATE
+/// '2020-01-01')`, which MySQL 8.0.46 and 8.4.13 do not accept there.
+fn set_default_time_literal(statement: &ast::Statement) -> Option<&Expr> {
+    let ast::Statement::AlterTable(alter) = statement else {
+        return None;
+    };
+    alter
+        .operations
+        .iter()
+        .find_map(|operation| match operation {
+            AlterTableOperation::AlterColumn {
+                op: AlterColumnOperation::SetDefault { value },
+                ..
+            } => {
+                let Expr::Nested(_) = value else {
+                    return None;
+                };
+                let mut literal = value;
+                while let Expr::Nested(inner) = literal {
+                    literal = inner;
+                }
+                matches!(
+                    literal,
+                    Expr::TypedString(typed) if matches!(
+                        typed.data_type,
+                        ast::DataType::Date | ast::DataType::Time(..) | ast::DataType::Timestamp(..)
+                    )
+                )
+                .then_some(value)
+            }
+            _ => None,
+        })
 }
 
 /// Whether MySQL takes the default `value` as written: in parentheses, a
@@ -1141,8 +1542,8 @@ fn operation_of(operation: AlterTableOperation) -> Operation {
             Operation::DropForeignKey { name: name.value }
         }
         AlterTableOperation::DropPrimaryKey { .. } => Operation::DropPrimaryKey,
-        // MySQL 8.0.46 and 8.4.13 do not accept the other forms: IF EXISTS,
-        // CASCADE and RESTRICT stay something kilit does not understand.
+        // MySQL 8.0.46 and 8.4.13 do not accept the other forms (IF EXISTS,
+        // CASCADE and RESTRICT), which `no_answer` stops first.
         AlterTableOperation::DropConstraint {
             if_exists: false,
             name,
@@ -1188,8 +1589,8 @@ fn added_constraint(constraint: TableConstraint) -> Operation {
             columns: key.columns.iter().map(index_column).collect(),
         },
         TableConstraint::ForeignKey(key) => Operation::AddForeignKey(foreign_key(key)),
-        // MySQL 8.0.46 and 8.4.13 do not accept NO INHERIT, which stays
-        // something kilit does not understand.
+        // MySQL 8.0.46 and 8.4.13 do not accept NO INHERIT, which `no_answer`
+        // stops first.
         TableConstraint::Check(check) if !check.no_inherit => {
             Operation::AddCheck(check_constraint(check))
         }
@@ -2268,33 +2669,6 @@ mod tests {
                 sql: "AUTO_INCREMENT = 1000".into()
             }
         );
-        // MySQL 8.0.46 and 8.4.13 do not accept these forms (run by hand).
-        for (sql, printed) in [
-            (
-                "ALTER TABLE t ADD CHECK (a > 0) NO INHERIT",
-                "ADD CHECK (a > 0) NO INHERIT",
-            ),
-            (
-                "ALTER TABLE t DROP CONSTRAINT IF EXISTS c",
-                "DROP CONSTRAINT IF EXISTS c",
-            ),
-            (
-                "ALTER TABLE t DROP CONSTRAINT c CASCADE",
-                "DROP CONSTRAINT c CASCADE",
-            ),
-            (
-                "ALTER TABLE t DROP CONSTRAINT c RESTRICT",
-                "DROP CONSTRAINT c RESTRICT",
-            ),
-        ] {
-            assert_eq!(
-                operation(sql),
-                Operation::Other {
-                    sql: printed.into()
-                },
-                "{sql}"
-            );
-        }
     }
 
     /// The CHECK constraints of a `CREATE TABLE`, in the order MySQL numbers them.
@@ -2807,24 +3181,6 @@ mod tests {
             "X'0A'",
             "0x0A",
             "_binary x'0A'",
-            "CURRENT_TIMESTAMP",
-            "current_timestamp",
-            "CURRENT_TIMESTAMP(6)",
-            "CURRENT_TIMESTAMP ( 6 )",
-            "CURRENT_TIMESTAMP()",
-            "CURRENT_TIMESTAMP(0)",
-            "CURRENT_TIMESTAMP(06)",
-            "CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
-            "CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)",
-            "NOW()",
-            "now(6)",
-            "LOCALTIME",
-            "LOCALTIME()",
-            "LOCALTIME(6)",
-            "LOCALTIMESTAMP",
-            "LOCALTIMESTAMP()",
-            "LOCALTIMESTAMP ( )",
-            "LOCALTIMESTAMP(6)",
             "(CURRENT_DATE)",
             "(DATE '2020-01-01')",
         ] {
@@ -2832,6 +3188,41 @@ mod tests {
                 format!("ALTER TABLE d ADD COLUMN c INT NULL DEFAULT {default}"),
                 format!("ALTER TABLE d MODIFY c INT NULL DEFAULT {default}"),
                 format!("ALTER TABLE d CHANGE c c INT NULL DEFAULT {default}"),
+            ] {
+                assert!(matches!(kind(&sql), StatementKind::Alter(_)), "{sql}");
+            }
+        }
+        // CURRENT_TIMESTAMP and its synonyms, on a DATETIME or TIMESTAMP of
+        // their precision.
+        for (data_type, default) in [
+            ("DATETIME", "CURRENT_TIMESTAMP"),
+            ("datetime", "current_timestamp"),
+            ("DATETIME(6)", "CURRENT_TIMESTAMP(6)"),
+            ("TIMESTAMP(6)", "CURRENT_TIMESTAMP ( 6 )"),
+            ("TIMESTAMP", "CURRENT_TIMESTAMP()"),
+            ("DATETIME", "CURRENT_TIMESTAMP(0)"),
+            ("DATETIME(0)", "CURRENT_TIMESTAMP"),
+            ("DATETIME(6)", "CURRENT_TIMESTAMP(06)"),
+            ("DATETIME(06)", "CURRENT_TIMESTAMP(6)"),
+            ("TIMESTAMP", "CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"),
+            (
+                "TIMESTAMP(6)",
+                "CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)",
+            ),
+            ("DATETIME", "NOW()"),
+            ("DATETIME(6)", "now(6)"),
+            ("DATETIME", "LOCALTIME"),
+            ("DATETIME", "LOCALTIME()"),
+            ("DATETIME(6)", "LOCALTIME(6)"),
+            ("TIMESTAMP", "LOCALTIMESTAMP"),
+            ("TIMESTAMP", "LOCALTIMESTAMP()"),
+            ("TIMESTAMP", "LOCALTIMESTAMP ( )"),
+            ("TIMESTAMP(6)", "LOCALTIMESTAMP(6)"),
+        ] {
+            for sql in [
+                format!("ALTER TABLE d ADD COLUMN c {data_type} NULL DEFAULT {default}"),
+                format!("ALTER TABLE d MODIFY c {data_type} NULL DEFAULT {default}"),
+                format!("ALTER TABLE d CHANGE c c {data_type} NULL DEFAULT {default}"),
             ] {
                 assert!(matches!(kind(&sql), StatementKind::Alter(_)), "{sql}");
             }
@@ -3010,6 +3401,499 @@ mod tests {
             "ALTER TABLE k2 ADD PRIMARY KEY (`note`(10))",
         ] {
             assert!(matches!(kind(sql), StatementKind::Alter(_)), "{sql}");
+        }
+    }
+
+    // The forms in the tests below were run by hand on MySQL 8.0.46 and
+    // 8.4.13 (step 13a), with the same result on both.
+
+    const SINGLE_QUOTED: &str = "MySQL 8.0.46 and 8.4.13 do not accept a name in single \
+                                 quotes; a quoted name takes backticks";
+
+    #[test]
+    fn a_single_quoted_name_gets_no_answer() {
+        // Error 1064, with any sql_mode.
+        for sql in [
+            "ALTER TABLE 'orders' ADD COLUMN coupon INT NULL",
+            "ALTER TABLE orders ADD COLUMN 'coupon' INT NULL",
+            "ALTER TABLE orders ADD COLUMN coupon INT NULL AFTER 'note'",
+            "ALTER TABLE orders ADD COLUMN q INT NULL CONSTRAINT 'cq' CHECK (q > 0)",
+            "ALTER TABLE orders MODIFY 'note' VARCHAR(60) NULL",
+            "ALTER TABLE orders CHANGE 'note' memo VARCHAR(60) NULL",
+            "ALTER TABLE orders CHANGE note 'memo' VARCHAR(60) NULL",
+            "ALTER TABLE orders RENAME COLUMN 'note' TO memo",
+            "ALTER TABLE orders RENAME COLUMN note TO 'memo'",
+            "ALTER TABLE orders ALTER COLUMN 'amount' SET DEFAULT 0",
+            "ALTER TABLE orders DROP COLUMN 'note'",
+            "ALTER TABLE orders RENAME TO 'orders2'",
+            "ALTER TABLE orders ADD INDEX 'ix' (amount)",
+            "ALTER TABLE orders ADD INDEX ix ('amount')",
+            "ALTER TABLE orders ADD UNIQUE INDEX uq ('email')",
+            "ALTER TABLE orders ADD PRIMARY KEY ('id')",
+            "ALTER TABLE orders DROP INDEX 'ix'",
+            "ALTER TABLE orders ADD CONSTRAINT 'ck' CHECK (amount > 0)",
+            "ALTER TABLE orders ADD CONSTRAINT 'uq' UNIQUE (email)",
+            "ALTER TABLE orders ADD CONSTRAINT 'fk' FOREIGN KEY (user_id) REFERENCES users (id)",
+            "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY ('user_id') REFERENCES users (id)",
+            "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES 'users' (id)",
+            "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users ('id')",
+            "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY 'ix' (user_id) REFERENCES users (id)",
+            "ALTER TABLE orders DROP FOREIGN KEY 'fk'",
+            "ALTER TABLE orders DROP CONSTRAINT 'ck'",
+            "CREATE INDEX 'ix' ON orders (amount)",
+            "CREATE INDEX ix ON 'orders' (amount)",
+            "CREATE INDEX ix ON orders ('amount')",
+            "DROP INDEX 'ix' ON orders",
+            "DROP INDEX ix ON 'orders'",
+            "RENAME TABLE 'orders' TO orders2",
+            "RENAME TABLE orders TO 'orders2'",
+            "CREATE TABLE 't' (id INT)",
+            "CREATE TABLE t (id INT, KEY 'k' (id))",
+            "CREATE TABLE t (id INT, KEY k ('id'))",
+            "CREATE TABLE t (id INT, PRIMARY KEY ('id'))",
+            "CREATE TABLE t (id INT, CONSTRAINT 'c' CHECK (id > 0))",
+            "CREATE TABLE t (id INT CONSTRAINT 'c' CHECK (id > 0))",
+            "CREATE TABLE t (u INT, CONSTRAINT 'fk' FOREIGN KEY (u) REFERENCES users (id))",
+            "CREATE TABLE t (u INT, FOREIGN KEY ('u') REFERENCES users (id))",
+            "CREATE TABLE t (u INT, FOREIGN KEY (u) REFERENCES 'users' (id))",
+            "CREATE TABLE t (u INT, FOREIGN KEY (u) REFERENCES users ('id'))",
+        ] {
+            assert_eq!(no_answer_for(sql), SINGLE_QUOTED, "{sql}");
+        }
+    }
+
+    #[test]
+    fn single_quotes_where_mysql_expects_a_string_keep_the_statement() {
+        for sql in [
+            "ALTER TABLE orders ADD COLUMN c VARCHAR(10) NULL COMMENT 'x'",
+            "ALTER TABLE orders ADD COLUMN c VARCHAR(10) COLLATE 'utf8mb4_bin' NULL",
+            "ALTER TABLE orders ADD COLUMN c VARCHAR(10) CHARACTER SET 'utf8mb4' NULL",
+            "ALTER TABLE orders ADD COLUMN c VARCHAR(10) NOT NULL DEFAULT 'x'",
+            "ALTER TABLE orders ADD COLUMN c ENUM('a', 'b') NULL",
+            "ALTER TABLE orders ADD INDEX ix (amount) COMMENT 'x'",
+            // Laravel's $table->string('s')->collation('utf8mb4_bin')->comment('x')
+            "alter table `orders` add `s` varchar(255) collate 'utf8mb4_bin' not null comment 'x'",
+        ] {
+            assert!(matches!(kind(sql), StatementKind::Alter(_)), "{sql}");
+        }
+        for sql in [
+            "create table `t` (`id` bigint unsigned not null auto_increment primary key, \
+             `s` varchar(255) collate 'utf8mb4_bin' not null comment 'x') \
+             default character set utf8mb4 collate 'utf8mb4_unicode_ci'",
+            "CREATE TABLE t (id INT, c ENUM('a', 'b') DEFAULT 'a', KEY k (id) COMMENT 'x') \
+             COMMENT = 'x'",
+        ] {
+            assert!(
+                matches!(kind(sql), StatementKind::CreateTable { .. }),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_create_table_gets_the_refusals_of_alter_table() {
+        for (sql, reason) in [
+            (
+                "CREATE TABLE t (d DATE DEFAULT CURRENT_DATE)",
+                "MySQL 8.0.46 and 8.4.13 do not accept DEFAULT CURRENT_DATE without parentheses",
+            ),
+            (
+                "CREATE TABLE t (n INT DEFAULT 1+1)",
+                "MySQL 8.0.46 and 8.4.13 do not accept DEFAULT 1 + 1 without parentheses",
+            ),
+            (
+                "CREATE TABLE t (n VARCHAR(10), KEY (lower(n)))",
+                "MySQL 8.0.46 and 8.4.13 do not accept the key part lower(n); an expression \
+                 in an index needs its own parentheses, and a prefix length is a whole number",
+            ),
+            (
+                "CREATE TABLE t (id INT, PRIMARY KEY (id + 1))",
+                "MySQL 8.0.46 and 8.4.13 do not accept the key part id + 1; an expression \
+                 in an index needs its own parentheses, and a prefix length is a whole number",
+            ),
+            (
+                "CREATE TABLE t (n VARCHAR(10), KEY (n(0)))",
+                "MySQL 8.0.46 and 8.4.13 do not accept the key part n(0); a prefix length is \
+                 a whole number from 1 to 2147483647",
+            ),
+            (
+                "CREATE TABLE t (d DATE ON UPDATE CURRENT_DATE)",
+                "MySQL 8.0.46 and 8.4.13 do not accept ON UPDATE CURRENT_DATE; ON UPDATE \
+                 takes only CURRENT_TIMESTAMP and its synonyms",
+            ),
+            (
+                "CREATE TABLE t (d DATE DEFAULT CURRENT_TIMESTAMP)",
+                "MySQL 8.0.46 and 8.4.13 do not accept DEFAULT CURRENT_TIMESTAMP on a DATE \
+                 column; CURRENT_TIMESTAMP and its synonyms need a DATETIME or TIMESTAMP \
+                 column of the same precision",
+            ),
+            (
+                "CREATE TABLE t (id INT CHECK (id > 0) NO INHERIT)",
+                "MySQL 8.0.46 and 8.4.13 do not accept NO INHERIT",
+            ),
+            (
+                "CREATE TABLE t (id INT, CHECK (id > 0) NO INHERIT)",
+                "MySQL 8.0.46 and 8.4.13 do not accept NO INHERIT",
+            ),
+        ] {
+            assert_eq!(no_answer_for(sql), reason, "{sql}");
+        }
+        // Without ANSI_QUOTES, a double-quoted word is a string.
+        for sql in [
+            r#"CREATE TABLE t (id INT, KEY "k" (id))"#,
+            r#"CREATE TABLE t (id INT, KEY k ("id"))"#,
+            r#"CREATE TABLE t (id INT, CONSTRAINT "c" CHECK (id > 0))"#,
+            r#"CREATE TABLE t (id INT CONSTRAINT "c" CHECK (id > 0))"#,
+            r#"CREATE TABLE t (u INT, FOREIGN KEY ("u") REFERENCES users (id))"#,
+        ] {
+            assert_eq!(
+                no_answer_for(sql),
+                "a double-quoted column, index or constraint name works only when sql_mode \
+                 has ANSI_QUOTES, and kilit does not know the server's sql_mode",
+                "{sql}"
+            );
+        }
+        assert_eq!(
+            no_answer_for(r#"CREATE TABLE t (u INT, FOREIGN KEY (u) REFERENCES "users" (id))"#),
+            "a double-quoted table name works only when sql_mode has ANSI_QUOTES, \
+             and kilit does not know the server's sql_mode",
+        );
+        // Laravel's shapes keep the table.
+        for sql in [
+            "create table `t` (`id` bigint unsigned not null auto_increment primary key, \
+             `t` timestamp(3) not null default CURRENT_TIMESTAMP(3) on update \
+             CURRENT_TIMESTAMP(3), `d` date not null default (CURDATE()), \
+             `u` datetime(6) not null default CURRENT_TIMESTAMP(6)) \
+             default character set utf8mb4 collate 'utf8mb4_unicode_ci' engine = InnoDB",
+            "CREATE TABLE t (id INT, n VARCHAR(10), KEY (n(10)), KEY ((lower(n))))",
+        ] {
+            assert!(
+                matches!(kind(sql), StatementKind::CreateTable { .. }),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_prefix_length_from_1_to_2147483647_keeps_the_statement() {
+        // The grammar reads up to 2147483647, leading zeros left out; a
+        // larger one is error 1064, and 0 is error 1391.
+        for length in [
+            "1",
+            "10",
+            "0000000000010",
+            "0000000000000000000000010",
+            "2147483647",
+            "0000000000000002147483647",
+        ] {
+            let sql = format!("ALTER TABLE k ADD INDEX i (note({length}))");
+            assert!(matches!(kind(&sql), StatementKind::Alter(_)), "{sql}");
+        }
+        for length in [
+            "0",
+            "00",
+            "2147483648",
+            "0000000000000002147483648",
+            "4294967295",
+            "4294967296",
+            "18446744073709551616",
+            "1000000000000000000000000",
+        ] {
+            for sql in [
+                format!("ALTER TABLE k ADD INDEX i (note({length}))"),
+                format!("ALTER TABLE k ADD UNIQUE (note({length}))"),
+                format!("ALTER TABLE k2 ADD PRIMARY KEY (note({length}))"),
+                format!("CREATE INDEX i ON k (note({length}))"),
+            ] {
+                assert_eq!(
+                    no_answer_for(&sql),
+                    format!(
+                        "MySQL 8.0.46 and 8.4.13 do not accept the key part \
+                         note({length}); a prefix length is a whole number from 1 to \
+                         2147483647"
+                    ),
+                    "{sql}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_key_part_that_is_not_a_column_or_in_its_own_parentheses_gets_no_answer() {
+        for (sql, part) in [
+            (
+                "ALTER TABLE orders ADD INDEX i (orders.amount)",
+                "orders.amount",
+            ),
+            ("ALTER TABLE orders ADD INDEX i (1)", "1"),
+            ("ALTER TABLE orders ADD INDEX i (-amount)", "-amount"),
+            (
+                "ALTER TABLE orders ADD INDEX i (amount IS NULL)",
+                "amount IS NULL",
+            ),
+            ("ALTER TABLE orders ADD INDEX i (amount + 0)", "amount + 0"),
+            (
+                "ALTER TABLE orders ADD INDEX i (note COLLATE utf8mb4_bin)",
+                "note COLLATE utf8mb4_bin",
+            ),
+            (
+                "ALTER TABLE orders ADD INDEX i (CAST(note AS CHAR(5)))",
+                "CAST(note AS CHAR(5))",
+            ),
+            ("CREATE INDEX i ON k (id + 1)", "id + 1"),
+        ] {
+            assert_eq!(
+                no_answer_for(sql),
+                format!(
+                    "MySQL 8.0.46 and 8.4.13 do not accept the key part {part}; an \
+                     expression in an index needs its own parentheses, and a prefix length \
+                     is a whole number"
+                ),
+                "{sql}"
+            );
+        }
+        for sql in [
+            "ALTER TABLE orders ADD INDEX i ((amount + 0))",
+            "ALTER TABLE orders ADD INDEX i ((-amount))",
+            "ALTER TABLE orders ADD INDEX i ((amount IS NULL))",
+            "ALTER TABLE orders ADD INDEX i ((CAST(note AS CHAR(5))))",
+            "ALTER TABLE orders ADD INDEX i (note(10) ASC, email(20) DESC)",
+            // Columns named like a function the parser knows, and a column
+            // named `2e`, which MySQL takes.
+            "ALTER TABLE kw ADD INDEX (ceil(5))",
+            "ALTER TABLE kw ADD INDEX (floor(5))",
+            "ALTER TABLE kw ADD INDEX (ceil ( 5 ))",
+            "ALTER TABLE kw ADD INDEX (substr (5))",
+            "ALTER TABLE kw ADD INDEX (trim (5))",
+            "ALTER TABLE kw ADD UNIQUE (floor(5))",
+            "CREATE INDEX i ON kw (ceil(4))",
+            "ALTER TABLE kw ADD INDEX (2e)",
+            "ALTER TABLE kw ADD INDEX (1e DESC)",
+        ] {
+            assert!(matches!(kind(sql), StatementKind::Alter(_)), "{sql}");
+        }
+        assert!(matches!(
+            kind("CREATE TABLE t (ceil VARCHAR(10), KEY (ceil(5)), KEY (floor(3)))"),
+            StatementKind::CreateTable { .. }
+        ));
+        for (sql, part) in [
+            ("ALTER TABLE kw ADD INDEX (9)", "9"),
+            ("ALTER TABLE kw ADD INDEX (1e5)", "1e5"),
+        ] {
+            assert_eq!(
+                no_answer_for(sql),
+                format!(
+                    "MySQL 8.0.46 and 8.4.13 do not accept the key part {part}; an \
+                     expression in an index needs its own parentheses, and a prefix length \
+                     is a whole number"
+                ),
+                "{sql}"
+            );
+        }
+        assert_eq!(
+            no_answer_for("ALTER TABLE kw ADD INDEX (ceil(0))"),
+            "MySQL 8.0.46 and 8.4.13 do not accept the key part CEIL(0); a prefix length is \
+             a whole number from 1 to 2147483647"
+        );
+    }
+
+    #[test]
+    fn on_update_takes_only_current_timestamp_and_its_synonyms() {
+        // Error 1064.
+        for (value, printed) in [
+            ("CURRENT_DATE", "CURRENT_DATE"),
+            ("CURDATE()", "CURDATE()"),
+            ("UTC_TIMESTAMP()", "UTC_TIMESTAMP()"),
+            ("SYSDATE()", "SYSDATE()"),
+            ("(NOW())", "(NOW())"),
+            ("NULL", "NULL"),
+            ("1", "1"),
+            ("CURRENT_TIMESTAMP + 0", "CURRENT_TIMESTAMP + 0"),
+        ] {
+            for sql in [
+                format!("ALTER TABLE d ADD COLUMN u DATETIME NULL ON UPDATE {value}"),
+                format!("ALTER TABLE d MODIFY seen DATETIME NULL ON UPDATE {value}"),
+                format!("ALTER TABLE d CHANGE seen seen DATETIME NULL ON UPDATE {value}"),
+            ] {
+                assert_eq!(
+                    no_answer_for(&sql),
+                    format!(
+                        "MySQL 8.0.46 and 8.4.13 do not accept ON UPDATE {printed}; ON \
+                         UPDATE takes only CURRENT_TIMESTAMP and its synonyms"
+                    ),
+                    "{sql}"
+                );
+            }
+        }
+        for value in [
+            "NOW()",
+            "LOCALTIME",
+            "LOCALTIMESTAMP",
+            "CURRENT_TIMESTAMP()",
+        ] {
+            let sql = format!("ALTER TABLE d ADD COLUMN u DATETIME NULL ON UPDATE {value}");
+            assert!(matches!(kind(&sql), StatementKind::Alter(_)), "{sql}");
+        }
+    }
+
+    #[test]
+    fn current_timestamp_needs_a_datetime_or_timestamp_of_its_precision() {
+        // DEFAULT gives error 1067, ON UPDATE 1294.
+        for (data_type, value) in [
+            ("DATE", "CURRENT_TIMESTAMP"),
+            ("TIME", "NOW()"),
+            ("INT", "LOCALTIME"),
+            ("VARCHAR(20)", "LOCALTIMESTAMP"),
+            ("TEXT", "CURRENT_TIMESTAMP"),
+            ("DATETIME", "CURRENT_TIMESTAMP(3)"),
+            ("DATETIME(3)", "CURRENT_TIMESTAMP"),
+            ("DATETIME(3)", "NOW(6)"),
+            ("TIMESTAMP(6)", "CURRENT_TIMESTAMP(3)"),
+            ("TIMESTAMP(6)", "LOCALTIMESTAMP"),
+            ("DATETIME(6)", "CURRENT_TIMESTAMP(7)"),
+            ("datetime(6)", "current_timestamp"),
+        ] {
+            for clause in ["DEFAULT", "ON UPDATE"] {
+                for sql in [
+                    format!("ALTER TABLE d ADD COLUMN c {data_type} NULL {clause} {value}"),
+                    format!("ALTER TABLE d MODIFY c {data_type} NULL {clause} {value}"),
+                    format!("ALTER TABLE d CHANGE c c {data_type} NULL {clause} {value}"),
+                    format!("CREATE TABLE t (c {data_type} NULL {clause} {value})"),
+                ] {
+                    let reason = no_answer_for(&sql);
+                    assert!(
+                        reason.starts_with(&format!(
+                            "MySQL 8.0.46 and 8.4.13 do not accept {clause} "
+                        )) && reason.ends_with(
+                            " column; CURRENT_TIMESTAMP and its synonyms need a DATETIME \
+                                 or TIMESTAMP column of the same precision"
+                        ),
+                        "{sql}: {reason}"
+                    );
+                }
+            }
+        }
+        // The clause that does not match decides.
+        assert_eq!(
+            no_answer_for(
+                "ALTER TABLE d ADD COLUMN c DATETIME(6) NULL DEFAULT CURRENT_TIMESTAMP(6) \
+                 ON UPDATE CURRENT_TIMESTAMP"
+            ),
+            "MySQL 8.0.46 and 8.4.13 do not accept ON UPDATE CURRENT_TIMESTAMP on a \
+             DATETIME(6) column; CURRENT_TIMESTAMP and its synonyms need a DATETIME or \
+             TIMESTAMP column of the same precision"
+        );
+        // A type the parser does not name, such as YEAR, stays as it is.
+        assert!(matches!(
+            kind("ALTER TABLE d ADD COLUMN y YEAR NULL DEFAULT CURRENT_TIMESTAMP"),
+            StatementKind::Alter(_)
+        ));
+    }
+
+    #[test]
+    fn a_date_or_time_literal_in_set_default_gets_no_answer() {
+        // Error 1067 on DATE, TIME, DATETIME and INT columns alike.
+        for value in [
+            "(DATE '2020-01-01')",
+            "(TIME '10:00:00')",
+            "(TIMESTAMP '2020-01-01 00:00:00')",
+            "((DATE '2020-01-01'))",
+        ] {
+            let sql = format!("ALTER TABLE d ALTER COLUMN day SET DEFAULT {value}");
+            assert_eq!(
+                no_answer_for(&sql),
+                format!(
+                    "MySQL 8.0.46 and 8.4.13 do not accept SET DEFAULT {value}, a date or \
+                     time literal in parentheses; MODIFY and CHANGE take it"
+                ),
+                "{sql}"
+            );
+        }
+        for sql in [
+            "ALTER TABLE d MODIFY day DATE NULL DEFAULT (DATE '2020-01-01')",
+            "ALTER TABLE d ALTER COLUMN day SET DEFAULT (DATE '2020-01-01' + INTERVAL 1 DAY)",
+            "ALTER TABLE d ALTER COLUMN day SET DEFAULT (CURRENT_DATE)",
+        ] {
+            assert!(matches!(kind(sql), StatementKind::Alter(_)), "{sql}");
+        }
+    }
+
+    #[test]
+    fn constraint_and_index_drop_words_mysql_does_not_accept_get_no_answer() {
+        // Error 1064.
+        for (sql, words) in [
+            (
+                "ALTER TABLE t DROP CONSTRAINT IF EXISTS c",
+                "DROP CONSTRAINT IF EXISTS",
+            ),
+            (
+                "ALTER TABLE t DROP CONSTRAINT c CASCADE",
+                "CASCADE in DROP CONSTRAINT",
+            ),
+            (
+                "ALTER TABLE t DROP CONSTRAINT c RESTRICT",
+                "RESTRICT in DROP CONSTRAINT",
+            ),
+            ("ALTER TABLE t ADD CHECK (a > 0) NO INHERIT", "NO INHERIT"),
+            (
+                "ALTER TABLE t ADD CONSTRAINT c CHECK (a > 0) NO INHERIT",
+                "NO INHERIT",
+            ),
+            (
+                "ALTER TABLE t ADD COLUMN q INT NULL CHECK (q > 0) NO INHERIT",
+                "NO INHERIT",
+            ),
+            (
+                "ALTER TABLE t DROP FOREIGN KEY fk CASCADE",
+                "CASCADE in DROP FOREIGN KEY",
+            ),
+            (
+                "ALTER TABLE t DROP FOREIGN KEY fk RESTRICT",
+                "RESTRICT in DROP FOREIGN KEY",
+            ),
+            (
+                "ALTER TABLE t DROP PRIMARY KEY CASCADE",
+                "CASCADE in DROP PRIMARY KEY",
+            ),
+            (
+                "ALTER TABLE t DROP PRIMARY KEY RESTRICT",
+                "RESTRICT in DROP PRIMARY KEY",
+            ),
+            // The parser cannot read these; kilit finds the words.
+            (
+                "ALTER TABLE t DROP INDEX ix CASCADE",
+                "CASCADE in DROP INDEX",
+            ),
+            (
+                "ALTER TABLE t DROP INDEX `ix` RESTRICT",
+                "RESTRICT in DROP INDEX",
+            ),
+            ("ALTER TABLE t DROP KEY ix CASCADE", "CASCADE in DROP KEY"),
+            (
+                "ALTER TABLE t ADD COLUMN q INT NULL, DROP INDEX ix CASCADE",
+                "CASCADE in DROP INDEX",
+            ),
+            ("DROP INDEX ix ON t CASCADE", "CASCADE in DROP INDEX"),
+            ("DROP INDEX ix ON t RESTRICT", "RESTRICT in DROP INDEX"),
+        ] {
+            assert_eq!(
+                no_answer_for(sql),
+                format!("MySQL 8.0.46 and 8.4.13 do not accept {words}"),
+                "{sql}"
+            );
+        }
+        // MySQL takes CASCADE and RESTRICT after DROP COLUMN, and drops it.
+        for sql in [
+            "ALTER TABLE t DROP COLUMN note CASCADE",
+            "ALTER TABLE t DROP COLUMN note RESTRICT",
+        ] {
+            assert_eq!(
+                operation(sql),
+                Operation::DropColumn {
+                    name: "note".into()
+                },
+                "{sql}"
+            );
         }
     }
 

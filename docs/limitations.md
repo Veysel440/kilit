@@ -26,7 +26,24 @@ safe.
   `SET` inside one, such as `/*!80000 SET old_alter_table = ON */`, does not
   change the answers after it.
 - `CREATE TABLE` is not checked: kilit follows the table it creates, but says
-  nothing about the statement itself.
+  nothing about the statement itself. The one exception is syntax MySQL
+  8.0.46 and 8.4.13 reject (a name in single quotes, a key part that is not a
+  column, a prefix length or an expression in its own parentheses; an
+  `ON UPDATE` or `DEFAULT` that does not fit the column): that statement is
+  `UNKNOWN` and creates no table.
+- Some refused forms are still read as if MySQL took them, and get an answer
+  that MySQL would not give: an unquoted reserved word used as a name, a
+  prefix longer than its column (error 1089), a key that is too long (1071),
+  a `DATETIME` or `TIME` precision above 6, `YEAR` with `CURRENT_TIMESTAMP`,
+  a function word such as `position` or `extract` as a key-part column name
+  written right before `(`, and `NOW ()` with a space as a default or
+  `ON UPDATE`.
+- Some forms are unreadable to kilit, which says it could not read the
+  statement: single-quoted table options that MySQL takes, such as
+  `ENGINE = 'InnoDB'`, `DROP KEY 'ix'`, `RENAME INDEX` with quotes, and the
+  MariaDB forms `IF EXISTS` and `IF NOT EXISTS` on `DROP CHECK`,
+  `DROP FOREIGN KEY`, `DROP INDEX`, `ADD COLUMN` and `ADD INDEX`. A table
+  named in such a statement may be lost from then on.
 - Laravel's `migrate --pretend` output turns every run of spaces into one, even
   inside quotes, so kilit sees `DEFAULT 'a  b'` as `DEFAULT 'a b'`.
 

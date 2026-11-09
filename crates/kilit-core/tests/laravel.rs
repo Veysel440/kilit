@@ -3321,3 +3321,292 @@ fn migrations_that_only_set_the_engine_the_charset_or_the_collation_print_no_sta
         }
     }
 }
+
+// Step 13a: `php artisan migrate --pretend` for six migrations, byte for byte as
+// Laravel 12.71.0 prints it (the same bytes in Laravel 13.40.0 in a terminal)
+// and as Laravel 13.40.0 prints it where it detects an automated environment
+// (the short form). Each case has one Schema::create (table t_<case>) and one
+// Schema::table('orders'), on a base with orders(id). Laravel 10.50.4 and
+// 11.57.1 were read from their source, not run: their SQL is the same for
+// every case but date-usecurrent, where typeDate ignores useCurrent() and
+// writes no default.
+//
+//   date-current-date              date('d')->default(DB::raw('CURRENT_DATE'))
+//   date-current-timestamp         date('d')->default(DB::raw('CURRENT_TIMESTAMP'))
+//   datetime6-current-timestamp    dateTime('t', 6)->default(DB::raw('CURRENT_TIMESTAMP'))
+//   timestamp3-usecurrent-onupdate timestamp('t', 3)->useCurrent()->useCurrentOnUpdate()
+//   date-usecurrent                date('d')->useCurrent()
+//   string-collation-comment       string('s')->collation('utf8mb4_bin')->comment('x')
+//
+// Real runs on MySQL 8.0.46 and 8.4.13 failed the first three, the CREATE and
+// the ALTER alike (1064 for CURRENT_DATE, 1067 for the other two), and ran the
+// other three.
+
+const NOT_ACCEPTED: &str = "MySQL 8.0.46 and 8.4.13 do not accept";
+
+const STEP13A_DATE_CURRENT_DATE_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_05_01_000001_create_date-current-date .................................  \n",
+    "  \u{21c2} create table `t_date_current_date` (`id` bigint unsigned not null auto_increment primary key, `d` date not null default CURRENT_DATE) default character set utf8mb4 collate 'utf8mb4_unicode_ci'  \n",
+    "  2026_05_01_000002_table_date-current-date ..................................  \n",
+    "  \u{21c2} alter table `orders` add `d` date not null default CURRENT_DATE  \n",
+    "\n",
+);
+
+const STEP13A_DATE_CURRENT_DATE_L13_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_05_01_000001_create_date-current-date .. \n",
+    " \u{21c2} create table `t_date_current_date` (`id` bigint unsigned not null auto_increment primary key, `d` date not null default CURRENT_DATE) default character set utf8mb4 collate 'utf8mb4_unicode_ci' \n",
+    " 2026_05_01_000002_table_date-current-date .. \n",
+    " \u{21c2} alter table `orders` add `d` date not null default CURRENT_DATE \n",
+    "\n",
+);
+
+const STEP13A_DATE_CURRENT_TIMESTAMP_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_05_01_000001_create_date-current-timestamp ............................  \n",
+    "  \u{21c2} create table `t_date_current_timestamp` (`id` bigint unsigned not null auto_increment primary key, `d` date not null default CURRENT_TIMESTAMP) default character set utf8mb4 collate 'utf8mb4_unicode_ci'  \n",
+    "  2026_05_01_000002_table_date-current-timestamp .............................  \n",
+    "  \u{21c2} alter table `orders` add `d` date not null default CURRENT_TIMESTAMP  \n",
+    "\n",
+);
+
+const STEP13A_DATE_CURRENT_TIMESTAMP_L13_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_05_01_000001_create_date-current-timestamp .. \n",
+    " \u{21c2} create table `t_date_current_timestamp` (`id` bigint unsigned not null auto_increment primary key, `d` date not null default CURRENT_TIMESTAMP) default character set utf8mb4 collate 'utf8mb4_unicode_ci' \n",
+    " 2026_05_01_000002_table_date-current-timestamp .. \n",
+    " \u{21c2} alter table `orders` add `d` date not null default CURRENT_TIMESTAMP \n",
+    "\n",
+);
+
+const STEP13A_DATETIME6_CURRENT_TIMESTAMP_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_05_01_000001_create_datetime6-current-timestamp .......................  \n",
+    "  \u{21c2} create table `t_datetime6_current_timestamp` (`id` bigint unsigned not null auto_increment primary key, `t` datetime(6) not null default CURRENT_TIMESTAMP) default character set utf8mb4 collate 'utf8mb4_unicode_ci'  \n",
+    "  2026_05_01_000002_table_datetime6-current-timestamp ........................  \n",
+    "  \u{21c2} alter table `orders` add `t` datetime(6) not null default CURRENT_TIMESTAMP  \n",
+    "\n",
+);
+
+const STEP13A_DATETIME6_CURRENT_TIMESTAMP_L13_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_05_01_000001_create_datetime6-current-timestamp .. \n",
+    " \u{21c2} create table `t_datetime6_current_timestamp` (`id` bigint unsigned not null auto_increment primary key, `t` datetime(6) not null default CURRENT_TIMESTAMP) default character set utf8mb4 collate 'utf8mb4_unicode_ci' \n",
+    " 2026_05_01_000002_table_datetime6-current-timestamp .. \n",
+    " \u{21c2} alter table `orders` add `t` datetime(6) not null default CURRENT_TIMESTAMP \n",
+    "\n",
+);
+
+const STEP13A_TIMESTAMP3_USE_CURRENT_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_05_01_000001_create_timestamp3-usecurrent-onupdate ....................  \n",
+    "  \u{21c2} create table `t_timestamp3_usecurrent_onupdate` (`id` bigint unsigned not null auto_increment primary key, `t` timestamp(3) not null default CURRENT_TIMESTAMP(3) on update CURRENT_TIMESTAMP(3)) default character set utf8mb4 collate 'utf8mb4_unicode_ci'  \n",
+    "  2026_05_01_000002_table_timestamp3-usecurrent-onupdate .....................  \n",
+    "  \u{21c2} alter table `orders` add `t` timestamp(3) not null default CURRENT_TIMESTAMP(3) on update CURRENT_TIMESTAMP(3)  \n",
+    "\n",
+);
+
+const STEP13A_TIMESTAMP3_USE_CURRENT_L13_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_05_01_000001_create_timestamp3-usecurrent-onupdate .. \n",
+    " \u{21c2} create table `t_timestamp3_usecurrent_onupdate` (`id` bigint unsigned not null auto_increment primary key, `t` timestamp(3) not null default CURRENT_TIMESTAMP(3) on update CURRENT_TIMESTAMP(3)) default character set utf8mb4 collate 'utf8mb4_unicode_ci' \n",
+    " 2026_05_01_000002_table_timestamp3-usecurrent-onupdate .. \n",
+    " \u{21c2} alter table `orders` add `t` timestamp(3) not null default CURRENT_TIMESTAMP(3) on update CURRENT_TIMESTAMP(3) \n",
+    "\n",
+);
+
+const STEP13A_DATE_USE_CURRENT_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_05_01_000001_create_date-usecurrent ...................................  \n",
+    "  \u{21c2} create table `t_date_usecurrent` (`id` bigint unsigned not null auto_increment primary key, `d` date not null default (CURDATE())) default character set utf8mb4 collate 'utf8mb4_unicode_ci'  \n",
+    "  2026_05_01_000002_table_date-usecurrent ....................................  \n",
+    "  \u{21c2} alter table `orders` add `d` date not null default (CURDATE())  \n",
+    "\n",
+);
+
+const STEP13A_DATE_USE_CURRENT_L13_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_05_01_000001_create_date-usecurrent .. \n",
+    " \u{21c2} create table `t_date_usecurrent` (`id` bigint unsigned not null auto_increment primary key, `d` date not null default (CURDATE())) default character set utf8mb4 collate 'utf8mb4_unicode_ci' \n",
+    " 2026_05_01_000002_table_date-usecurrent .. \n",
+    " \u{21c2} alter table `orders` add `d` date not null default (CURDATE()) \n",
+    "\n",
+);
+
+const STEP13A_STRING_COLLATION_COMMENT_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_05_01_000001_create_string-collation-comment ..........................  \n",
+    "  \u{21c2} create table `t_string_collation_comment` (`id` bigint unsigned not null auto_increment primary key, `s` varchar(255) collate 'utf8mb4_bin' not null comment 'x') default character set utf8mb4 collate 'utf8mb4_unicode_ci'  \n",
+    "  2026_05_01_000002_table_string-collation-comment ...........................  \n",
+    "  \u{21c2} alter table `orders` add `s` varchar(255) collate 'utf8mb4_bin' not null comment 'x'  \n",
+    "\n",
+);
+
+const STEP13A_STRING_COLLATION_COMMENT_L13_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_05_01_000001_create_string-collation-comment .. \n",
+    " \u{21c2} create table `t_string_collation_comment` (`id` bigint unsigned not null auto_increment primary key, `s` varchar(255) collate 'utf8mb4_bin' not null comment 'x') default character set utf8mb4 collate 'utf8mb4_unicode_ci' \n",
+    " 2026_05_01_000002_table_string-collation-comment .. \n",
+    " \u{21c2} alter table `orders` add `s` varchar(255) collate 'utf8mb4_bin' not null comment 'x' \n",
+    "\n",
+);
+
+const STEP13A_DATE_USE_CURRENT_L10: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_05_01_000001_create_date-usecurrent ...................................  \n",
+    "  \u{21c2} create table `t_date_usecurrent` (`id` bigint unsigned not null auto_increment primary key, `d` date not null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'  \n",
+    "  2026_05_01_000002_table_date-usecurrent ....................................  \n",
+    "  \u{21c2} alter table `orders` add `d` date not null  \n",
+    "\n",
+);
+
+/// The reason of each statement kilit cannot answer, in order; None where it
+/// has an answer.
+fn unknown_reasons(server: &str, schema: &str, output: &str) -> Vec<Option<String>> {
+    let pretend = read_pretend(output).expect("the output of migrate --pretend");
+    assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
+    let statements: Vec<_> = pretend
+        .migrations
+        .into_iter()
+        .flat_map(|migration| migration.statements)
+        .collect();
+    let results = Knowledge::built_in().server(server).unwrap();
+    check(&statements, &Schema::from_sql(schema), results)
+        .into_iter()
+        .map(|finding| match finding.prediction {
+            Prediction::Unknown { reason } => Some(reason),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn laravel_s_default_raw_that_mysql_rejects_is_unknown_for_the_create_and_for_the_table() {
+    // $table->date('d')->default(DB::raw('CURRENT_DATE')) and
+    // ->default(DB::raw('CURRENT_TIMESTAMP')) on a date,
+    // $table->dateTime('t', 6)->default(DB::raw('CURRENT_TIMESTAMP')):
+    // MySQL 8.0.46 and 8.4.13 refuse the Schema::create and the Schema::table
+    // alike (hand tests g1, g23, g24 and a, e).
+    for (case, long, short) in [
+        (
+            "date-current-date",
+            STEP13A_DATE_CURRENT_DATE_L12,
+            STEP13A_DATE_CURRENT_DATE_L13_SHORT,
+        ),
+        (
+            "date-current-timestamp",
+            STEP13A_DATE_CURRENT_TIMESTAMP_L12,
+            STEP13A_DATE_CURRENT_TIMESTAMP_L13_SHORT,
+        ),
+        (
+            "datetime6-current-timestamp",
+            STEP13A_DATETIME6_CURRENT_TIMESTAMP_L12,
+            STEP13A_DATETIME6_CURRENT_TIMESTAMP_L13_SHORT,
+        ),
+    ] {
+        for (form, output) in [("long", long), ("short", short)] {
+            assert_eq!(pretend_of(output).migrations.len(), 2, "{case} {form}");
+            for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+                assert_eq!(
+                    answers(server, ORDERS, output),
+                    ["unknown", "unknown"],
+                    "{case} {form} on {server}"
+                );
+                for (statement, reason) in unknown_reasons(server, ORDERS, output)
+                    .into_iter()
+                    .enumerate()
+                {
+                    let reason = reason.unwrap();
+                    assert!(
+                        reason.starts_with(NOT_ACCEPTED),
+                        "{case} {form} on {server}, statement {statement}: {reason}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn laravel_s_use_current_and_use_current_on_update_keep_their_answers() {
+    // $table->timestamp('t', 3)->useCurrent()->useCurrentOnUpdate(): the
+    // precision matches, MySQL runs both statements (adding the column is
+    // INSTANT). $table->date('d')->useCurrent() on Laravel 12 and 13 writes
+    // default (CURDATE()), an expression default that copies the table.
+    for (form, output) in [
+        ("long", STEP13A_TIMESTAMP3_USE_CURRENT_L12),
+        ("short", STEP13A_TIMESTAMP3_USE_CURRENT_L13_SHORT),
+    ] {
+        for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+            assert_eq!(
+                answers(server, ORDERS, output),
+                [NOT_CHECKED, INSTANT],
+                "timestamp3 {form} on {server}"
+            );
+        }
+    }
+    for (form, output) in [
+        ("long", STEP13A_DATE_USE_CURRENT_L12),
+        ("short", STEP13A_DATE_USE_CURRENT_L13_SHORT),
+    ] {
+        for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+            assert_eq!(
+                answers(server, ORDERS, output),
+                [NOT_CHECKED, COPY],
+                "date {form} on {server}"
+            );
+        }
+    }
+    // Laravel 10 and 11: no default at all, a plain new column.
+    for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+        assert_eq!(
+            answers(server, ORDERS, STEP13A_DATE_USE_CURRENT_L10),
+            [NOT_CHECKED, INSTANT],
+            "date on Laravel 10 on {server}"
+        );
+    }
+}
+
+#[test]
+fn laravel_s_collation_and_comment_on_a_string_keep_their_answers() {
+    // $table->string('s')->collation('utf8mb4_bin')->comment('x')
+    for (form, output) in [
+        ("long", STEP13A_STRING_COLLATION_COMMENT_L12),
+        ("short", STEP13A_STRING_COLLATION_COMMENT_L13_SHORT),
+    ] {
+        for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+            assert_eq!(
+                answers(server, ORDERS, output),
+                [NOT_CHECKED, INSTANT],
+                "{form} on {server}"
+            );
+        }
+    }
+}

@@ -1783,8 +1783,6 @@ ALTER TABLE t ADD CONSTRAINT C CHECK (a > 1);",
         for sql in [
             "ALTER TABLE t DROP CHECK c",
             "ALTER TABLE t ALTER CHECK c NOT ENFORCED",
-            "ALTER TABLE t ADD CHECK (a > 0) NO INHERIT",
-            "ALTER TABLE t DROP CONSTRAINT IF EXISTS c",
             "ALTER TABLE t ADD b INT CHECK (b > 0)",
         ] {
             let schema = from_sql(&format!(
