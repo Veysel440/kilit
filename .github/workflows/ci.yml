@@ -44,6 +44,8 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --locked
+      - name: shellcheck
+        run: shellcheck --shell=bash action.sh
       - name: No C or assembly in the dependency tree
         # `cargo tree -i cc` fails when no package is named cc, which is the
         # pass. Success means cc is in the tree; any other error fails too.

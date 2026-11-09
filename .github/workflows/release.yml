@@ -1,0 +1,455 @@
+name: Release
+
+# A pushed tag v*.*.* builds, tests and checks the archives, then drafts a
+# release with them. A run started by hand, also on a tag, and a push to main
+# that changes this workflow or the action are dry runs: the same jobs without
+# the release, the archives kept as workflow artifacts.
+on:
+  push:
+    tags: ["v*.*.*"]
+    branches: [main]
+    # Path filters are not evaluated for pushed tags.
+    paths:
+      - .github/workflows/release.yml
+      - action.yml
+      - action.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    name: Version and tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Workspace version
+        id: version
+        run: |
+          version=$(cargo metadata --locked --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "kilit") | .version')
+          if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::The workspace version is not three numbers: $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Workspace version: $version"
+      - name: Tag, changelog and branch
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "::error::The tag $GITHUB_REF_NAME is not v$VERSION, the workspace version."
+            exit 1
+          fi
+          # The entry runs from its "## [<version>]" heading to the next "## ".
+          if ! awk -v heading="## [$VERSION]" '
+              index($0, heading) == 1 &&
+                (length($0) == length(heading) ||
+                 substr($0, length(heading) + 1, 1) == " ") {
+                found++
+                inside = 1
+                next
+              }
+              inside && /^## / { inside = 0 }
+              inside { print }
+              END { exit (found == 1 ? 0 : 1) }
+            ' CHANGELOG.md > release-notes.md; then
+            echo "::error::CHANGELOG.md has no single \"## [$VERSION]\" entry."
+            exit 1
+          fi
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::The CHANGELOG.md entry for $VERSION is empty."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::The tagged commit $(git rev-parse HEAD) is not on main."
+            exit 1
+          fi
+      - name: Keep the release notes
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: check
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm }
+          - { target: aarch64-apple-darwin, runner: macos-26 }
+          - { target: x86_64-apple-darwin, runner: macos-26-intel }
+          - { target: x86_64-pc-windows-msvc, runner: windows-2025 }
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.check.outputs.version }}
+      # The C runtime linked in: the binary needs no Visual C++ runtime.
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal --target "$TARGET" --no-self-update
+          rustup default stable
+          rustc -vV
+      - name: Test
+        run: cargo test --workspace --release --locked --target "$TARGET"
+      - name: Build
+        # The same packages as the tests, so the binary stays the one they ran.
+        run: |
+          binary=target/$TARGET/release/kilit
+          if [ "$RUNNER_OS" = Windows ]; then
+            binary=$binary.exe
+          fi
+          cp "$binary" tested-binary
+          cargo build --workspace --release --locked --target "$TARGET"
+          if ! cmp -s "$binary" tested-binary; then
+            echo "::error::The release build changed the binary the tests ran."
+            exit 1
+          fi
+      - name: Archive
+        run: |
+          name=kilit-$VERSION-$TARGET
+          mkdir -p "stage/$name" out
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp "target/$TARGET/release/kilit.exe" "stage/$name/"
+          else
+            cp "target/$TARGET/release/kilit" "stage/$name/"
+          fi
+          cp LICENSE-MIT LICENSE-APACHE README.md "stage/$name/"
+          cd stage
+          if [ "$RUNNER_OS" = Windows ]; then
+            # Git Bash's tar cannot write a zip file; the tar of Windows can.
+            "$(cygpath -u -S)/tar.exe" -a -c -f "../out/$name.zip" "$name"
+          else
+            # COPYFILE_DISABLE keeps macOS metadata files out of the archive.
+            COPYFILE_DISABLE=1 tar -c -z -f "../out/$name.tar.gz" "$name"
+          fi
+          ls -l ../out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: archive-${{ matrix.target }}
+          path: out/
+          if-no-files-found: error
+
+  smoke:
+    name: Smoke test ${{ matrix.target }}
+    needs: [check, build]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm }
+          - { target: aarch64-apple-darwin, runner: macos-26 }
+          - { target: x86_64-apple-darwin, runner: macos-26-intel }
+          - { target: x86_64-pc-windows-msvc, runner: windows-2025 }
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      # The checkout only gives the demo its input files; kilit comes from
+      # the archive.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: archive-${{ matrix.target }}
+          path: archive
+      - name: Unpack the archive and check what it holds
+        run: |
+          name=kilit-$VERSION-$TARGET
+          mkdir unpacked
+          if [ "$RUNNER_OS" = Windows ]; then
+            program=kilit.exe
+            windows_tar="$(cygpath -u -S)/tar.exe"
+            entries=$("$windows_tar" -t -f "archive/$name.zip")
+            "$windows_tar" -x -f "archive/$name.zip" -C unpacked
+          else
+            program=kilit
+            entries=$(tar -t -z -f "archive/$name.tar.gz")
+            tar -x -z -f "archive/$name.tar.gz" -C unpacked
+          fi
+          expected=$(printf '%s\n' "$name/LICENSE-APACHE" "$name/LICENSE-MIT" \
+            "$name/README.md" "$name/$program" | LC_ALL=C sort)
+          actual=$(printf '%s\n' "$entries" | tr -d '\r' | sed 's:/$::' |
+            grep -v -x -F "$name" | LC_ALL=C sort)
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::The archive does not hold exactly the binary, the licenses and the README."
+            printf 'Expected:\n%s\nFound:\n%s\n' "$expected" "$actual"
+            exit 1
+          fi
+          echo "KILIT=$PWD/unpacked/$name/$program" >> "$GITHUB_ENV"
+      - name: Linking
+        run: |
+          case $RUNNER_OS in
+            Linux)
+              dynamic=$(readelf -d "$KILIT")
+              if grep -q '(NEEDED)' <<< "$dynamic"; then
+                echo "::error::The Linux binary is not static."
+                printf '%s\n' "$dynamic"
+                exit 1
+              fi
+              ;;
+            Windows)
+              if grep -a -q -i -e 'vcruntime140' -e 'api-ms-win-crt-' "$KILIT"; then
+                echo "::error::The Windows binary needs the Visual C++ runtime."
+                exit 1
+              fi
+              ;;
+          esac
+      - name: Version and demo
+        run: |
+          printed=$("$KILIT" --version)
+          if [ "$printed" != "kilit $VERSION" ]; then
+            echo "::error::kilit --version printed \"$printed\", not \"kilit $VERSION\"."
+            exit 1
+          fi
+          # The demo of the README, as the_readme_example_is_real_output runs it.
+          mkdir -p demo/database/schema output
+          cp crates/kilit-core/examples/mysql-schema.sql demo/database/schema/
+          cd demo
+          text_status=0
+          "$KILIT" check --schema database/schema/mysql-schema.sql \
+            < ../crates/kilit-core/examples/laravel-pretend.txt \
+            > ../output/demo.txt || text_status=$?
+          json_status=0
+          "$KILIT" check --format json --schema database/schema/mysql-schema.sql \
+            < ../crates/kilit-core/examples/laravel-pretend.txt \
+            > ../output/demo.json || json_status=$?
+          if [ "$text_status" -ne 1 ] || [ "$json_status" -ne 1 ]; then
+            echo "::error::The demo exited with $text_status (text) and $json_status (JSON), not 1."
+            exit 1
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: demo-${{ matrix.target }}
+          path: output/
+          if-no-files-found: error
+
+  same-output:
+    name: Same demo output on every target
+    needs: smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: demo-*
+          path: demo
+      - name: Compare
+        run: |
+          reference=demo/demo-x86_64-unknown-linux-musl
+          count=0
+          for dir in demo/demo-*; do
+            count=$((count + 1))
+            sha256sum "$dir/demo.txt" "$dir/demo.json"
+            if [ ! -s "$dir/demo.txt" ] || [ ! -s "$dir/demo.json" ]; then
+              echo "::error::$dir has an empty output."
+              exit 1
+            fi
+            cmp "$reference/demo.txt" "$dir/demo.txt"
+            cmp "$reference/demo.json" "$dir/demo.json"
+          done
+          if [ "$count" -ne 5 ]; then
+            echo "::error::$count demo outputs, not 5."
+            exit 1
+          fi
+
+  sums:
+    name: SHA256SUMS
+    needs: [check, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: archive-*
+          merge-multiple: true
+          path: dist
+      - name: Write SHA256SUMS
+        run: |
+          {
+            for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
+              aarch64-apple-darwin x86_64-apple-darwin; do
+              echo "kilit-$VERSION-$target.tar.gz"
+            done
+            echo "kilit-$VERSION-x86_64-pc-windows-msvc.zip"
+          } | LC_ALL=C sort > expected-files
+          (cd dist && printf '%s\n' *) | LC_ALL=C sort > found-files
+          if ! diff expected-files found-files; then
+            echo "::error::The archives are not the five expected."
+            exit 1
+          fi
+          cd dist
+          sha256sum -- * > ../SHA256SUMS
+          cat ../SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sha256sums
+          path: SHA256SUMS
+          if-no-files-found: error
+
+  install:
+    name: Install with the action on ${{ matrix.runner }}
+    needs: [check, sums]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-26, macos-26-intel, windows-2025]
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: archive-*
+          merge-multiple: true
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sha256sums
+          path: release
+      - name: Install kilit with the action
+        uses: ./
+        env:
+          KILIT_INSTALL_ARCHIVES: ${{ github.workspace }}/release
+      - name: Run the installed kilit
+        run: |
+          printed=$(kilit --version)
+          if [ "$printed" != "kilit $VERSION" ]; then
+            echo "::error::kilit --version printed \"$printed\", not \"kilit $VERSION\"."
+            exit 1
+          fi
+          mkdir -p demo/database/schema
+          cp crates/kilit-core/examples/mysql-schema.sql demo/database/schema/
+          cd demo
+          status=0
+          kilit check --schema database/schema/mysql-schema.sql \
+            < ../crates/kilit-core/examples/laravel-pretend.txt > /dev/null || status=$?
+          if [ "$status" -ne 1 ]; then
+            echo "::error::The demo exited with $status, not 1."
+            exit 1
+          fi
+      - name: The action's script refuses what it must refuse
+        run: |
+          # Each case runs the script itself; it must fail with its own message.
+          refuses() {
+            local expected=$1 output
+            shift
+            if output=$(env "$@" bash action.sh 2>&1); then
+              echo "::error::The script did not fail; expected: $expected"
+              printf '%s\n' "$output"
+              exit 1
+            fi
+            if ! grep -q -F -e "$expected" <<< "$output"; then
+              echo "::error::The script failed without saying: $expected"
+              printf '%s\n' "$output"
+              exit 1
+            fi
+            echo "Refused: $expected"
+          }
+          mkdir scratch
+          export RUNNER_TEMP=$PWD/scratch
+          refuses "digits and dots only" KILIT_VERSION="$VERSION; echo injected"
+          refuses "three numbers and two dots" KILIT_VERSION=1.2
+          refuses "no prebuilt binary for RUNNER_OS=$RUNNER_OS and RUNNER_ARCH=X86" \
+            KILIT_VERSION="$VERSION" RUNNER_ARCH=X86
+          cp -R release tampered
+          awk '{ print (substr($1, 1, 1) == "0" ? "1" : "0") substr($1, 2) "  " $2 }' \
+            release/SHA256SUMS > tampered/SHA256SUMS
+          refuses "does not match SHA256SUMS" \
+            KILIT_VERSION="$VERSION" KILIT_INSTALL_ARCHIVES="$PWD/tampered"
+          refuses "has no kilit-9.9.9-" \
+            KILIT_VERSION=9.9.9 KILIT_INSTALL_ARCHIVES="$PWD/release"
+          # No release v0.0.0 is ever made: the real download gives 404.
+          refuses "gives 404" KILIT_VERSION=0.0.0 KILIT_INSTALL_ARCHIVES=
+          if [ -n "$(find scratch -type d -name 'kilit-*-*')" ]; then
+            echo "::error::A refused run unpacked an archive."
+            exit 1
+          fi
+
+  release:
+    name: Draft the release
+    needs: [check, build, smoke, same-output, sums, install]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: archive-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sha256sums
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+          path: notes
+      - name: Check the archives against SHA256SUMS
+        run: |
+          cd dist
+          sha256sum --check --strict SHA256SUMS
+          files=(*)
+          if [ "${#files[@]}" -ne 6 ]; then
+            echo "::error::dist holds other files than the five archives and SHA256SUMS."
+            exit 1
+          fi
+      - name: Attest the build provenance of the archives
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/kilit-*
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "kilit $VERSION" --notes-file notes/release-notes.md

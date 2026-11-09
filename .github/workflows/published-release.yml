@@ -1,0 +1,50 @@
+name: Published release
+
+# Installs a release once it is published, with the action of its own tag,
+# on every kind of runner the action supports.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  install:
+    name: Install with the action on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-26, macos-26-intel, windows-2025]
+    steps:
+      # The release's tag: its action.yml, action.sh and demo input files.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install kilit with the action of the tag
+        uses: ./
+      - name: Run the installed kilit
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          printed=$(kilit --version)
+          if [ "$printed" != "kilit ${TAG#v}" ]; then
+            echo "::error::kilit --version printed \"$printed\", not \"kilit ${TAG#v}\"."
+            exit 1
+          fi
+          mkdir -p demo/database/schema
+          cp crates/kilit-core/examples/mysql-schema.sql demo/database/schema/
+          cd demo
+          status=0
+          kilit check --schema database/schema/mysql-schema.sql \
+            < ../crates/kilit-core/examples/laravel-pretend.txt > /dev/null || status=$?
+          if [ "$status" -ne 1 ]; then
+            echo "::error::The demo exited with $status, not 1."
+            exit 1
+          fi

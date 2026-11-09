@@ -1,0 +1,25 @@
+name: Install kilit
+description: >-
+  Install kilit, which says what MySQL does with each statement of a
+  migration, from its GitHub release.
+author: Veysel Tulu
+branding:
+  icon: lock
+  color: blue
+
+inputs:
+  version:
+    description: >-
+      The kilit release to install, such as 0.1.0: digits and dots only. The
+      default is the release this version of the action belongs to.
+    required: false
+    default: "0.0.0"
+
+runs:
+  using: composite
+  steps:
+    - name: Install kilit
+      shell: bash
+      env:
+        KILIT_VERSION: ${{ inputs.version }}
+      run: bash "$GITHUB_ACTION_PATH/action.sh"

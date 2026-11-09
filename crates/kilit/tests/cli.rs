@@ -531,6 +531,33 @@ fn servers_lists_what_kilit_has_results_for() {
 }
 
 #[test]
+fn the_action_installs_the_workspace_version_by_default() {
+    // action.yml installs the release its default `version` names; a version
+    // bump that forgets the action must fail here.
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../action.yml");
+    let action = std::fs::read_to_string(&file).expect("action.yml is at the repository root");
+    let mut lines = action.lines().skip_while(|line| *line != "inputs:");
+    assert!(lines.next().is_some(), "action.yml has an inputs: section");
+    // The version input ends at the next line indented by two spaces or less.
+    let version_input = lines
+        .skip_while(|line| *line != "  version:")
+        .skip(1)
+        .take_while(|line| line.starts_with("    ") || line.trim().is_empty());
+    let version = version_input
+        .filter_map(|line| line.trim().strip_prefix("default:"))
+        .next()
+        .expect("action.yml has a default: line under the version input of inputs:");
+    let default = version.trim().trim_matches('"').trim_matches('\'');
+    assert_eq!(
+        default,
+        env!("CARGO_PKG_VERSION"),
+        "the default of the version input in action.yml is {default:?}, but the workspace \
+         version is {:?}: change the default in action.yml",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
+#[test]
 fn the_readme_example_is_real_output() {
     // The README shows some migrations of the demo, run from a Laravel
     // project's root: every block it shows must be in the real output.
@@ -5992,11 +6019,15 @@ fn every_relative_link_points_at_a_file() {
 const LOCK_WARNING_STATEMENT_KINDS: &str =
     "Every ALTER TABLE, DROP TABLE, RENAME TABLE and TRUNCATE TABLE first waits";
 
+/// Writes the schema once per test process: tests run in parallel, and a
+/// kilit process must never read the file while another test rewrites it.
 fn write_lock_schema() -> PathBuf {
-    let file = Path::new(env!("CARGO_TARGET_TMPDIR")).join("metadata-lock-schema.sql");
-    std::fs::write(
-        &file,
-        "CREATE TABLE `users` (
+    static FILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    FILE.get_or_init(|| {
+        let file = Path::new(env!("CARGO_TARGET_TMPDIR")).join("metadata-lock-schema.sql");
+        std::fs::write(
+            &file,
+            "CREATE TABLE `users` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
   `name` varchar(100) NOT NULL,
   PRIMARY KEY (`id`)
@@ -6015,9 +6046,11 @@ CREATE TABLE `customers` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 ",
-    )
-    .unwrap();
-    file
+        )
+        .unwrap();
+        file
+    })
+    .clone()
 }
 
 /// Text, JSON and exit status of `kilit check --schema <the lock schema>`
