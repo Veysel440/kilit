@@ -823,6 +823,265 @@
       ]
     },
     {
+      "id": "add-column-blob-default-literal",
+      "title": "Add a BLOB column with a literal default",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN c BLOB DEFAULT ''",
+      "verdict": {
+        "result": "fails",
+        "code": 1101,
+        "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        }
+      ]
+    },
+    {
+      "id": "add-column-blob-default-literal-sql-mode-empty",
+      "title": "Add a BLOB column with a literal default, with an empty sql_mode",
+      "session": [
+        "SET sql_mode = ''"
+      ],
+      "statement": "ALTER TABLE orders ADD COLUMN c BLOB DEFAULT ''",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-column-blob-default-literal-sql-mode-not-strict",
+      "title": "Add a BLOB column with a literal default, with a sql_mode that is not strict",
+      "session": [
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+      ],
+      "statement": "ALTER TABLE orders ADD COLUMN c BLOB DEFAULT ''",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
       "id": "add-column-current-timestamp",
       "title": "Add a timestamp column that defaults to the current time",
       "session": [],
@@ -1937,6 +2196,654 @@
       ]
     },
     {
+      "id": "add-column-geometry-default-literal",
+      "title": "Add a GEOMETRY column with a literal default",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN c GEOMETRY NULL DEFAULT ''",
+      "verdict": {
+        "result": "fails",
+        "code": 1101,
+        "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        }
+      ]
+    },
+    {
+      "id": "add-column-geometry-default-literal-sql-mode-empty",
+      "title": "Add a GEOMETRY column with a literal default, with an empty sql_mode",
+      "session": [
+        "SET sql_mode = ''"
+      ],
+      "statement": "ALTER TABLE orders ADD COLUMN c GEOMETRY NULL DEFAULT ''",
+      "verdict": {
+        "result": "fails",
+        "code": 1101,
+        "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        }
+      ]
+    },
+    {
+      "id": "add-column-geometry-default-literal-sql-mode-not-strict",
+      "title": "Add a GEOMETRY column with a literal default, with a sql_mode that is not strict",
+      "session": [
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+      ],
+      "statement": "ALTER TABLE orders ADD COLUMN c GEOMETRY NULL DEFAULT ''",
+      "verdict": {
+        "result": "fails",
+        "code": 1101,
+        "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        }
+      ]
+    },
+    {
+      "id": "add-column-json-default-expression",
+      "title": "Add a JSON column with an expression default",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN c JSON NULL DEFAULT ('[]')",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-column-json-default-expression-sql-mode-empty",
+      "title": "Add a JSON column with an expression default, with an empty sql_mode",
+      "session": [
+        "SET sql_mode = ''"
+      ],
+      "statement": "ALTER TABLE orders ADD COLUMN c JSON NULL DEFAULT ('[]')",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-column-json-default-expression-sql-mode-not-strict",
+      "title": "Add a JSON column with an expression default, with a sql_mode that is not strict",
+      "session": [
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+      ],
+      "statement": "ALTER TABLE orders ADD COLUMN c JSON NULL DEFAULT ('[]')",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-column-json-default-literal",
+      "title": "Add a JSON column with a literal default",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN c JSON NULL DEFAULT '[]'",
+      "verdict": {
+        "result": "fails",
+        "code": 1101,
+        "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        }
+      ]
+    },
+    {
+      "id": "add-column-json-default-literal-sql-mode-empty",
+      "title": "Add a JSON column with a literal default, with an empty sql_mode",
+      "session": [
+        "SET sql_mode = ''"
+      ],
+      "statement": "ALTER TABLE orders ADD COLUMN c JSON NULL DEFAULT '[]'",
+      "verdict": {
+        "result": "fails",
+        "code": 1101,
+        "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        }
+      ]
+    },
+    {
+      "id": "add-column-json-default-literal-sql-mode-not-strict",
+      "title": "Add a JSON column with a literal default, with a sql_mode that is not strict",
+      "session": [
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+      ],
+      "statement": "ALTER TABLE orders ADD COLUMN c JSON NULL DEFAULT '[]'",
+      "verdict": {
+        "result": "fails",
+        "code": 1101,
+        "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        }
+      ]
+    },
+    {
       "id": "add-column-not-null",
       "title": "Add a NOT NULL column without a default",
       "session": [],
@@ -2215,6 +3122,778 @@
             0,
             1
           ]
+        }
+      ]
+    },
+    {
+      "id": "add-column-over-row-size-limit",
+      "title": "Add a column that takes a row past 65,535 bytes",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN s1 VARCHAR(255) NULL, ADD COLUMN s2 VARCHAR(255) NULL, ADD COLUMN s3 VARCHAR(255) NULL, ADD COLUMN s4 VARCHAR(255) NULL, ADD COLUMN s5 VARCHAR(255) NULL, ADD COLUMN s6 VARCHAR(255) NULL, ADD COLUMN s7 VARCHAR(255) NULL, ADD COLUMN s8 VARCHAR(255) NULL, ADD COLUMN s9 VARCHAR(255) NULL, ADD COLUMN s10 VARCHAR(255) NULL, ADD COLUMN s11 VARCHAR(255) NULL, ADD COLUMN s12 VARCHAR(255) NULL, ADD COLUMN s13 VARCHAR(255) NULL, ADD COLUMN s14 VARCHAR(255) NULL, ADD COLUMN s15 VARCHAR(255) NULL, ADD COLUMN s16 VARCHAR(255) NULL, ADD COLUMN s17 VARCHAR(255) NULL, ADD COLUMN s18 VARCHAR(255) NULL, ADD COLUMN s19 VARCHAR(255) NULL, ADD COLUMN s20 VARCHAR(255) NULL, ADD COLUMN s21 VARCHAR(255) NULL, ADD COLUMN s22 VARCHAR(255) NULL, ADD COLUMN s23 VARCHAR(255) NULL, ADD COLUMN s24 VARCHAR(255) NULL, ADD COLUMN s25 VARCHAR(255) NULL, ADD COLUMN s26 VARCHAR(255) NULL, ADD COLUMN s27 VARCHAR(255) NULL, ADD COLUMN s28 VARCHAR(255) NULL, ADD COLUMN s29 VARCHAR(255) NULL, ADD COLUMN s30 VARCHAR(255) NULL, ADD COLUMN s31 VARCHAR(255) NULL, ADD COLUMN s32 VARCHAR(255) NULL, ADD COLUMN s33 VARCHAR(255) NULL, ADD COLUMN s34 VARCHAR(255) NULL, ADD COLUMN s35 VARCHAR(255) NULL, ADD COLUMN s36 VARCHAR(255) NULL, ADD COLUMN s37 VARCHAR(255) NULL, ADD COLUMN s38 VARCHAR(255) NULL, ADD COLUMN s39 VARCHAR(255) NULL, ADD COLUMN s40 VARCHAR(255) NULL, ADD COLUMN s41 VARCHAR(255) NULL, ADD COLUMN s42 VARCHAR(255) NULL, ADD COLUMN s43 VARCHAR(255) NULL, ADD COLUMN s44 VARCHAR(255) NULL, ADD COLUMN s45 VARCHAR(255) NULL, ADD COLUMN s46 VARCHAR(255) NULL, ADD COLUMN s47 VARCHAR(255) NULL, ADD COLUMN s48 VARCHAR(255) NULL, ADD COLUMN s49 VARCHAR(255) NULL, ADD COLUMN s50 VARCHAR(255) NULL, ADD COLUMN s51 VARCHAR(255) NULL, ADD COLUMN s52 VARCHAR(255) NULL, ADD COLUMN s53 VARCHAR(255) NULL, ADD COLUMN s54 VARCHAR(255) NULL, ADD COLUMN s55 VARCHAR(255) NULL, ADD COLUMN s56 VARCHAR(255) NULL, ADD COLUMN s57 VARCHAR(255) NULL, ADD COLUMN s58 VARCHAR(255) NULL, ADD COLUMN s59 VARCHAR(255) NULL, ADD COLUMN s60 VARCHAR(255) NULL, ADD COLUMN s61 VARCHAR(255) NULL, ADD COLUMN s62 VARCHAR(255) NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN s63 VARCHAR(230) NULL",
+      "verdict": {
+        "result": "fails",
+        "code": 1118,
+        "message": "Row size too large. The maximum row size for the used table type, not counting BLOBs, is 65535. This includes storage overhead, check the manual. You have to change some columns to TEXT or BLOBs"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1118,
+          "message": "Row size too large. The maximum row size for the used table type, not counting BLOBs, is 65535. This includes storage overhead, check the manual. You have to change some columns to TEXT or BLOBs"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1118,
+          "message": "Row size too large. The maximum row size for the used table type, not counting BLOBs, is 65535. This includes storage overhead, check the manual. You have to change some columns to TEXT or BLOBs"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1118,
+          "message": "Row size too large. The maximum row size for the used table type, not counting BLOBs, is 65535. This includes storage overhead, check the manual. You have to change some columns to TEXT or BLOBs"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1118,
+          "message": "Row size too large. The maximum row size for the used table type, not counting BLOBs, is 65535. This includes storage overhead, check the manual. You have to change some columns to TEXT or BLOBs"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1118,
+          "message": "Row size too large. The maximum row size for the used table type, not counting BLOBs, is 65535. This includes storage overhead, check the manual. You have to change some columns to TEXT or BLOBs"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1118,
+          "message": "Row size too large. The maximum row size for the used table type, not counting BLOBs, is 65535. This includes storage overhead, check the manual. You have to change some columns to TEXT or BLOBs"
+        }
+      ]
+    },
+    {
+      "id": "add-column-text-default-expression",
+      "title": "Add a TEXT NOT NULL column with an expression default",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN c TEXT NOT NULL DEFAULT ('')",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-column-text-default-expression-sql-mode-empty",
+      "title": "Add a TEXT NOT NULL column with an expression default, with an empty sql_mode",
+      "session": [
+        "SET sql_mode = ''"
+      ],
+      "statement": "ALTER TABLE orders ADD COLUMN c TEXT NOT NULL DEFAULT ('')",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-column-text-default-expression-sql-mode-not-strict",
+      "title": "Add a TEXT NOT NULL column with an expression default, with a sql_mode that is not strict",
+      "session": [
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+      ],
+      "statement": "ALTER TABLE orders ADD COLUMN c TEXT NOT NULL DEFAULT ('')",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-column-text-default-literal",
+      "title": "Add a TEXT NOT NULL column with a literal default",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN c TEXT NOT NULL DEFAULT ''",
+      "verdict": {
+        "result": "fails",
+        "code": 1101,
+        "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        }
+      ]
+    },
+    {
+      "id": "add-column-text-default-literal-sql-mode-empty",
+      "title": "Add a TEXT NOT NULL column with a literal default, with an empty sql_mode",
+      "session": [
+        "SET sql_mode = ''"
+      ],
+      "statement": "ALTER TABLE orders ADD COLUMN c TEXT NOT NULL DEFAULT ''",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-column-text-default-literal-sql-mode-not-strict",
+      "title": "Add a TEXT NOT NULL column with a literal default, with a sql_mode that is not strict",
+      "session": [
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+      ],
+      "statement": "ALTER TABLE orders ADD COLUMN c TEXT NOT NULL DEFAULT ''",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-column-text-nullable-default-literal",
+      "title": "Add a nullable TEXT column with a non-empty literal default",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN c TEXT NULL DEFAULT 'x'",
+      "verdict": {
+        "result": "fails",
+        "code": 1101,
+        "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        }
+      ]
+    },
+    {
+      "id": "add-column-text-nullable-default-literal-sql-mode-empty",
+      "title": "Add a nullable TEXT column with a non-empty literal default, with an empty sql_mode",
+      "session": [
+        "SET sql_mode = ''"
+      ],
+      "statement": "ALTER TABLE orders ADD COLUMN c TEXT NULL DEFAULT 'x'",
+      "verdict": {
+        "result": "fails",
+        "code": 1101,
+        "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        }
+      ]
+    },
+    {
+      "id": "add-column-text-nullable-default-literal-sql-mode-not-strict",
+      "title": "Add a nullable TEXT column with a non-empty literal default, with a sql_mode that is not strict",
+      "session": [
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+      ],
+      "statement": "ALTER TABLE orders ADD COLUMN c TEXT NULL DEFAULT 'x'",
+      "verdict": {
+        "result": "fails",
+        "code": 1101,
+        "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
         }
       ]
     },
@@ -10448,6 +12127,169 @@
       ]
     },
     {
+      "id": "drop-column-in-two-column-primary-key",
+      "title": "Drop the second column of a two-column primary key",
+      "setup": [
+        "ALTER TABLE orders DROP PRIMARY KEY, ADD PRIMARY KEY (id, user_id)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN user_id",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": true,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-column-in-two-column-primary-key-duplicates",
+      "title": "Drop the second column of a two-column primary key when the first repeats",
+      "setup": [
+        "ALTER TABLE orders DROP PRIMARY KEY, ADD PRIMARY KEY (user_id, id), ADD INDEX ix_id (id)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN id",
+      "verdict": {
+        "result": "fails",
+        "code": 1062,
+        "message": "Duplicate entry '<value>' for key 'orders.PRIMARY'"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1062,
+          "message": "Duplicate entry '<value>' for key 'orders.PRIMARY'"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1062,
+          "message": "Duplicate entry '<value>' for key 'orders.PRIMARY'"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1062,
+          "message": "Duplicate entry '<value>' for key 'orders.PRIMARY'"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1062,
+          "message": "Duplicate entry '<value>' for key 'orders.PRIMARY'"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1062,
+          "message": "Duplicate entry '<value>' for key 'orders.PRIMARY'"
+        }
+      ]
+    },
+    {
       "id": "drop-column-indexed",
       "title": "Drop a column that has an index of its own",
       "setup": [
@@ -11744,6 +13586,73 @@
       ]
     },
     {
+      "id": "drop-column-missing",
+      "title": "Drop a column the table does not have",
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN nosuch",
+      "verdict": {
+        "result": "fails",
+        "code": 1091,
+        "message": "Can't DROP 'nosuch'; check that column/key exists"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        }
+      ]
+    },
+    {
       "id": "drop-column-named-in-check-string",
       "title": "Drop a column a CHECK constraint names only in a string",
       "setup": [
@@ -12473,6 +14382,73 @@
       ]
     },
     {
+      "id": "drop-foreign-key-missing",
+      "title": "Drop a foreign key the table does not have",
+      "session": [],
+      "statement": "ALTER TABLE orders DROP FOREIGN KEY nosuch",
+      "verdict": {
+        "result": "fails",
+        "code": 1091,
+        "message": "Can't DROP 'nosuch'; check that column/key exists"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        }
+      ]
+    },
+    {
       "id": "drop-index",
       "title": "Drop a secondary index",
       "setup": [
@@ -12947,6 +14923,73 @@
       ]
     },
     {
+      "id": "drop-index-missing",
+      "title": "Drop an index the table does not have",
+      "session": [],
+      "statement": "ALTER TABLE orders DROP INDEX nosuch",
+      "verdict": {
+        "result": "fails",
+        "code": 1091,
+        "message": "Can't DROP 'nosuch'; check that column/key exists"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1091,
+          "message": "Can't DROP 'nosuch'; check that column/key exists"
+        }
+      ]
+    },
+    {
       "id": "drop-index-needed-by-foreign-key",
       "title": "Drop the index a foreign key needs",
       "setup": [
@@ -13302,6 +15345,84 @@
           "result": "rejected",
           "code": 1553,
           "message": "Cannot drop index 'idx_user': needed in a foreign key constraint"
+        }
+      ]
+    },
+    {
+      "id": "drop-primary-key-column",
+      "title": "Drop the primary key column",
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN id",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Dropping a primary key is not allowed without also adding a new primary key. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Dropping a primary key is not allowed without also adding a new primary key. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Dropping a primary key is not allowed without also adding a new primary key. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Dropping a primary key is not allowed without also adding a new primary key. Try LOCK=SHARED."
         }
       ]
     },
@@ -13698,6 +15819,76 @@
       ]
     },
     {
+      "id": "lengthen-varchar-over-row-size-limit",
+      "title": "Widen a VARCHAR column so a row goes past 65,535 bytes",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN s1 VARCHAR(255) NULL, ADD COLUMN s2 VARCHAR(255) NULL, ADD COLUMN s3 VARCHAR(255) NULL, ADD COLUMN s4 VARCHAR(255) NULL, ADD COLUMN s5 VARCHAR(255) NULL, ADD COLUMN s6 VARCHAR(255) NULL, ADD COLUMN s7 VARCHAR(255) NULL, ADD COLUMN s8 VARCHAR(255) NULL, ADD COLUMN s9 VARCHAR(255) NULL, ADD COLUMN s10 VARCHAR(255) NULL, ADD COLUMN s11 VARCHAR(255) NULL, ADD COLUMN s12 VARCHAR(255) NULL, ADD COLUMN s13 VARCHAR(255) NULL, ADD COLUMN s14 VARCHAR(255) NULL, ADD COLUMN s15 VARCHAR(255) NULL, ADD COLUMN s16 VARCHAR(255) NULL, ADD COLUMN s17 VARCHAR(255) NULL, ADD COLUMN s18 VARCHAR(255) NULL, ADD COLUMN s19 VARCHAR(255) NULL, ADD COLUMN s20 VARCHAR(255) NULL, ADD COLUMN s21 VARCHAR(255) NULL, ADD COLUMN s22 VARCHAR(255) NULL, ADD COLUMN s23 VARCHAR(255) NULL, ADD COLUMN s24 VARCHAR(255) NULL, ADD COLUMN s25 VARCHAR(255) NULL, ADD COLUMN s26 VARCHAR(255) NULL, ADD COLUMN s27 VARCHAR(255) NULL, ADD COLUMN s28 VARCHAR(255) NULL, ADD COLUMN s29 VARCHAR(255) NULL, ADD COLUMN s30 VARCHAR(255) NULL, ADD COLUMN s31 VARCHAR(255) NULL, ADD COLUMN s32 VARCHAR(255) NULL, ADD COLUMN s33 VARCHAR(255) NULL, ADD COLUMN s34 VARCHAR(255) NULL, ADD COLUMN s35 VARCHAR(255) NULL, ADD COLUMN s36 VARCHAR(255) NULL, ADD COLUMN s37 VARCHAR(255) NULL, ADD COLUMN s38 VARCHAR(255) NULL, ADD COLUMN s39 VARCHAR(255) NULL, ADD COLUMN s40 VARCHAR(255) NULL, ADD COLUMN s41 VARCHAR(255) NULL, ADD COLUMN s42 VARCHAR(255) NULL, ADD COLUMN s43 VARCHAR(255) NULL, ADD COLUMN s44 VARCHAR(255) NULL, ADD COLUMN s45 VARCHAR(255) NULL, ADD COLUMN s46 VARCHAR(255) NULL, ADD COLUMN s47 VARCHAR(255) NULL, ADD COLUMN s48 VARCHAR(255) NULL, ADD COLUMN s49 VARCHAR(255) NULL, ADD COLUMN s50 VARCHAR(255) NULL, ADD COLUMN s51 VARCHAR(255) NULL, ADD COLUMN s52 VARCHAR(255) NULL, ADD COLUMN s53 VARCHAR(255) NULL, ADD COLUMN s54 VARCHAR(255) NULL, ADD COLUMN s55 VARCHAR(255) NULL, ADD COLUMN s56 VARCHAR(255) NULL, ADD COLUMN s57 VARCHAR(255) NULL, ADD COLUMN s58 VARCHAR(255) NULL, ADD COLUMN s59 VARCHAR(255) NULL, ADD COLUMN s60 VARCHAR(255) NULL, ADD COLUMN s61 VARCHAR(255) NULL, ADD COLUMN s62 VARCHAR(255) NULL, ADD COLUMN s63 VARCHAR(200) NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders MODIFY s63 VARCHAR(230) NULL",
+      "verdict": {
+        "result": "fails",
+        "code": 1118,
+        "message": "Row size too large. The maximum row size for the used table type, not counting BLOBs, is 65535. This includes storage overhead, check the manual. You have to change some columns to TEXT or BLOBs"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1118,
+          "message": "Row size too large. The maximum row size for the used table type, not counting BLOBs, is 65535. This includes storage overhead, check the manual. You have to change some columns to TEXT or BLOBs"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1118,
+          "message": "Row size too large. The maximum row size for the used table type, not counting BLOBs, is 65535. This includes storage overhead, check the manual. You have to change some columns to TEXT or BLOBs"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1118,
+          "message": "Row size too large. The maximum row size for the used table type, not counting BLOBs, is 65535. This includes storage overhead, check the manual. You have to change some columns to TEXT or BLOBs"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1118,
+          "message": "Row size too large. The maximum row size for the used table type, not counting BLOBs, is 65535. This includes storage overhead, check the manual. You have to change some columns to TEXT or BLOBs"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1118,
+          "message": "Row size too large. The maximum row size for the used table type, not counting BLOBs, is 65535. This includes storage overhead, check the manual. You have to change some columns to TEXT or BLOBs"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1118,
+          "message": "Row size too large. The maximum row size for the used table type, not counting BLOBs, is 65535. This includes storage overhead, check the manual. You have to change some columns to TEXT or BLOBs"
+        }
+      ]
+    },
+    {
       "id": "make-column-nullable",
       "title": "Make a NOT NULL column nullable",
       "session": [],
@@ -13878,6 +16069,76 @@
             0,
             0
           ]
+        }
+      ]
+    },
+    {
+      "id": "modify-column-text-default-literal",
+      "title": "Change a VARCHAR column to TEXT with a literal default",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN c VARCHAR(50) NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders MODIFY c TEXT NULL DEFAULT ''",
+      "verdict": {
+        "result": "fails",
+        "code": 1101,
+        "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
         }
       ]
     },
@@ -14314,6 +16575,76 @@
             0,
             0
           ]
+        }
+      ]
+    },
+    {
+      "id": "modify-text-column-default-literal",
+      "title": "Give a TEXT column a literal default",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN c TEXT NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders MODIFY c TEXT NULL DEFAULT ''",
+      "verdict": {
+        "result": "fails",
+        "code": 1101,
+        "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
         }
       ]
     },
@@ -19040,6 +21371,290 @@
             0,
             0
           ]
+        }
+      ]
+    },
+    {
+      "id": "set-column-default-json-literal",
+      "title": "Set a literal default on a JSON column",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN c JSON NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ALTER COLUMN c SET DEFAULT '[]'",
+      "verdict": {
+        "result": "fails",
+        "code": 1101,
+        "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        }
+      ]
+    },
+    {
+      "id": "set-column-default-text-literal",
+      "title": "Set a literal default on a TEXT column",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN c TEXT NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ALTER COLUMN c SET DEFAULT ''",
+      "verdict": {
+        "result": "fails",
+        "code": 1101,
+        "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        }
+      ]
+    },
+    {
+      "id": "set-column-default-text-literal-sql-mode-empty",
+      "title": "Set a literal default on a TEXT column, with an empty sql_mode",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN c TEXT NULL"
+      ],
+      "session": [
+        "SET sql_mode = ''"
+      ],
+      "statement": "ALTER TABLE orders ALTER COLUMN c SET DEFAULT ''",
+      "verdict": {
+        "result": "fails",
+        "code": 1101,
+        "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        }
+      ]
+    },
+    {
+      "id": "set-column-default-text-literal-sql-mode-not-strict",
+      "title": "Set a literal default on a TEXT column, with a sql_mode that is not strict",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN c TEXT NULL"
+      ],
+      "session": [
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+      ],
+      "statement": "ALTER TABLE orders ALTER COLUMN c SET DEFAULT ''",
+      "verdict": {
+        "result": "fails",
+        "code": 1101,
+        "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1101,
+          "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
         }
       ]
     },

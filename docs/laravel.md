@@ -7,6 +7,7 @@ read, and what kilit does when the output is not a list of statements.
 - [Running kilit on a Laravel project](#running-kilit-on-a-laravel-project)
 - [How the output is read](#how-the-output-is-read)
 - [When Laravel stops with an error](#when-laravel-stops-with-an-error)
+- [Text a migration prints itself](#text-a-migration-prints-itself)
 - [Reads under `--pretend`](#reads-under---pretend)
 - [`->change()` since Laravel 11](#-change-since-laravel-11)
 - [Windows and PowerShell](#windows-and-powershell)
@@ -112,6 +113,35 @@ the box and that line; kilit reads both spellings as the same stop. From
 Laravel 10.17 the text is "Command cancelled.". [The GitHub Action page](github-action.md) sets `APP_ENV: testing` for
 this reason.
 
+## Text a migration prints itself
+
+A migration can print text of its own (`echo` and the like). Laravel shows it
+between the migration's name and its statements. kilit shows those lines as a
+note of that migration, in the text report:
+
+```
+2026_11_01_000002_add_note_to_orders_table
+  note: this migration printed these lines itself, between its name and its statements; kilit read them as text, not as SQL:
+    line 5: Adding the note column
+```
+
+The exit status does not change. In JSON the lines are a `migration-output`
+warning with `migration` and `lines`, each line with its number and `text`;
+see [the JSON notes](json-output.md#warnings). A control character in the text
+is shown as U+FFFD.
+
+kilit never skips what could be a statement. These lines stay lines it does not
+understand, with exit status 2:
+
+- a line that starts with an SQL statement word such as `alter`, `create` or
+  `drop`, or whose second word starts one
+- a line that holds `⇂`, or an SQL word followed by `TABLE`, `INDEX`, `INTO`
+  and the like, or a name in backticks
+- Laravel's own labels (`ERROR`, `WARN` and the like)
+- a Symfony `In <file> line N:` header
+- text at the end of the output, since an error screen kilit does not know
+  ends the output that way
+
 ## Reads under `--pretend`
 
 Under `--pretend` every read returns nothing. A migration such as
@@ -153,6 +183,11 @@ your SQL can come through garbled. PowerShell 7.4 and later do not re-encode.
   and is unreadable; its statements go under the migration before it.
 - Laravel's `--pretend` output turns every run of spaces into one, even inside
   quotes, so kilit sees `DEFAULT 'a  b'` as `DEFAULT 'a b'`.
+- A migration that decides by reading the database (`Schema::hasColumn()` and
+  the like) prints the statements it would not run, because every read returns
+  nothing under `--pretend`. kilit counts a table's row size, and a column
+  added by a statement that would not run counts too. On one real
+  application this gave error 1118 where the real run passes.
 - `Schema::table` with `$table->engine('MyISAM')` prints nothing: Laravel
   writes `engine = MyISAM` only in `Schema::create`.
 

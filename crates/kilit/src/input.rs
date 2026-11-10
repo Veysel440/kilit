@@ -35,6 +35,9 @@ pub struct Source {
     /// Which of `statements` is the first that asks the database something,
     /// in a Laravel migration.
     pub first_read: Option<usize>,
+    /// Text a Laravel migration printed itself, between its name and its
+    /// statements.
+    pub printed: Vec<UnreadableLine>,
     /// The input it comes from, counting from 0: each SQL file runs in a
     /// session of its own, and so does each `migrate --pretend` output, as
     /// one `artisan migrate` uses one connection.
@@ -111,6 +114,7 @@ impl Input {
                         kind: SourceKind::LaravelMigration,
                         statements: migration.statements,
                         first_read: migration.first_read,
+                        printed: migration.printed,
                         session,
                     });
                 }
@@ -131,6 +135,7 @@ impl Input {
                 kind: SourceKind::Sql,
                 statements: parse(text),
                 first_read: None,
+                printed: Vec::new(),
                 session,
             }),
         }

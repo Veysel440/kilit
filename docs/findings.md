@@ -1,10 +1,10 @@
 # Measured behavior
 
 Every row on this page is one kind of change that kilit-lab ran on real MySQL
-servers: 8.0.46 and 8.4.13. The lab ran each of the 240 scenarios in
+servers: 8.0.46 and 8.4.13. The lab ran each of the 275 scenarios in
 [`scenarios/`](../scenarios/) on both servers, in six variants, and kept the
-result in [`matrix/`](../matrix/). The scenarios are grouped into 77 case ids:
-31 for InnoDB, 12 for MyISAM, 26 for row formats and 8 for `old_alter_table`.
+result in [`matrix/`](../matrix/). The scenarios are grouped into 81 case ids:
+35 for InnoDB, 12 for MyISAM, 26 for row formats and 8 for `old_alter_table`.
 
 The tables are InnoDB tables of 1,000 rows (`orders`) and 100 rows (`users`).
 A table whose `CREATE TABLE` names no `ENGINE` is taken as InnoDB, the server
@@ -15,6 +15,7 @@ says which one does what.
 - [Server settings the lab measured with](#server-settings-the-lab-measured-with)
 - [Columns, indexes and foreign keys](#columns-indexes-and-foreign-keys)
 - [Changing a column with `->change()`](#changing-a-column-with--change)
+- [Defaults and row size](#defaults-and-row-size)
 - [MyISAM tables](#myisam-tables)
 - [Row formats and `old_alter_table`](#row-formats-and-old_alter_table)
 - [Tables created without `ROW_FORMAT` under COMPACT](#tables-created-without-row_format-under-compact)
@@ -76,7 +77,15 @@ What kilit does when the input names a setting:
   make `UNKNOWN` the answers they could change: expression defaults, the row
   format or engine of a new table, a foreign key's parent index.
 - `sql_mode`: a key that may be too long on a MyISAM table is `UNKNOWN`. The
-  notes that assume strict mode say so and stay.
+  notes that assume strict mode say so and stay. For a quoted default on a
+  `TEXT`, `BLOB` or `JSON` column kilit reads `sql_mode` from a session `SET`
+  of a quoted list: strict means a list with `STRICT_TRANS_TABLES` or
+  `STRICT_ALL_TABLES` and no other mode that changes the answer; `''` and
+  `'NO_ENGINE_SUBSTITUTION'` are not strict. `GLOBAL`, `PERSIST`, an
+  expression or any other list makes the answer `UNKNOWN`. Each input file
+  starts a new session. With nothing set, kilit assumes strict mode, the MySQL
+  default and Laravel's `'strict' => true`; the note names Laravel's
+  `'strict' => false` (see [Defaults and row size](#defaults-and-row-size)).
 
 kilit cannot see a server that is configured otherwise, and it prints no note
 about it for each statement.
@@ -90,18 +99,26 @@ about it for each statement.
 | ↳ after 64 instant column changes | INPLACE, rebuilds the table | continue | `add-column`, exception: 64 changes |
 | ↳ with `DEFAULT (UUID())`, `(RAND())`, `(UUID_SHORT())`, `(SYSDATE())` or `(USER())` | fails, error 1674 (binary log on) | – | `add-column-binlog-unsafe-default` |
 | ↳ with `DEFAULT (NOW())`, `(CURRENT_TIMESTAMP)`, `(CURDATE())`, `(CURRENT_DATE + INTERVAL 1 YEAR)` or `(JSON_ARRAY())`<br>`$table->date('due_on')->useCurrent()` | COPY, copies every row | **wait** | `add-column-expression-default` |
+| ↳ of `TEXT`, `TINYTEXT`, `MEDIUMTEXT`, `LONGTEXT`, `BLOB` (and its sizes), `JSON` or `GEOMETRY` (and `POINT`, `LINESTRING` and the like) with a quoted default<br>`$table->text('body')->default('')` | fails, error 1101 | – | `add-column-blob-literal-default` |
+| ↳ of `TEXT` or `BLOB` with `''` as the default, after the input sets `sql_mode` to `''` or `'NO_ENGINE_SUBSTITUTION'` | INSTANT | continue | `add-column-blob-empty-default-not-strict` |
+| ↳ of `TEXT` with `DEFAULT ('')` or `JSON` with `DEFAULT ('[]')`, an expression | COPY, copies every row | **wait** | `add-column-blob-expression-default` |
+| ↳ when the row of a known table would pass 65,535 bytes ([how kilit counts](#defaults-and-row-size)) | fails, error 1118 | – | `add-column`, exception: row too large |
 | Drop a column<br>`$table->dropColumn('note')` | INSTANT | continue | `drop-column` |
 | ↳ when the table has a FULLTEXT index | COPY, copies every row | **wait** | `drop-column`, exception: FULLTEXT index |
 | ↳ when the column is in an index, alone or with others, or has a UNIQUE index of its own, and the table has no FULLTEXT index<br>`$table->dropColumn('status')` (in `orders_status_index` in the example schema) | INPLACE, rebuilds the table | continue | `drop-column`, exception: indexed column |
 | ↳ when the column is the only column of the only FULLTEXT index, which goes with it | INPLACE, rebuilds the table | continue | `drop-column`, exception: indexed column |
 | ↳ when the column is in a foreign key<br>`$table->dropColumn('user_id')` before `$table->dropForeign(['user_id'])` | fails, error 1828 | – | `drop-column`, exception: foreign key column |
-| ↳ when the column is in a foreign key of several columns or with the checks off, the primary key, a functional index or a UNIQUE index with other columns | UNKNOWN | – | none |
+| ↳ when the column is the whole primary key | COPY, copies every row; with `ALGORITHM=INSTANT` or `LOCK=NONE` it fails, error 1846 | **wait** | `drop-column`, exception: primary key column |
+| ↳ when the column is the second of a primary key of two columns | INPLACE, rebuilds the table; a note says it fails with error 1062 if the first column repeats | continue | `drop-column`, exception: second column of a two-column primary key |
+| ↳ when the column is in a foreign key of several columns or with the checks off, another shape of primary key, a functional index or a UNIQUE index with other columns | UNKNOWN | – | none |
+| ↳ when the table has no such column | UNKNOWN: MySQL gives error 1091, but kilit's table may be out of date | – | none (`drop-column-missing`) |
 | ↳ when a generated column uses it | fails, error 3108 | – | `drop-column`, exception: generated column source |
 | ↳ when a CHECK constraint uses it and another column | fails, error 3959 | – | `drop-column`, exception: CHECK with another column |
 | Rename a column<br>`$table->renameColumn('note', 'memo')` | INSTANT | continue | `rename-column` |
 | ↳ when a generated column uses it | fails, error 3108 | – | `rename-column`, exception: generated column source |
 | ↳ when a CHECK constraint uses it, with other columns or alone | fails, error 3959 | – | `rename-column`, exception: CHECK uses the column |
 | Set a column default<br>`ALTER COLUMN … SET DEFAULT` (raw SQL) | INSTANT | continue | `set-column-default` |
+| ↳ to a quoted literal, on a known `TEXT` or `BLOB` column, or a `JSON` column in strict mode | fails, error 1101 | – | `set-column-default`, exception: BLOB or TEXT default |
 | Add an index<br>`$table->index('amount')` | INPLACE | continue | `add-index` |
 | ↳ on `LOWER()` of a VARCHAR column (functional index)<br>`$table->rawIndex('(lower(email))', 'users_lower_email_index')` | INPLACE | **wait** | `add-functional-index` |
 | ↳ on a `TEXT`, `TINYTEXT`, `MEDIUMTEXT`, `LONGTEXT` or `BLOB` column without a prefix length<br>`$table->text('body')->index()` | fails, error 1170 | – | `add-index`, exception: BLOB or TEXT without prefix |
@@ -111,6 +128,7 @@ about it for each statement.
 | Add a FULLTEXT index<br>`$table->fullText('note')` | INPLACE, rebuilds the table | **wait** | `add-fulltext-index` |
 | ↳ when the table already has one | INPLACE | **wait** | `add-fulltext-index`, exception: FULLTEXT index |
 | Drop an index<br>`$table->dropIndex('orders_amount_index')` | INPLACE | continue | `drop-index` |
+| ↳ when the table has no index of that name | UNKNOWN: MySQL gives error 1091, but kilit's table may be out of date | – | none (`drop-index-missing`) |
 | ↳ when a foreign key needs it<br>`$table->dropIndex('orders_user_id_foreign')` before `$table->dropForeign(['user_id'])` | fails, error 1553 | – | `drop-index`, exception: only index of a foreign key |
 | Add a foreign key<br>`$table->foreign('user_id')->references('id')->on('users')` | COPY, copies every row | **wait** | `add-foreign-key` |
 | ↳ when a row points to a missing parent | fails, error 1452 | – | `add-foreign-key`, exception: orphan row |
@@ -122,6 +140,7 @@ about it for each statement.
 | ↳ with the checks off²<br>`Schema::withoutForeignKeyConstraints(fn () => …)`, or `Schema::disableForeignKeyConstraints()` and `Schema::enableForeignKeyConstraints()` around the call | INPLACE | continue | `add-foreign-key-checks-off` |
 | ↳ with the checks off, when the two columns visibly differ, the parent has no fitting index, the key points at its own table or the shape is not measured | UNKNOWN | – | none |
 | Drop a foreign key<br>`$table->dropForeign(['user_id'])` | INPLACE | continue | `drop-foreign-key` |
+| ↳ when the table has no foreign key of that name | UNKNOWN: MySQL gives error 1091, but kilit's table may be out of date | – | none (`drop-foreign-key-missing`) |
 | Add a CHECK constraint<br>`ADD CONSTRAINT … CHECK (…)` (raw SQL) | COPY, copies every row | **wait** | `add-check-constraint` |
 | ↳ when a row breaks it | fails, error 3819 | – | `add-check-constraint`, exception: row breaks it |
 | ↳ when its expression has a string, a function call, `IN`, `BETWEEN` or `LIKE` or no column, or kilit sees a missing, AUTO_INCREMENT, generated or foreign key column, or a CHECK name the database has | UNKNOWN | – | none |
@@ -154,12 +173,14 @@ the lab measured instead of answering.
 | ↳ when the column is in a foreign key | fails, error 3780 | – | `change-integer-type`, exception: foreign key column |
 | ↳ when a value does not fit the new type | fails, error 1264 | – | `change-integer-type`, exception: value out of range |
 | Lengthen a VARCHAR, staying on one side of 255 bytes⁴<br>`$table->string('note', 63)->nullable()->change()` | INPLACE | continue | `lengthen-varchar` |
+| ↳ when the row of a known table would pass 65,535 bytes ([how kilit counts](#defaults-and-row-size)) | fails, error 1118 | – | `lengthen-varchar`, exception: row too large |
 | Lengthen a VARCHAR so it crosses 255 bytes⁴<br>`$table->string('note', 64)->nullable()->change()` | COPY, copies every row | **wait** | `lengthen-varchar-past-255-bytes` |
 | Shorten a VARCHAR<br>`$table->string('note', 40)->nullable()->change()` | COPY, copies every row | **wait** | `shorten-varchar` |
 | ↳ when a value is longer than the new length | fails, error 1265 | – | `shorten-varchar`, exception: value too long |
 | Change the character set⁵<br>`$table->string('note', 50)->charset('latin1')->nullable()->change()` | COPY, copies every row | **wait** | `change-column-charset` |
 | Change the collation<br>`$table->string('note', 50)->collation('utf8mb4_bin')->nullable()->change()` | INPLACE | continue | `change-column-collation` |
 | ↳ when the column is in an index | COPY, copies every row | **wait** | `change-column-collation`, exception: indexed column |
+| Change a column to `TEXT` with a quoted default, in strict mode | fails, error 1101 | – | `modify-column-blob-literal-default` |
 | Make a column nullable<br>`$table->integer('amount')->nullable()->change()` | INPLACE, rebuilds the table | continue | `make-column-nullable` |
 | Make a column NOT NULL<br>`$table->string('note', 50)->nullable(false)->change()` | INPLACE, rebuilds the table | continue | `make-column-not-null` |
 | ↳ when a row holds NULL | fails, error 1138 | – | `make-column-not-null`, exception: NULL in a row |
@@ -182,7 +203,62 @@ table to convert it.
 A statement with several changes, including a `MODIFY` that changes several
 things about a column, is `UNKNOWN`: the lab has measured single changes only.
 The same goes for a change of type other than between integer types, such as
-`VARCHAR` to `TEXT`.
+`VARCHAR` to `TEXT`, and for a change to `TEXT` with a quoted default after
+the input sets a non-strict `sql_mode`.
+
+## Defaults and row size
+
+Quoted defaults on `TEXT`, `BLOB`, `JSON` and `GEOMETRY` columns. MySQL
+8.0.46 and 8.4.13 refuse them with error 1101, in strict `sql_mode`. For
+`TEXT` and `BLOB` with `''`, a non-strict mode drops the default and adds the
+column, which is INSTANT; for `JSON` and `GEOMETRY` they still refuse, as they
+do for any other literal. The expression form, `DEFAULT ('')`, is allowed and
+copies the table. The answer "fails, error 1101" assumes strict mode, the MySQL
+default and Laravel's `'strict' => true`. Laravel with `'strict' => false` sets
+`sql_mode` to `NO_ENGINE_SUBSTITUTION` without a statement that kilit sees,
+and then `TEXT` and `BLOB` with `''` are accepted. kilit says so in a note. It
+cannot tell which one the application uses, so it keeps "fails": an
+application with `'strict' => false` gets a failure for a statement MySQL
+accepts. Setting `sql_mode` in the migration, with a quoted list, changes the
+answer as the table above says.
+
+Row size. A row of an InnoDB table may take 65,535 bytes. kilit counts the row
+of a known table, with the bytes per type measured on both servers, and
+answers "fails, error 1118" when a plain `ADD COLUMN` or a longer `VARCHAR`
+takes it past that. Any other change past it is `UNKNOWN`, and so is a
+`VARCHAR` or `CHAR` longer than its type holds (MySQL gives error 1074 or
+converts it). InnoDB also limits the record kept in a page. kilit counts that
+limit per row format (DYNAMIC and COMPACT 8,125 bytes, REDUNDANT 8,122,
+COMPRESSED 8,069 less 2 for each field), with the larger count of the two
+servers. The record holds the key the rows are kept in: the primary key (a
+key on a prefix holds the prefix and the whole column), or without one the
+first `UNIQUE` index of `NOT NULL` columns, or else a row id of 6 bytes; and
+the hidden `FTS_DOC_ID` of 8 bytes on a table with a `FULLTEXT` index. A
+change past it is `UNKNOWN`. Columns kilit cannot count make a note instead:
+generated columns, `ENUM` with more than 255 values, `SET` with more than 8,
+`BIT` over 16, other spatial types, and unknown types or character sets. The
+counts assume 16K pages, and leave out columns dropped instantly, row
+versions, and an `FTS_DOC_ID` left behind by a dropped `FULLTEXT` index.
+
+Where MySQL 8.0.46 and 8.4.13 count the record in a page differently, by hand
+on both servers (the other parts of the count agree):
+
+- DYNAMIC. A `VARCHAR`, `VARBINARY` or multibyte `CHAR` of 41 to 255 bytes
+  counts its length and one byte on 8.0.46, and 41 bytes on 8.4.13. In the
+  primary key, 8.0.46 caps no column: a `VARCHAR(768)` utf8mb4 key counts
+  3,074 bytes, where 8.4.13 counts 41. So the same new column can fail with
+  error 1118 on 8.0.46 and be added by a rebuild on 8.4.13.
+- COMPRESSED, and `KEY_BLOCK_SIZE=8` alone, which is the same. Each server
+  counts its columns with its own DYNAMIC rule above, so they differ in the
+  same way. The limit is 8,069 bytes less 2 for each field of the record, on
+  both.
+
+COMPACT and REDUNDANT count the same on both servers. kilit takes the larger
+count in every case, so a change past the line is `UNKNOWN` on both.
+
+Without a table kilit knows, the same situations are notes under the answer,
+not answers: the table may hold a primary key, an index, a foreign key, a
+`JSON` column or a long row that kilit does not see.
 
 ## MyISAM tables
 

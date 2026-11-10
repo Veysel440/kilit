@@ -13,8 +13,9 @@ The JSON is the one to parse.
 
 ## Versioning
 
-`format_version` is `"1.0"`, a string, and it is the first key. A minor
-increase (`"1.1"`) adds fields. A major increase (`"2.0"`) removes, renames or
+`format_version` is `"1.1"`, a string, and it is the first key. A minor
+increase adds fields: `"1.1"` added the `migration-output` warning and its
+keys `migration` and `lines`. A major increase (`"2.0"`) removes, renames or
 changes one. Ignore fields you do not know, and reject a major version you do
 not support.
 
@@ -72,14 +73,21 @@ but not whether writes wait, so `writes` is `unknown`.
 
 ## Warnings
 
-A warning has `id`, `tables` and `message`, and `file` on a `laravel-error`.
-The ids, in the order they appear in the array:
+A warning has `id`, `tables` and `message`. A `laravel-error` also has `file`,
+and a `migration-output` has `migration` and `lines`. The ids, in the order
+they appear in the array:
 
 | Id | When | `tables` |
 | --- | --- | --- |
 | `server-mismatch` | the schema dump names another MySQL series, or MariaDB with `--server`, or a version kilit cannot read | empty |
+| `migration-output` | a migration printed text of its own between its name and its statements; `migration` names it and `lines` lists the text as `line` and `text` | empty |
 | `laravel-error` | Laravel stopped with an error; `file` names the input | empty |
 | `metadata-lock` | the input alters, drops, renames or truncates a table that exists before it | those tables |
+
+A `migration-output` warning exists for each migration that printed such lines.
+The lines are read as text, not as SQL, and they do not change the exit status.
+A control character in the text is shown as U+FFFD. A line that looks like SQL
+stays in `unreadable`; see [Laravel](laravel.md#text-a-migration-prints-itself).
 
 The `metadata-lock` warning is left out when no existing table is changed. A
 table created earlier in the input does not count. A `DROP TABLE` counts,
@@ -100,7 +108,7 @@ SQL
 
 ```json
 {
-  "format_version": "1.0",
+  "format_version": "1.1",
   "kilit": "0.1.0",
   "server": "mysql-8.4.13",
   "schema": {

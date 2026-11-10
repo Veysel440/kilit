@@ -1,0 +1,5 @@
+title = "Drop the second column of a two-column primary key"
+# id stays first in the key, so it keeps its AUTO_INCREMENT; after the drop
+# the primary key is (id) alone, which the rows satisfy.
+setup = ["ALTER TABLE orders DROP PRIMARY KEY, ADD PRIMARY KEY (id, user_id)"]
+operation = "DROP COLUMN user_id"

@@ -231,7 +231,12 @@ fn what_kilit_sees_in_the_tables_decides_the_answer() {
         let server = results.server.name();
         for case in CASES {
             for exception in case.exceptions {
-                if exception.conditions.contains(&Condition::Hidden) {
+                // Rows no schema shows, and a name the table does not have
+                // (dropping it is unknown on a known table, whatever the
+                // lab measured): neither gives a measured answer here.
+                if exception.conditions.contains(&Condition::Hidden)
+                    || exception.conditions.contains(&Condition::NoSuchName)
+                {
                     continue;
                 }
                 for id in exception.scenarios {
@@ -1844,7 +1849,17 @@ fn with_foreign_key_checks_off_a_table_kilit_does_not_know_keeps_todays_answer_a
                 predictions[1]
             );
             // The one note it always had: rows that point nowhere are kept.
-            assert_eq!(notes_of(&predictions[1]).len(), 1, "{name} on {server}");
+            // B1b: and one for what the tables would decide (a missing
+            // column, SET NULL on a NOT NULL column, MyISAM), which kilit
+            // cannot see when it does not know both tables.
+            let notes = notes_of(&predictions[1]);
+            assert_eq!(notes.len(), 2, "{name} on {server}: {notes:?}");
+            assert!(
+                notes
+                    .iter()
+                    .any(|note| note.starts_with("if a column of the key is missing")),
+                "{name} on {server}: {notes:?}"
+            );
         }
         assert_eq!(on_both(&schema, sql), [INPLACE, INPLACE], "{name}");
     }
@@ -1888,11 +1903,13 @@ fn a_foreign_key_is_never_a_failure_when_a_table_is_missing_or_lost() {
             assert_eq!(on_both(schema, &sql), [COPY, COPY], "{shape}, {state}");
             for server in [MYSQL_80, MYSQL_84] {
                 // Today's two notes, and one more for each of the five
-                // exceptions kilit could not look at.
+                // exceptions kilit could not look at; B1b adds one for the
+                // shapes the tables would decide (a missing column, SET NULL
+                // on a NOT NULL column, MyISAM).
                 let predictions = predictions_on(server, schema, &sql);
                 assert_eq!(
                     notes_of(&predictions[0]).len(),
-                    7,
+                    8,
                     "{shape}, {state} on {server}: {:?}",
                     predictions[0]
                 );
@@ -3371,9 +3388,9 @@ fn a_new_myisam_table_follows_the_measurements_for_myisam() {
 
 #[test]
 fn a_lost_myisam_table_is_unknown_and_a_lost_innodb_table_keeps_its_answer() {
-    // A change kilit cannot follow loses the table: a column that is not
-    // there.
-    let lose = "ALTER TABLE orders DROP COLUMN no_such_column;";
+    // A change kilit cannot follow loses the table. (B1b: dropping a column
+    // the table does not have no longer does: the table stays known.)
+    let lose = "ALTER TABLE orders AUTO_INCREMENT = 5;";
     let then = "ALTER TABLE orders ADD COLUMN c INT NULL;";
     let myisam = all_on_both(&myisam_lab_after(&[]), &format!("{lose}\n{then}"));
     for answers in myisam {
@@ -4854,7 +4871,7 @@ fn naming_innodb_default_row_format_makes_tables_without_a_row_format_unknown() 
         assert_answer(
             set,
             LAB_TABLES,
-            &format!("ALTER TABLE orders DROP COLUMN no_such_column;\n{set};\n{alter}"),
+            &format!("ALTER TABLE orders AUTO_INCREMENT = 5;\n{set};\n{alter}"),
             UNKNOWN,
         );
         // What ran before the setting keeps its answer.
@@ -5019,7 +5036,7 @@ fn an_alter_that_writes_a_row_format_or_block_size_on_a_table_kilit_does_not_kno
 
 #[test]
 fn an_unreadable_alter_that_writes_neither_keeps_the_answer_of_a_dynamic_table() {
-    let lose = "ALTER TABLE orders DROP COLUMN no_such_column;";
+    let lose = "ALTER TABLE orders AUTO_INCREMENT = 5;";
     let then = "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;";
     assert_answer("dynamic", LAB_TABLES, &format!("{lose}\n{then}"), INSTANT);
     assert_answer(
@@ -5032,7 +5049,7 @@ fn an_unreadable_alter_that_writes_neither_keeps_the_answer_of_a_dynamic_table()
 
 #[test]
 fn a_known_compressed_compact_or_redundant_table_lost_by_any_unreadable_statement_is_unknown() {
-    let lose = "ALTER TABLE orders DROP COLUMN no_such_column;";
+    let lose = "ALTER TABLE orders AUTO_INCREMENT = 5;";
     let then = "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;";
     for options in [
         COMPRESSED,
@@ -10201,4 +10218,1974 @@ fn a_rename_of_a_table_in_another_case_makes_the_new_name_the_table_made_here() 
             case_ending_a("t1", "T1")
         )
     );
+}
+
+// ---------------------------------------------------------------------------
+// Step B1b: literal defaults on TEXT, BLOB, JSON and GEOMETRY columns (error
+// 1101), dropping the primary key column, answers without a known table,
+// the row size limit (error 1118), and dropping what a table does not have
+// (error 1091).
+//
+// The expectations come from the lab (the scenarios named in each test), from
+// the hand tests (manual/B1b) and from the decisions of the step. A test
+// that names a lab scenario needs that scenario in matrix/.
+
+const FAILS_1101: &str = "fails with error 1101";
+const FAILS_1118: &str = "fails with error 1118";
+const INSTANT_PREFIX: &str = "INSTANT";
+const COPY_PREFIX: &str = "COPY, copies every row";
+const INPLACE_REBUILD_PREFIX: &str = "INPLACE, rebuilds the table";
+
+/// Everything kilit says about one statement: what the lab measured for it,
+/// or why it cannot tell.
+#[derive(Debug, PartialEq)]
+struct Said {
+    case: Option<&'static str>,
+    answer: String,
+    evidence: Vec<&'static str>,
+    notes: Vec<String>,
+    reason: String,
+}
+
+impl Said {
+    /// Whether some note starts with `prefix`.
+    fn has_note_starting(&self, prefix: &str) -> bool {
+        self.notes.iter().any(|note| note.starts_with(prefix))
+    }
+
+    /// Whether some note holds every one of `parts`.
+    fn has_note_with(&self, parts: &[&str]) -> bool {
+        self.notes
+            .iter()
+            .any(|note| parts.iter().all(|part| note.contains(part)))
+    }
+}
+
+/// What `server` says about the last statement of `sql`.
+fn said_on(server: &str, schema: &str, sql: &str) -> Said {
+    match predictions_on(server, schema, sql).pop().unwrap() {
+        Prediction::Measured {
+            case,
+            verdict,
+            evidence,
+            notes,
+        } => Said {
+            case: Some(case),
+            answer: match verdict {
+                Verdict::Fails { code, .. } => format!("fails with error {code}"),
+                other => other.to_string(),
+            },
+            evidence,
+            notes,
+            reason: String::new(),
+        },
+        Prediction::Unknown { reason } => Said {
+            case: None,
+            answer: "unknown".into(),
+            evidence: Vec::new(),
+            notes: Vec::new(),
+            reason,
+        },
+        Prediction::NotChecked { reason } => Said {
+            case: None,
+            answer: "not checked".into(),
+            evidence: Vec::new(),
+            notes: Vec::new(),
+            reason,
+        },
+    }
+}
+
+/// What kilit says about the last statement of `sql`: the same on MySQL
+/// 8.0.46 and 8.4.13, or the test fails.
+fn said(schema: &str, sql: &str) -> Said {
+    let on_80 = said_on(MYSQL_80, schema, sql);
+    let on_84 = said_on(MYSQL_84, schema, sql);
+    assert_eq!(on_80, on_84, "{sql}");
+    on_84
+}
+
+/// The tables of the lab, then `ALTER TABLE orders AUTO_INCREMENT = 1000`,
+/// which kilit cannot follow: it stops trusting `orders`.
+fn lab_with_lost_orders() -> String {
+    format!("{LAB_TABLES}\nALTER TABLE orders AUTO_INCREMENT = 1000;\n")
+}
+
+/// The ways kilit can be without a table it is asked about: no table at all
+/// (no --schema) and a table it stopped trusting.
+fn tables_kilit_does_not_know() -> [(&'static str, String); 2] {
+    [
+        ("no table", String::new()),
+        ("a lost table", lab_with_lost_orders()),
+    ]
+}
+
+/// The lab's tables with the lab's `orders` and 62 more VARCHAR(255) NULL
+/// columns, in utf8mb4: 64,607 bytes of columns and 8 of NULL flags (64,615)
+/// of the 65,535 a row may have.
+fn lab_with_62_wide_columns(more: &[&str]) -> String {
+    let columns: Vec<String> = (1..=62)
+        .map(|n| format!("ADD COLUMN s{n} VARCHAR(255) NULL"))
+        .collect();
+    let mut setup = vec![format!("ALTER TABLE orders {}", columns.join(", "))];
+    setup.extend(more.iter().map(|statement| statement.to_string()));
+    let setup: Vec<&str> = setup.iter().map(String::as_str).collect();
+    lab_after(&setup)
+}
+
+/// Runs `statement` once for each of the lab's six variants (as written,
+/// INSTANT, INPLACE, INPLACE with LOCK=NONE, COPY, LOCK=NONE), after
+/// `session`, and checks that each answer starts as the lab measured it.
+fn assert_six_variants(schema: &str, session: &str, statement: &str, expected: [&str; 6]) {
+    for (variant, expected) in Variant::ALL.into_iter().zip(expected) {
+        let sql = format!("{session}{statement}{}", variant.clause());
+        let answer = said(schema, &sql).answer;
+        assert!(
+            answer.starts_with(expected),
+            "{sql}\n    expected an answer starting {expected:?}, got {answer:?}"
+        );
+    }
+}
+
+/// What the lab measured for the shapes that follow: every variant fails
+/// with 1101.
+const ALL_1101: [&str; 6] = [FAILS_1101; 6];
+/// A default written as an expression: COPY, and a forced INSTANT, INPLACE or
+/// LOCK=NONE is refused with 1845 (add-column-text-default-expression and its
+/// twins).
+const EXPRESSION_DEFAULT: [&str; 6] = [
+    COPY_PREFIX,
+    FAILS_1845,
+    FAILS_1845,
+    FAILS_1845,
+    COPY_PREFIX,
+    FAILS_1845,
+];
+
+/// The shapes the lab measured with a literal default on a column that
+/// cannot have one, in MySQL's strict mode: the column definition and the
+/// scenario that measured it.
+const QUOTED_DEFAULT_SHAPES: [(&str, &str); 5] = [
+    (
+        "c TEXT NOT NULL DEFAULT ''",
+        "add-column-text-default-literal",
+    ),
+    (
+        "c TEXT NULL DEFAULT 'x'",
+        "add-column-text-nullable-default-literal",
+    ),
+    (
+        "c JSON NULL DEFAULT '[]'",
+        "add-column-json-default-literal",
+    ),
+    ("c BLOB DEFAULT ''", "add-column-blob-default-literal"),
+    (
+        "c GEOMETRY NULL DEFAULT ''",
+        "add-column-geometry-default-literal",
+    ),
+];
+
+#[test]
+fn a_new_text_json_blob_or_geometry_column_with_a_quoted_default_fails_with_1101() {
+    // $table->text('c')->default(''); $table->json('c')->nullable()->default('[]');
+    // The answer comes from the statement, so the table does not matter.
+    for (label, schema) in [
+        ("the lab's tables", LAB_TABLES.to_owned()),
+        ("no table", String::new()),
+        ("a lost table", lab_with_lost_orders()),
+    ] {
+        for (column, scenario) in QUOTED_DEFAULT_SHAPES {
+            let sql = format!("ALTER TABLE orders ADD COLUMN {column}");
+            let answer = said(&schema, &sql);
+            assert_eq!(answer.answer, FAILS_1101, "{label}: {sql}");
+            assert_eq!(
+                answer.case,
+                Some("add-column-blob-literal-default"),
+                "{label}: {sql}"
+            );
+            assert!(
+                answer.evidence.contains(&scenario),
+                "{label}: {sql}: {scenario} is missing from {:?}",
+                answer.evidence
+            );
+        }
+    }
+}
+
+#[test]
+fn a_quoted_default_on_a_text_json_blob_or_geometry_column_fails_with_1101_in_every_variant() {
+    // The lab: 1101 as written, with ALGORITHM=INSTANT, INPLACE, INPLACE with
+    // LOCK=NONE, COPY and LOCK=NONE, on both servers.
+    for (column, _) in QUOTED_DEFAULT_SHAPES {
+        assert_six_variants(
+            LAB_TABLES,
+            "",
+            &format!("ALTER TABLE orders ADD COLUMN {column}"),
+            ALL_1101,
+        );
+    }
+}
+
+#[test]
+fn a_quoted_default_on_text_or_blob_carries_a_note_that_kilit_assumes_strict_sql_mode() {
+    // With no sql_mode set in the input the answer rests on the server's
+    // default, which is strict.
+    for column in [
+        "c TEXT NOT NULL DEFAULT ''",
+        "c BLOB DEFAULT ''",
+        "c LONGTEXT NOT NULL DEFAULT ''",
+    ] {
+        let answer = said(
+            LAB_TABLES,
+            &format!("ALTER TABLE orders ADD COLUMN {column}"),
+        );
+        assert_eq!(answer.answer, FAILS_1101, "{column}");
+        assert!(
+            answer.has_note_with(&["assumes strict SQL mode, the MySQL default"]),
+            "{column}: {:?}",
+            answer.notes
+        );
+    }
+}
+
+#[test]
+fn a_new_text_column_with_default_null_or_none_keeps_the_add_column_answer() {
+    // $table->text('c')->nullable(); and ->default(null).
+    for column in [
+        "c TEXT NULL",
+        "c TEXT NULL DEFAULT NULL",
+        "c JSON NULL DEFAULT NULL",
+    ] {
+        let answer = said(
+            LAB_TABLES,
+            &format!("ALTER TABLE orders ADD COLUMN {column}"),
+        );
+        assert_eq!(answer.case, Some("add-column"), "{column}");
+        assert_eq!(answer.answer, INSTANT, "{column}");
+    }
+}
+
+#[test]
+fn a_quoted_default_on_another_type_keeps_its_answer() {
+    // Only TEXT, BLOB, JSON and GEOMETRY refuse a literal default.
+    for column in [
+        "c VARCHAR(50) NOT NULL DEFAULT ''",
+        "c INT NOT NULL DEFAULT 0",
+        "c CHAR(2) NOT NULL DEFAULT 'x'",
+        "c ENUM('a','b') NOT NULL DEFAULT 'a'",
+    ] {
+        let answer = said(
+            LAB_TABLES,
+            &format!("ALTER TABLE orders ADD COLUMN {column}"),
+        );
+        assert_eq!(answer.case, Some("add-column"), "{column}");
+        assert_eq!(answer.answer, INSTANT, "{column}");
+    }
+}
+
+#[test]
+fn with_an_empty_sql_mode_a_text_or_blob_column_with_an_empty_default_is_instant() {
+    // SET sql_mode = ''; or a list that is not strict: add-column-text-default-
+    // literal-sql-mode-empty, ...-not-strict and the BLOB twins ran INSTANT on
+    // both servers (INPLACE with a rebuild when forced, COPY when forced).
+    for set in [
+        "SET sql_mode = ''",
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'",
+        "SET SESSION sql_mode = ''",
+    ] {
+        for (column, scenario) in [
+            (
+                "c TEXT NOT NULL DEFAULT ''",
+                "add-column-text-default-literal",
+            ),
+            ("c BLOB DEFAULT ''", "add-column-blob-default-literal"),
+        ] {
+            let sql = format!("{set};\nALTER TABLE orders ADD COLUMN {column}");
+            let answer = said(LAB_TABLES, &sql);
+            assert_eq!(answer.answer, INSTANT, "{sql}");
+            assert_eq!(
+                answer.case,
+                Some("add-column-blob-empty-default-not-strict"),
+                "{sql}"
+            );
+            assert!(
+                answer
+                    .evidence
+                    .iter()
+                    .any(|id| id.starts_with(scenario) && id.contains("sql-mode")),
+                "{sql}: no sql-mode twin of {scenario} in {:?}",
+                answer.evidence
+            );
+        }
+    }
+}
+
+#[test]
+fn with_an_empty_sql_mode_the_variants_of_an_empty_text_default_are_the_lab_s() {
+    // ok ok rebuild rebuild copy ok: INSTANT as written, INSTANT, INPLACE with
+    // a rebuild, INPLACE with a rebuild, COPY, INSTANT.
+    assert_six_variants(
+        LAB_TABLES,
+        "SET sql_mode = '';\n",
+        "ALTER TABLE orders ADD COLUMN c TEXT NOT NULL DEFAULT ''",
+        [
+            INSTANT_PREFIX,
+            INSTANT_PREFIX,
+            INPLACE_REBUILD_PREFIX,
+            INPLACE_REBUILD_PREFIX,
+            COPY_PREFIX,
+            INSTANT_PREFIX,
+        ],
+    );
+}
+
+#[test]
+fn laravel_s_blob_and_text_columns_with_an_empty_default_are_instant_with_an_empty_sql_mode() {
+    // $table->binary('e')->default(''); $table->text('a')->default('');
+    // Laravel 12 and 13 print `blob not null default ''`.
+    for column in [
+        "`a` text not null default ''",
+        "`e` blob not null default ''",
+    ] {
+        let answer = said(
+            LAB_TABLES,
+            &format!("SET sql_mode = '';\nalter table `orders` add {column}"),
+        );
+        assert_eq!(answer.answer, INSTANT, "{column}");
+    }
+}
+
+#[test]
+fn with_an_empty_sql_mode_a_nonempty_text_default_a_json_default_and_a_geometry_default_still_fail()
+{
+    // add-column-text-nullable-default-literal-sql-mode-empty, ...-not-strict,
+    // add-column-json-default-literal-sql-mode-*, add-column-geometry-default-
+    // literal-sql-mode-*: 1101 in every sql_mode.
+    for set in [
+        "SET sql_mode = ''",
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'",
+    ] {
+        for (column, scenario) in [
+            (
+                "c TEXT NULL DEFAULT 'x'",
+                "add-column-text-nullable-default-literal",
+            ),
+            (
+                "c JSON NULL DEFAULT '[]'",
+                "add-column-json-default-literal",
+            ),
+            (
+                "c GEOMETRY NULL DEFAULT ''",
+                "add-column-geometry-default-literal",
+            ),
+        ] {
+            let sql = format!("{set};\nALTER TABLE orders ADD COLUMN {column}");
+            let answer = said(LAB_TABLES, &sql);
+            assert_eq!(answer.answer, FAILS_1101, "{sql}");
+            assert!(
+                answer.evidence.iter().any(|id| id.starts_with(scenario)),
+                "{sql}: {:?}",
+                answer.evidence
+            );
+        }
+    }
+}
+
+#[test]
+fn an_sql_mode_set_after_the_statement_does_not_change_its_answer() {
+    let answers = on_mysql_84(
+        LAB_TABLES,
+        "ALTER TABLE orders ADD COLUMN a TEXT NOT NULL DEFAULT '';
+         SET sql_mode = '';
+         ALTER TABLE orders ADD COLUMN b TEXT NOT NULL DEFAULT '';",
+    );
+    assert_eq!(answers, [FAILS_1101, "not checked", INSTANT]);
+}
+
+#[test]
+fn an_sql_mode_kilit_has_not_measured_makes_a_text_default_unknown() {
+    // CONCAT(@@sql_mode, ...) is not a list kilit can read, GLOBAL does not
+    // set the session's mode, and 'ANSI' is a list the lab did not run.
+    for set in [
+        "SET sql_mode = CONCAT(@@sql_mode, ',X')",
+        "SET GLOBAL sql_mode = ''",
+        "SET sql_mode = 'ANSI'",
+        "SET SESSION sql_mode = 'ANSI'",
+    ] {
+        let sql = format!("{set};\nALTER TABLE orders ADD COLUMN c TEXT NOT NULL DEFAULT ''");
+        let answer = said(LAB_TABLES, &sql);
+        assert_eq!(answer.answer, "unknown", "{sql}");
+        assert!(!answer.reason.is_empty(), "{sql}");
+    }
+}
+
+#[test]
+fn a_text_or_json_default_written_as_an_expression_copies_the_table() {
+    // $table->text('c')->default(new Expression("('')")): add-column-text-
+    // default-expression and add-column-json-default-expression, COPY on both
+    // servers, in every sql_mode the lab ran.
+    for set in [
+        "",
+        "SET sql_mode = '';\n",
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION';\n",
+    ] {
+        for column in ["c TEXT NOT NULL DEFAULT ('')", "c JSON NULL DEFAULT ('[]')"] {
+            let sql = format!("{set}ALTER TABLE orders ADD COLUMN {column}");
+            let answer = said(LAB_TABLES, &sql);
+            assert_eq!(
+                answer.case,
+                Some("add-column-blob-expression-default"),
+                "{sql}"
+            );
+            assert!(
+                answer.answer.starts_with(COPY_PREFIX),
+                "{sql}: {}",
+                answer.answer
+            );
+            assert_eq!(
+                said(
+                    LAB_TABLES,
+                    &format!("{set}ALTER TABLE orders ADD COLUMN {column}, ALGORITHM=INSTANT")
+                )
+                .answer,
+                FAILS_1845,
+                "{sql}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_variants_of_an_expression_default_on_text_are_the_lab_s() {
+    // copy 1845 1845 1845 copy 1845
+    assert_six_variants(
+        LAB_TABLES,
+        "",
+        "ALTER TABLE orders ADD COLUMN c TEXT NOT NULL DEFAULT ('')",
+        EXPRESSION_DEFAULT,
+    );
+}
+
+#[test]
+fn an_expression_default_on_a_text_column_waits_for_writes_without_a_table_too() {
+    for (label, schema) in tables_kilit_does_not_know() {
+        let answer = said(
+            &schema,
+            "ALTER TABLE orders ADD COLUMN c TEXT NOT NULL DEFAULT ('')",
+        );
+        assert_eq!(
+            answer.case,
+            Some("add-column-blob-expression-default"),
+            "{label}"
+        );
+        assert_eq!(answer.answer, COPY, "{label}");
+    }
+}
+
+#[test]
+fn an_empty_expression_default_on_a_varchar_column_is_unknown() {
+    // Only TEXT, BLOB and JSON were measured with an expression default of
+    // this kind.
+    let answer = said(
+        LAB_TABLES,
+        "ALTER TABLE orders ADD COLUMN c VARCHAR(10) NOT NULL DEFAULT ('')",
+    );
+    assert_eq!(answer.answer, "unknown");
+}
+
+#[test]
+fn changing_a_column_to_text_with_a_quoted_default_fails_with_1101() {
+    // $table->text('note')->default('')->change(); Laravel prints
+    // `modify note text not null default ''`. modify-column-text-default-
+    // literal (from VARCHAR) and modify-text-column-default-literal (from
+    // TEXT): 1101 on both servers, in every variant.
+    for (label, schema) in [
+        ("the lab's tables", LAB_TABLES.to_owned()),
+        ("no table", String::new()),
+        ("a lost table", lab_with_lost_orders()),
+    ] {
+        for sql in [
+            "ALTER TABLE orders MODIFY note TEXT NULL DEFAULT ''",
+            "alter table `orders` modify `note` text not null default ''",
+            "ALTER TABLE orders CHANGE note note TEXT NULL DEFAULT ''",
+            "ALTER TABLE orders MODIFY note TEXT NULL DEFAULT 'x'",
+        ] {
+            let answer = said(&schema, sql);
+            assert_eq!(answer.answer, FAILS_1101, "{label}: {sql}");
+            assert_eq!(
+                answer.case,
+                Some("modify-column-blob-literal-default"),
+                "{label}: {sql}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_evidence_of_a_text_default_on_a_modify_is_the_scenario_of_its_shape() {
+    let from_varchar = said(
+        LAB_TABLES,
+        "ALTER TABLE orders MODIFY note TEXT NULL DEFAULT ''",
+    );
+    assert!(
+        from_varchar
+            .evidence
+            .contains(&"modify-column-text-default-literal"),
+        "{:?}",
+        from_varchar.evidence
+    );
+    let schema = lab_after(&["ALTER TABLE orders ADD COLUMN c TEXT NULL"]);
+    let from_text = said(&schema, "ALTER TABLE orders MODIFY c TEXT NULL DEFAULT ''");
+    assert_eq!(from_text.answer, FAILS_1101);
+    assert!(
+        from_text
+            .evidence
+            .contains(&"modify-text-column-default-literal"),
+        "{:?}",
+        from_text.evidence
+    );
+}
+
+#[test]
+fn a_modify_to_text_with_a_quoted_default_fails_in_every_variant() {
+    assert_six_variants(
+        LAB_TABLES,
+        "",
+        "ALTER TABLE orders MODIFY note TEXT NULL DEFAULT ''",
+        ALL_1101,
+    );
+}
+
+#[test]
+fn with_an_empty_sql_mode_a_modify_to_text_with_a_quoted_default_is_unknown() {
+    // The lab ran it: COPY from VARCHAR, INSTANT from TEXT, with the mode
+    // empty or not strict. The two shapes differ, so kilit does not answer.
+    for set in [
+        "SET sql_mode = ''",
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'",
+    ] {
+        let sql = format!("{set};\nALTER TABLE orders MODIFY note TEXT NULL DEFAULT ''");
+        assert_eq!(said(LAB_TABLES, &sql).answer, "unknown", "{sql}");
+    }
+}
+
+#[test]
+fn a_modify_to_text_without_a_default_keeps_its_answer() {
+    // modify-column answers as before: nothing quoted, nothing refused.
+    let answer = said(LAB_TABLES, "ALTER TABLE orders MODIFY note TEXT NULL");
+    assert_ne!(answer.answer, FAILS_1101);
+    assert_ne!(answer.case, Some("modify-column-blob-literal-default"));
+}
+
+/// The lab's tables with a TEXT column `c`, a JSON column `j` and a VARCHAR
+/// column `v` added to `orders`.
+fn lab_with_text_json_and_varchar() -> String {
+    lab_after(&[
+        "ALTER TABLE orders ADD COLUMN c TEXT NULL, ADD COLUMN j JSON NULL, ADD COLUMN v VARCHAR(20) NULL",
+    ])
+}
+
+#[test]
+fn setting_a_quoted_default_on_a_known_text_or_json_column_fails_with_1101() {
+    // $table->text('c')->default('')->change() prints MODIFY; this is the
+    // statement form ALTER COLUMN ... SET DEFAULT. set-column-default-text-
+    // literal and set-column-default-json-literal: 1101 on both servers.
+    let schema = lab_with_text_json_and_varchar();
+    for (sql, scenario) in [
+        (
+            "ALTER TABLE orders ALTER COLUMN c SET DEFAULT ''",
+            "set-column-default-text-literal",
+        ),
+        (
+            "ALTER TABLE orders ALTER COLUMN j SET DEFAULT '[]'",
+            "set-column-default-json-literal",
+        ),
+    ] {
+        let answer = said(&schema, sql);
+        assert_eq!(answer.answer, FAILS_1101, "{sql}");
+        assert_eq!(answer.case, Some("set-column-default"), "{sql}");
+        assert!(
+            answer.evidence.contains(&scenario),
+            "{sql}: {:?}",
+            answer.evidence
+        );
+    }
+}
+
+#[test]
+fn setting_a_quoted_default_on_a_known_text_column_fails_after_an_empty_sql_mode_too() {
+    // set-column-default-text-literal-sql-mode-empty and ...-not-strict: 1101.
+    let schema = lab_with_text_json_and_varchar();
+    for set in [
+        "SET sql_mode = ''",
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'",
+    ] {
+        let sql = format!("{set};\nALTER TABLE orders ALTER COLUMN c SET DEFAULT ''");
+        assert_eq!(said(&schema, &sql).answer, FAILS_1101, "{sql}");
+    }
+}
+
+#[test]
+fn setting_a_quoted_default_on_a_known_json_column_after_an_empty_sql_mode_is_unknown() {
+    // The lab ran set-column-default-json-literal-sql-mode-empty and
+    // ...-not-strict (1101 on both servers); kilit stays cautious and does not
+    // bind them: unknown (decision of the step).
+    let schema = lab_with_text_json_and_varchar();
+    for set in [
+        "SET sql_mode = ''",
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'",
+    ] {
+        let sql = format!("{set};\nALTER TABLE orders ALTER COLUMN j SET DEFAULT '[]'");
+        assert_eq!(said(&schema, &sql).answer, "unknown", "{sql}");
+    }
+}
+
+#[test]
+fn setting_a_quoted_default_on_a_known_varchar_column_keeps_its_answer() {
+    let schema = lab_with_text_json_and_varchar();
+    for sql in [
+        "ALTER TABLE orders ALTER COLUMN v SET DEFAULT ''",
+        "ALTER TABLE orders ALTER COLUMN note SET DEFAULT 'x'",
+    ] {
+        let answer = said(&schema, sql);
+        assert_eq!(answer.answer, INSTANT, "{sql}");
+        assert_eq!(answer.case, Some("set-column-default"), "{sql}");
+    }
+}
+
+#[test]
+fn setting_a_quoted_default_on_a_table_kilit_does_not_know_is_instant_with_a_note_about_1101() {
+    for (label, schema) in tables_kilit_does_not_know() {
+        let answer = said(&schema, "ALTER TABLE orders ALTER COLUMN c SET DEFAULT ''");
+        assert_eq!(answer.case, Some("set-column-default"), "{label}");
+        assert_eq!(answer.answer, INSTANT, "{label}");
+        assert!(
+            answer.has_note_starting("if the column is TEXT, BLOB or JSON: fails with error 1101"),
+            "{label}: {:?}",
+            answer.notes
+        );
+    }
+}
+
+#[test]
+fn dropping_the_only_primary_key_column_of_a_known_table_copies_it() {
+    // drop-primary-key-column: COPY as written (1000 rows), 1846 with
+    // ALGORITHM=INSTANT, INPLACE, INPLACE with LOCK=NONE, and with LOCK=NONE;
+    // COPY when forced.
+    let answer = said(LAB_TABLES, "ALTER TABLE orders DROP COLUMN id");
+    assert_eq!(answer.case, Some("drop-column"));
+    assert_eq!(answer.answer, COPY);
+    assert!(
+        answer.evidence.contains(&"drop-primary-key-column"),
+        "{:?}",
+        answer.evidence
+    );
+}
+
+#[test]
+fn the_variants_of_dropping_the_primary_key_column_are_the_lab_s() {
+    assert_six_variants(
+        LAB_TABLES,
+        "",
+        "ALTER TABLE orders DROP COLUMN id",
+        [
+            COPY_PREFIX,
+            FAILS_1846,
+            FAILS_1846,
+            FAILS_1846,
+            COPY_PREFIX,
+            FAILS_1846,
+        ],
+    );
+}
+
+#[test]
+fn laravel_dropping_the_primary_key_column_is_the_same_statement() {
+    // $table->dropColumn('id');
+    let answer = said(LAB_TABLES, "alter table `orders` drop `id`");
+    assert_eq!(answer.answer, COPY);
+    assert!(answer.evidence.contains(&"drop-primary-key-column"));
+}
+
+#[test]
+fn dropping_a_column_that_is_not_the_primary_key_keeps_its_answer() {
+    for column in ["note", "email", "amount", "user_id"] {
+        let answer = said(
+            LAB_TABLES,
+            &format!("ALTER TABLE orders DROP COLUMN {column}"),
+        );
+        assert_eq!(answer.case, Some("drop-column"), "{column}");
+        assert_eq!(answer.answer, INSTANT, "{column}");
+        assert!(
+            !answer.evidence.contains(&"drop-primary-key-column"),
+            "{column}"
+        );
+    }
+}
+
+#[test]
+fn dropping_a_column_of_a_table_kilit_does_not_know_is_instant_with_a_note_about_the_primary_key() {
+    // 0.1.0 said INSTANT with nothing about the primary key; MySQL copies the
+    // table (drop-primary-key-column).
+    for (label, schema) in tables_kilit_does_not_know() {
+        let answer = said(&schema, "ALTER TABLE orders DROP COLUMN id");
+        assert_eq!(answer.case, Some("drop-column"), "{label}");
+        assert_eq!(answer.answer, INSTANT, "{label}");
+        assert!(
+            answer.has_note_with(&[
+                "if the column is the primary key: ",
+                "drop-primary-key-column"
+            ]),
+            "{label}: {:?}",
+            answer.notes
+        );
+    }
+}
+
+#[test]
+fn forcing_algorithm_instant_on_a_drop_without_a_known_table_notes_the_error_1846() {
+    // drop-primary-key-column: ALGORITHM=INSTANT is refused with 1846.
+    for (label, schema) in tables_kilit_does_not_know() {
+        let answer = said(
+            &schema,
+            "ALTER TABLE orders DROP COLUMN id, ALGORITHM=INSTANT",
+        );
+        assert_eq!(answer.answer, INSTANT, "{label}");
+        assert!(
+            answer.has_note_with(&["fails with error 1846", "drop-primary-key-column"]),
+            "{label}: {:?}",
+            answer.notes
+        );
+    }
+}
+
+/// The lab's tables with `PRIMARY KEY (id, user_id)` on `orders`, as the
+/// scenario drop-column-in-two-column-primary-key sets it up.
+fn lab_with_two_column_primary_key() -> String {
+    lab_after(&["ALTER TABLE orders DROP PRIMARY KEY, ADD PRIMARY KEY (id, user_id)"])
+}
+
+#[test]
+fn dropping_the_second_column_of_a_two_column_primary_key_rebuilds_inplace_and_notes_duplicates() {
+    // drop-column-in-two-column-primary-key: INPLACE with a rebuild, writes
+    // continue. If the first column repeats, the key that is left does not
+    // hold (drop-column-in-two-column-primary-key-duplicates): error 1062,
+    // which the rows decide.
+    let answer = said(
+        &lab_with_two_column_primary_key(),
+        "ALTER TABLE orders DROP COLUMN user_id",
+    );
+    assert_eq!(answer.case, Some("drop-column"));
+    assert_eq!(answer.answer, INPLACE_REBUILD);
+    assert!(
+        answer
+            .evidence
+            .contains(&"drop-column-in-two-column-primary-key"),
+        "{:?}",
+        answer.evidence
+    );
+    assert!(
+        answer.has_note_with(&[
+            "if the column is the second of a primary key of two, and the first holds duplicate values: fails with error 1062",
+            "drop-column-in-two-column-primary-key-duplicates"
+        ]),
+        "{:?}",
+        answer.notes
+    );
+}
+
+#[test]
+fn the_variants_of_dropping_the_second_column_of_a_two_column_primary_key_are_the_lab_s() {
+    // rebuild 1845 rebuild rebuild copy rebuild
+    assert_six_variants(
+        &lab_with_two_column_primary_key(),
+        "",
+        "ALTER TABLE orders DROP COLUMN user_id",
+        [
+            INPLACE_REBUILD_PREFIX,
+            FAILS_1845,
+            INPLACE_REBUILD_PREFIX,
+            INPLACE_REBUILD_PREFIX,
+            COPY_PREFIX,
+            INPLACE_REBUILD_PREFIX,
+        ],
+    );
+}
+
+#[test]
+fn dropping_the_first_column_of_a_two_column_primary_key_is_unknown() {
+    // Only the second column's drop was measured.
+    let answer = said(
+        &lab_with_two_column_primary_key(),
+        "ALTER TABLE orders DROP COLUMN id",
+    );
+    assert_eq!(answer.answer, "unknown");
+}
+
+#[test]
+fn dropping_a_column_of_a_three_column_primary_key_is_unknown() {
+    let schema =
+        lab_after(&["ALTER TABLE orders DROP PRIMARY KEY, ADD PRIMARY KEY (id, user_id, amount)"]);
+    for column in ["id", "user_id", "amount"] {
+        let answer = said(&schema, &format!("ALTER TABLE orders DROP COLUMN {column}"));
+        assert_eq!(answer.answer, "unknown", "{column}");
+    }
+}
+
+#[test]
+fn the_notes_of_a_drop_without_a_known_table_say_what_is_not_measured_about_keys() {
+    // A column in a foreign key or in a unique index with other columns: the
+    // table would decide, kilit cannot see it, so the answer carries a note.
+    for (label, schema) in tables_kilit_does_not_know() {
+        let answer = said(&schema, "ALTER TABLE orders DROP COLUMN note");
+        assert_eq!(answer.answer, INSTANT, "{label}");
+        assert!(
+            answer.has_note_with(&[
+                "if the column is in a foreign key or a unique index with other columns",
+                "not measured"
+            ]),
+            "{label}: {:?}",
+            answer.notes
+        );
+    }
+}
+
+#[test]
+fn a_drop_on_a_known_table_has_no_note_about_keys_it_can_see() {
+    let answer = said(LAB_TABLES, "ALTER TABLE orders DROP COLUMN note");
+    assert_eq!(answer.answer, INSTANT);
+    assert!(
+        !answer.has_note_with(&["if the column is the primary key"]),
+        "{:?}",
+        answer.notes
+    );
+    assert!(
+        !answer.has_note_with(&["a foreign key or a unique index with other columns"]),
+        "{:?}",
+        answer.notes
+    );
+}
+
+#[test]
+fn a_drop_of_a_column_in_a_multi_column_unique_index_of_a_known_table_stays_unknown() {
+    let schema = lab_after(&["ALTER TABLE orders ADD UNIQUE INDEX uq_ua (user_id, amount)"]);
+    assert_eq!(
+        said(&schema, "ALTER TABLE orders DROP COLUMN amount").answer,
+        "unknown"
+    );
+}
+
+#[test]
+fn an_index_on_a_table_kilit_does_not_know_notes_that_a_json_column_is_not_measured() {
+    // ALTER TABLE ... ADD INDEX over a JSON column is unknown on a known
+    // table (see below); without the table the measured answer carries a note.
+    for (label, schema) in tables_kilit_does_not_know() {
+        for sql in [
+            "ALTER TABLE orders ADD INDEX ix_note (note)",
+            "ALTER TABLE orders ADD UNIQUE INDEX uq_email (email)",
+            "alter table `orders` add index `orders_note_index`(`note`)",
+        ] {
+            let answer = said(&schema, sql);
+            assert!(answer.case.is_some(), "{label}: {sql}: {answer:?}");
+            assert!(
+                answer.has_note_with(&["if a column of the index is JSON", "not measured"]),
+                "{label}: {sql}: {:?}",
+                answer.notes
+            );
+        }
+    }
+}
+
+#[test]
+fn an_index_on_a_json_column_of_a_known_table_stays_unknown() {
+    let schema = lab_after(&["ALTER TABLE orders ADD COLUMN j JSON NULL"]);
+    assert_eq!(
+        said(&schema, "ALTER TABLE orders ADD INDEX ix_j (j)").answer,
+        "unknown"
+    );
+}
+
+#[test]
+fn an_index_on_a_known_table_has_no_note_about_json() {
+    let answer = said(LAB_TABLES, "ALTER TABLE orders ADD INDEX ix_note (note)");
+    assert!(answer.case.is_some());
+    assert!(
+        !answer.has_note_with(&["if a column of the index is JSON"]),
+        "{:?}",
+        answer.notes
+    );
+}
+
+#[test]
+fn a_check_on_a_table_kilit_does_not_know_notes_what_it_cannot_see() {
+    // A taken name, a column that is not there, an AUTO_INCREMENT column, a
+    // generated column, a foreign key column: the table would decide.
+    for (label, schema) in tables_kilit_does_not_know() {
+        for sql in [
+            "ALTER TABLE orders ADD CONSTRAINT ck_amount CHECK (amount > 0)",
+            "ALTER TABLE orders ADD CONSTRAINT ck_amount CHECK (amount > 0) NOT ENFORCED",
+        ] {
+            let answer = said(&schema, sql);
+            assert!(answer.case.is_some(), "{label}: {sql}: {answer:?}");
+            assert!(
+                answer.has_note_with(&["AUTO_INCREMENT", "generated", "not measured"]),
+                "{label}: {sql}: {:?}",
+                answer.notes
+            );
+        }
+    }
+}
+
+#[test]
+fn a_check_on_an_auto_increment_column_of_a_known_table_stays_unknown() {
+    assert_eq!(
+        said(
+            LAB_TABLES,
+            "ALTER TABLE orders ADD CONSTRAINT ck CHECK (id > 0)"
+        )
+        .answer,
+        "unknown"
+    );
+}
+
+#[test]
+fn a_check_on_a_plain_column_of_a_known_table_has_no_note_about_what_it_can_see() {
+    let answer = said(
+        LAB_TABLES,
+        "ALTER TABLE orders ADD CONSTRAINT ck_amount CHECK (amount > 0)",
+    );
+    assert!(answer.case.is_some());
+    assert!(
+        !answer.has_note_with(&["AUTO_INCREMENT", "generated", "not measured"]),
+        "{:?}",
+        answer.notes
+    );
+}
+
+const ADD_FOREIGN_KEY_USER: &str =
+    "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)";
+
+#[test]
+fn a_foreign_key_with_a_table_kilit_does_not_know_notes_what_it_cannot_see() {
+    // A missing column, NOT NULL with ON DELETE SET NULL, a MyISAM table: the
+    // tables would decide. (The notes about the parent's index differ per
+    // server, so each server is looked at on its own.)
+    let note_parts = ["ON DELETE SET NULL", "MyISAM", "not measured"];
+    let child_lost = "CREATE TABLE users (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL);
+         CREATE TABLE orders (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL);
+         ALTER TABLE orders AUTO_INCREMENT = 1000;";
+    let parent_missing = "CREATE TABLE orders (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL);";
+    let lab_lost = lab_with_lost_orders();
+    for server in [MYSQL_80, MYSQL_84] {
+        for (label, schema) in [
+            ("no table", ""),
+            ("a lost child", lab_lost.as_str()),
+            ("the child is lost, the parent known", child_lost),
+            ("the child is known, the parent is not", parent_missing),
+        ] {
+            let answer = said_on(server, schema, ADD_FOREIGN_KEY_USER);
+            assert_eq!(answer.case, Some("add-foreign-key"), "{label} on {server}");
+            assert_eq!(answer.answer, COPY, "{label} on {server}");
+            assert!(
+                answer.has_note_with(&note_parts),
+                "{label} on {server}: {:?}",
+                answer.notes
+            );
+        }
+    }
+}
+
+#[test]
+fn a_foreign_key_between_known_tables_has_no_note_about_what_it_can_see() {
+    let answer = said(LAB_TABLES, ADD_FOREIGN_KEY_USER);
+    assert_eq!(answer.answer, COPY);
+    assert!(
+        !answer.has_note_with(&["ON DELETE SET NULL", "MyISAM"]),
+        "{:?}",
+        answer.notes
+    );
+}
+
+#[test]
+fn a_foreign_key_that_sets_a_not_null_column_to_null_stays_unknown_on_known_tables() {
+    let sql = "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE SET NULL";
+    assert_eq!(said(LAB_TABLES, sql).answer, "unknown");
+}
+
+#[test]
+fn a_default_set_on_a_table_kilit_does_not_know_notes_an_expression_default() {
+    // If the old default is an expression, changing it was not measured.
+    for (label, schema) in tables_kilit_does_not_know() {
+        let answer = said(&schema, "ALTER TABLE orders ALTER COLUMN x SET DEFAULT 'v'");
+        assert_eq!(answer.case, Some("set-column-default"), "{label}");
+        assert!(
+            answer.has_note_with(&["has an expression default", "not measured"]),
+            "{label}: {:?}",
+            answer.notes
+        );
+    }
+}
+
+#[test]
+fn a_default_changed_over_an_expression_default_of_a_known_table_stays_unknown() {
+    let schema = lab_after(&["ALTER TABLE orders ADD COLUMN d INT NULL DEFAULT (1 + 1)"]);
+    assert_eq!(
+        said(&schema, "ALTER TABLE orders ALTER COLUMN d SET DEFAULT 5").answer,
+        "unknown"
+    );
+}
+
+#[test]
+fn a_default_set_on_a_known_column_has_no_note_about_an_expression_default() {
+    let answer = said(
+        LAB_TABLES,
+        "ALTER TABLE orders ALTER COLUMN amount SET DEFAULT 5",
+    );
+    assert_eq!(answer.answer, INSTANT);
+    assert!(
+        !answer.has_note_with(&["expression default"]),
+        "{:?}",
+        answer.notes
+    );
+}
+
+/// The note a column added to a table that kilit does not know carries about
+/// the 65,535 bytes of a row.
+const ROW_GROWS_NOTE: &str = "if the row grows past the 65,535 bytes MySQL allows";
+
+#[test]
+fn a_new_column_on_a_table_kilit_does_not_know_notes_the_row_size_limit() {
+    // B1: a real migration (snipe-it, settings) failed with 1118 where kilit
+    // said INSTANT.
+    for (label, schema) in tables_kilit_does_not_know() {
+        let answer = said(
+            &schema,
+            "ALTER TABLE orders ADD COLUMN link_color VARCHAR(255) NULL",
+        );
+        assert_eq!(answer.case, Some("add-column"), "{label}");
+        assert_eq!(answer.answer, INSTANT, "{label}");
+        assert!(
+            answer.has_note_starting(ROW_GROWS_NOTE),
+            "{label}: {:?}",
+            answer.notes
+        );
+    }
+}
+
+#[test]
+fn a_new_column_on_a_known_table_far_from_the_row_size_limit_has_no_such_note() {
+    let answer = said(
+        LAB_TABLES,
+        "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL",
+    );
+    assert_eq!(answer.answer, INSTANT);
+    assert!(
+        !answer.has_note_starting(ROW_GROWS_NOTE),
+        "{:?}",
+        answer.notes
+    );
+}
+
+#[test]
+fn a_new_column_that_takes_a_known_table_past_65535_bytes_fails_with_1118() {
+    // add-column-over-row-size-limit: the lab's orders and 62 VARCHAR(255)
+    // columns (64,607 bytes of columns and 8 of NULL flags); VARCHAR(230) NULL
+    // adds 920 bytes and a ninth flag byte, ends at 65,538 and fails with 1118
+    // on both servers, in every variant.
+    let schema = lab_with_62_wide_columns(&[]);
+    let answer = said(
+        &schema,
+        "ALTER TABLE orders ADD COLUMN s63 VARCHAR(230) NULL",
+    );
+    assert_eq!(answer.answer, FAILS_1118);
+    assert_eq!(answer.case, Some("add-column"));
+    assert!(
+        answer.evidence.contains(&"add-column-over-row-size-limit"),
+        "{:?}",
+        answer.evidence
+    );
+    assert_six_variants(
+        &schema,
+        "",
+        "ALTER TABLE orders ADD COLUMN s63 VARCHAR(230) NULL",
+        [FAILS_1118; 6],
+    );
+}
+
+#[test]
+fn a_new_column_that_takes_a_known_table_to_65534_bytes_is_instant() {
+    // add-column-at-row-size-limit: VARCHAR(229) NULL (918 bytes) ends at
+    // 65,525 bytes of columns plus 9 of NULL flags, 65,534 in all; the lab
+    // ran it INSTANT on both servers.
+    let schema = lab_with_62_wide_columns(&[]);
+    let answer = said(
+        &schema,
+        "ALTER TABLE orders ADD COLUMN s63 VARCHAR(229) NULL",
+    );
+    assert_eq!(answer.case, Some("add-column"));
+    assert_eq!(answer.answer, INSTANT);
+    assert!(
+        !answer.has_note_starting(ROW_GROWS_NOTE),
+        "{:?}",
+        answer.notes
+    );
+}
+
+#[test]
+fn a_laravel_string_column_that_takes_a_known_table_past_65535_bytes_fails_with_1118() {
+    // $table->string('s63', 230)->nullable();
+    let schema = lab_with_62_wide_columns(&[]);
+    let answer = said(&schema, "alter table `orders` add `s63` varchar(230) null");
+    assert_eq!(answer.answer, FAILS_1118);
+}
+
+#[test]
+fn a_column_that_fails_with_1118_leaves_the_table_as_it_was() {
+    // A measured failure changes no table: the next, smaller column fits.
+    let schema = lab_with_62_wide_columns(&[]);
+    let answers = on_mysql_84(
+        &schema,
+        "ALTER TABLE orders ADD COLUMN s63 VARCHAR(230) NULL;
+         ALTER TABLE orders ADD COLUMN s63 VARCHAR(229) NULL;",
+    );
+    assert_eq!(answers, [FAILS_1118, INSTANT]);
+}
+
+#[test]
+fn widening_a_varchar_past_65535_bytes_in_a_known_table_fails_with_1118() {
+    // lengthen-varchar-over-row-size-limit: s63 VARCHAR(200) -> VARCHAR(230)
+    // ends at 65,538. lengthen-varchar-at-row-size-limit: VARCHAR(229) ends
+    // at 65,534 and runs INPLACE with no rebuild.
+    let schema = lab_with_62_wide_columns(&["ALTER TABLE orders ADD COLUMN s63 VARCHAR(200) NULL"]);
+    let over = said(&schema, "ALTER TABLE orders MODIFY s63 VARCHAR(230) NULL");
+    assert_eq!(over.answer, FAILS_1118);
+    assert_eq!(over.case, Some("lengthen-varchar"));
+    assert!(
+        over.evidence
+            .contains(&"lengthen-varchar-over-row-size-limit"),
+        "{:?}",
+        over.evidence
+    );
+    let at = said(&schema, "ALTER TABLE orders MODIFY s63 VARCHAR(229) NULL");
+    assert_eq!(at.case, Some("lengthen-varchar"));
+    assert_eq!(at.answer, INPLACE);
+}
+
+#[test]
+fn a_laravel_change_that_widens_a_string_past_65535_bytes_fails_with_1118() {
+    // $table->string('s63', 230)->nullable()->change();
+    let schema = lab_with_62_wide_columns(&["ALTER TABLE orders ADD COLUMN s63 VARCHAR(200) NULL"]);
+    let answer = said(
+        &schema,
+        "alter table `orders` modify `s63` varchar(230) null",
+    );
+    assert_eq!(answer.answer, FAILS_1118);
+}
+
+/// A dump whose `orders` has a primary key `id`, a single-column foreign key
+/// `user_id` to `users`, and an index on `note`.
+fn lab_with_foreign_key_on_user_id() -> String {
+    lab_after(&[
+        "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)",
+    ])
+}
+
+#[test]
+fn dropping_a_column_a_known_table_does_not_have_is_unknown_and_names_error_1091() {
+    // drop-column-missing: 1091 on both servers, in every variant. The
+    // answer is unknown on purpose: the dump may be out of date.
+    for (sql, scenario) in [
+        (
+            "ALTER TABLE orders DROP COLUMN nosuch",
+            "drop-column-missing",
+        ),
+        ("alter table `orders` drop `nosuch`", "drop-column-missing"),
+        ("ALTER TABLE orders DROP INDEX nosuch", "drop-index-missing"),
+        (
+            "alter table `orders` drop index `nosuch`",
+            "drop-index-missing",
+        ),
+        (
+            "ALTER TABLE orders DROP FOREIGN KEY nosuch",
+            "drop-foreign-key-missing",
+        ),
+        (
+            "alter table `orders` drop foreign key `nosuch`",
+            "drop-foreign-key-missing",
+        ),
+    ] {
+        let answer = said(LAB_TABLES, sql);
+        assert_eq!(answer.answer, "unknown", "{sql}");
+        assert!(answer.reason.contains("1091"), "{sql}: {}", answer.reason);
+        assert!(answer.reason.contains(scenario), "{sql}: {}", answer.reason);
+    }
+}
+
+#[test]
+fn a_known_table_stays_known_after_a_drop_of_what_it_does_not_have() {
+    // 0.1.0 lost the table here and then said INSTANT for dropping the
+    // foreign key's column; MySQL refuses it with 1828.
+    let schema = lab_with_foreign_key_on_user_id();
+    for gone in [
+        "ALTER TABLE orders DROP COLUMN nosuch",
+        "ALTER TABLE orders DROP INDEX nosuch",
+        "ALTER TABLE orders DROP FOREIGN KEY nosuch",
+    ] {
+        let sql = format!("{gone};\nALTER TABLE orders DROP COLUMN user_id");
+        for answers in all_on_both(&schema, &sql) {
+            assert_eq!(answers, ["unknown", FAILS_1828], "{sql}");
+        }
+    }
+}
+
+#[test]
+fn a_drop_of_what_a_known_table_does_not_have_does_not_hide_the_other_clauses_of_later_statements()
+{
+    // The table stays known, so the primary key drop after it is the
+    // measured COPY, not a guess on a lost table.
+    let sql = "ALTER TABLE orders DROP COLUMN nosuch;
+               ALTER TABLE orders DROP COLUMN id;";
+    for answers in all_on_both(LAB_TABLES, sql) {
+        assert_eq!(answers, ["unknown", COPY]);
+    }
+}
+
+#[test]
+fn dropping_a_column_in_another_letter_case_is_the_column_and_keeps_its_answer() {
+    // MySQL compares column names without regard to case.
+    assert_eq!(
+        said(LAB_TABLES, "ALTER TABLE orders DROP COLUMN AMOUNT").answer,
+        INSTANT
+    );
+    assert_eq!(
+        said(LAB_TABLES, "ALTER TABLE orders DROP COLUMN Id").answer,
+        COPY
+    );
+}
+
+#[test]
+fn dropping_what_a_table_kilit_does_not_know_may_have_keeps_the_measured_answer() {
+    // Without the table kilit cannot tell that the column is not there.
+    for (label, schema) in tables_kilit_does_not_know() {
+        let answer = said(&schema, "ALTER TABLE orders DROP COLUMN nosuch");
+        assert_eq!(answer.case, Some("drop-column"), "{label}");
+        assert_eq!(answer.answer, INSTANT, "{label}");
+    }
+}
+
+/// The lab's tables with 30 CHAR(255) latin1 NOT NULL columns more on
+/// `orders` (a utf8mb4 table): 255 bytes each in the page, as the scenarios
+/// add-column-at-page-row-size-limit and add-column-over-page-row-size-limit
+/// set them up.
+fn lab_with_30_latin1_columns() -> String {
+    let columns: Vec<String> = (1..=30)
+        .map(|n| format!("ADD COLUMN f{n} CHAR(255) CHARACTER SET latin1 NOT NULL DEFAULT ''"))
+        .collect();
+    lab_after(&[&format!("ALTER TABLE orders {}", columns.join(", "))])
+}
+
+#[test]
+fn a_column_that_brings_a_row_to_the_most_innodb_keeps_in_a_page_is_instant() {
+    // Lab-verified boundary (both servers): CHAR(194) latin1 NOT NULL is the
+    // last one that fits.
+    let answer = said(
+        &lab_with_30_latin1_columns(),
+        "ALTER TABLE orders ADD x CHAR(194) CHARACTER SET latin1 NOT NULL DEFAULT ''",
+    );
+    assert_eq!(answer.case, Some("add-column"));
+    assert_eq!(answer.answer, INSTANT);
+}
+
+#[test]
+fn a_column_one_character_past_the_most_innodb_keeps_in_a_page_is_unknown_for_both_servers() {
+    // The two servers count the row differently here (8.0.46 refuses it with
+    // 1118, 8.4.13 rebuilds), so kilit does not answer.
+    let schema = lab_with_30_latin1_columns();
+    let sql = "ALTER TABLE orders ADD x CHAR(195) CHARACTER SET latin1 NOT NULL DEFAULT ''";
+    for server in [MYSQL_80, MYSQL_84] {
+        let answer = said_on(server, &schema, sql);
+        assert_eq!(answer.answer, "unknown", "{server}");
+        assert!(
+            answer.reason.contains("8.0.46"),
+            "{server}: {}",
+            answer.reason
+        );
+        assert!(
+            answer.reason.contains("8.4.13"),
+            "{server}: {}",
+            answer.reason
+        );
+    }
+}
+
+#[test]
+fn a_laravel_migration_that_adds_three_string_columns_to_a_wide_table_fails_at_the_third() {
+    // B1's real case (a settings table; migration add_link_colors_to_settings),
+    // reduced to a hand-written table: an INT key and 62 VARCHAR(255) NULL
+    // columns in utf8mb4 take 1,022 bytes each (4 x 255 and 2 length bytes), so
+    // the row has 63,388 bytes plus the null bitmap. Each added column brings
+    // 1,022 more: 63 and 64 columns fit (65,420 bytes), the 65th is past the
+    // 65,535 bytes MySQL allows and fails with 1118.
+    let columns: String = (1..=61)
+        .map(|n| format!("  `c{n}` varchar(255) DEFAULT NULL,\n"))
+        .collect();
+    let schema = format!(
+        "CREATE TABLE `settings` (
+  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `header_color` varchar(255) DEFAULT NULL,
+{columns}  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+"
+    );
+    let output = pretend(
+        "2025_11_28_175733_add_link_colors_to_settings",
+        &[
+            "alter table `settings` add `link_dark_color` varchar(255) null after `header_color`",
+            "alter table `settings` add `link_light_color` varchar(255) null after `header_color`",
+            "alter table `settings` add `nav_link_color` varchar(255) null default '#ffffff' after `header_color`",
+        ],
+    );
+    assert_eq!(
+        pretend_on_mysql_84(&schema, &output),
+        [INSTANT, INSTANT, FAILS_1118]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Step B1b, fix phase: keys MySQL names itself, VARCHAR columns longer than
+// MySQL accepts, and the note about a record past what a page keeps.
+// The expectations come from the lab (drop-foreign-key, drop-index and the
+// scenarios of the row size limit), from the hand tests of the review (a
+// foreign key written without a name is called orders_ibfk_1, an index
+// without a name takes its first column's name, and MySQL 8.0.46 and 8.4.13
+// accept the drops of both and the drop of the column afterwards; a VARCHAR
+// that cannot fit in 65,535 bytes at all is refused with 1074 in strict mode
+// and converted to TEXT otherwise) and from the decisions of the step.
+
+/// `orders` with a foreign key written without a name, as in
+/// `CREATE TABLE orders (..., FOREIGN KEY (user_id) REFERENCES users (id))`.
+/// MySQL calls it orders_ibfk_1 and makes an index on user_id for it.
+const UNNAMED_FOREIGN_KEY_TABLES: &str = "
+CREATE TABLE users (
+    id   BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE orders (
+    id      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT UNSIGNED NOT NULL,
+    amount  INT NOT NULL,
+    email   VARCHAR(255) NULL,
+    note    VARCHAR(50) NULL,
+    FOREIGN KEY (user_id) REFERENCES users (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+";
+
+/// `orders` with an index, a unique index and a FULLTEXT index written
+/// without a name: MySQL names each after its first column (amount, email,
+/// note).
+const UNNAMED_INDEX_TABLES: &str = "
+CREATE TABLE users (
+    id   BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE orders (
+    id      BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT UNSIGNED NOT NULL,
+    amount  INT NOT NULL,
+    email   VARCHAR(255) NULL,
+    note    VARCHAR(50) NULL,
+    INDEX (amount),
+    UNIQUE (email),
+    FULLTEXT(note)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+";
+
+#[test]
+fn dropping_the_foreign_key_mysql_named_itself_gets_the_measured_answer_not_the_1091_unknown() {
+    // ALTER TABLE orders DROP FOREIGN KEY orders_ibfk_1: accepted by MySQL
+    // 8.0.46 and 8.4.13; the lab's drop-foreign-key is INPLACE, no rebuild.
+    for sql in [
+        "ALTER TABLE orders DROP FOREIGN KEY orders_ibfk_1",
+        "alter table `orders` drop foreign key `orders_ibfk_1`",
+        "ALTER TABLE orders DROP FOREIGN KEY ORDERS_IBFK_1",
+    ] {
+        let answer = said(UNNAMED_FOREIGN_KEY_TABLES, sql);
+        assert_eq!(answer.answer, INPLACE, "{sql}: {:?}", answer.reason);
+        assert_eq!(answer.case, Some("drop-foreign-key"), "{sql}");
+        assert!(answer.reason.is_empty(), "{sql}: {}", answer.reason);
+    }
+}
+
+#[test]
+fn the_column_of_a_foreign_key_mysql_named_itself_is_not_refused_with_1828_after_the_key_is_dropped()
+ {
+    // Both statements are accepted by MySQL 8.0.46 and 8.4.13. kilit does
+    // not know the key under the name MySQL gave it, so it stops trusting
+    // the table and cannot call the second statement a failure.
+    let sql = "ALTER TABLE orders DROP FOREIGN KEY orders_ibfk_1;
+               ALTER TABLE orders DROP COLUMN user_id";
+    let after = said(UNNAMED_FOREIGN_KEY_TABLES, sql);
+    assert_ne!(after.answer, FAILS_1828, "{after:?}");
+    assert_ne!(after.answer, "unknown", "{after:?}");
+    // The answer is the one for a table kilit does not know.
+    let lost = said(
+        &lab_with_lost_orders(),
+        "ALTER TABLE orders DROP COLUMN user_id",
+    );
+    assert_eq!(after.answer, lost.answer);
+    assert_eq!(after.case, lost.case);
+    // Dropping the column first is still the failure it was.
+    assert_eq!(
+        said(
+            UNNAMED_FOREIGN_KEY_TABLES,
+            "ALTER TABLE orders DROP COLUMN user_id"
+        )
+        .answer,
+        FAILS_1828
+    );
+}
+
+#[test]
+fn laravel_dropping_the_foreign_key_mysql_named_itself_and_then_its_column_is_not_a_failure() {
+    // A table made by plain SQL, then a migration:
+    // $table->dropForeign('orders_ibfk_1'); $table->dropColumn('user_id');
+    let output = pretend(
+        "2026_11_05_100000_drop_user_from_orders_table",
+        &[
+            "alter table `orders` drop foreign key `orders_ibfk_1`",
+            "alter table `orders` drop `user_id`",
+        ],
+    );
+    let answers = pretend_on_mysql_84(UNNAMED_FOREIGN_KEY_TABLES, &output);
+    assert_eq!(answers[0], INPLACE);
+    assert_ne!(answers[1], FAILS_1828);
+}
+
+#[test]
+fn dropping_the_index_mysql_named_after_its_column_is_not_the_1091_unknown() {
+    // INDEX (amount), UNIQUE (email), FULLTEXT(note) without names: MySQL
+    // calls them amount, email and note, and accepts the drops (hand tests,
+    // both servers).
+    for name in ["amount", "email", "note"] {
+        for sql in [
+            format!("ALTER TABLE orders DROP INDEX {name}"),
+            format!("alter table `orders` drop index `{name}`"),
+            format!("ALTER TABLE orders DROP KEY {}", name.to_uppercase()),
+        ] {
+            let answer = said(UNNAMED_INDEX_TABLES, &sql);
+            assert!(!answer.reason.contains("1091"), "{sql}: {}", answer.reason);
+        }
+    }
+    // The plain index is the lab's drop-index.
+    let answer = said(UNNAMED_INDEX_TABLES, "ALTER TABLE orders DROP INDEX amount");
+    assert_eq!(answer.answer, INPLACE);
+    assert_eq!(answer.case, Some("drop-index"));
+}
+
+#[test]
+fn a_varchar_too_long_for_any_row_is_unknown_never_1118_when_a_column_is_added() {
+    // VARCHAR(20000) in utf8mb4 needs 80,000 bytes: MySQL refuses it with
+    // 1074 in strict mode and makes it a TEXT otherwise. 1118 is the row
+    // size error, a different one.
+    for sql in [
+        "ALTER TABLE orders ADD COLUMN c VARCHAR(20000) NULL",
+        "alter table `orders` add `c` varchar(20000) null",
+        "ALTER TABLE orders ADD COLUMN c VARCHAR(20000) NOT NULL DEFAULT ''",
+    ] {
+        let answer = said(LAB_TABLES, sql);
+        assert_eq!(answer.answer, "unknown", "{sql}: {answer:?}");
+        assert!(!answer.reason.is_empty(), "{sql}");
+        assert!(!answer.reason.contains("1118"), "{sql}: {}", answer.reason);
+    }
+}
+
+#[test]
+fn a_varchar_too_long_for_any_row_is_unknown_never_1118_when_a_column_is_changed() {
+    for sql in [
+        "ALTER TABLE orders MODIFY email VARCHAR(20000) NULL",
+        "alter table `orders` modify `email` varchar(20000) null",
+        "ALTER TABLE orders CHANGE email email VARCHAR(20000) NULL",
+    ] {
+        let answer = said(LAB_TABLES, sql);
+        assert_eq!(answer.answer, "unknown", "{sql}: {answer:?}");
+        assert!(!answer.reason.contains("1118"), "{sql}: {}", answer.reason);
+    }
+}
+
+#[test]
+fn a_varchar_too_long_for_any_row_is_unknown_after_an_empty_sql_mode_too() {
+    // Without the strict modes MySQL converts the column to TEXT; kilit has
+    // not measured that and does not say 1118 either.
+    for sql in [
+        "SET sql_mode = '';\nALTER TABLE orders ADD COLUMN c VARCHAR(20000) NULL",
+        "SET sql_mode = '';\nALTER TABLE orders MODIFY email VARCHAR(20000) NULL",
+        "SET SESSION sql_mode = '';\nALTER TABLE orders ADD COLUMN c VARCHAR(20000) NULL",
+    ] {
+        let answer = said(LAB_TABLES, sql);
+        assert_eq!(answer.answer, "unknown", "{sql}: {answer:?}");
+        assert!(!answer.reason.contains("1118"), "{sql}: {}", answer.reason);
+    }
+}
+
+#[test]
+fn laravel_s_string_column_longer_than_mysql_accepts_is_unknown_never_1118() {
+    // $table->string('c', 20000)->nullable();
+    // $table->string('email', 20000)->nullable()->change();
+    for (statement, sql) in [
+        ("add", "alter table `orders` add `c` varchar(20000) null"),
+        (
+            "change",
+            "alter table `orders` modify `email` varchar(20000) null",
+        ),
+    ] {
+        let output = pretend("2026_11_05_100000_widen_orders_table", &[sql]);
+        let answers = pretend_on_mysql_84(LARAVEL_TABLES, &output);
+        assert_eq!(answers, ["unknown"], "{statement}");
+    }
+}
+
+#[test]
+fn a_varchar_at_the_longest_a_row_can_hold_keeps_its_answer() {
+    // Regression: VARCHAR(16383) in utf8mb4 is the longest column MySQL
+    // accepts (65,532 bytes and two for the length); the row then holds
+    // nothing else, so the lab's orders fails with 1118 as before. Only the
+    // length that no row can hold is unknown.
+    let answer = said(
+        LAB_TABLES,
+        "ALTER TABLE orders ADD COLUMN c VARCHAR(16383) NULL",
+    );
+    assert_eq!(answer.answer, FAILS_1118, "{answer:?}");
+}
+
+/// The note a record past what a page keeps carries: the two servers count
+/// it differently, so kilit cannot tell.
+const PAGE_RECORD_NOTE: &str = "if the record grows past what InnoDB keeps in a page (8126 bytes)";
+
+#[test]
+fn a_new_column_on_a_table_kilit_does_not_know_notes_the_record_in_a_page_too() {
+    // add-column-over-page-row-size-limit: 8.0.46 fails with 1118, 8.4.13
+    // rebuilds the table (scenarios of the review, expected-B1b).
+    for (label, schema) in tables_kilit_does_not_know() {
+        for sql in [
+            "ALTER TABLE orders ADD COLUMN link_color VARCHAR(255) NULL",
+            "alter table `orders` add `link_color` varchar(255) null",
+        ] {
+            let answer = said(&schema, sql);
+            assert_eq!(answer.answer, INSTANT, "{label}: {sql}");
+            assert!(
+                answer.has_note_starting(PAGE_RECORD_NOTE),
+                "{label}: {sql}: {:?}",
+                answer.notes
+            );
+            assert!(
+                answer.has_note_with(&["8.0.46", "1118", "8.4.13"]),
+                "{label}: {sql}: {:?}",
+                answer.notes
+            );
+            // The note about 65,535 bytes stays next to it.
+            assert!(
+                answer.has_note_starting(ROW_GROWS_NOTE),
+                "{label}: {sql}: {:?}",
+                answer.notes
+            );
+        }
+    }
+}
+
+#[test]
+fn a_new_column_on_a_known_table_has_no_note_about_the_record_in_a_page() {
+    // kilit counts every column of the table, so the note would only
+    // repeat what the answer already says.
+    for (label, schema) in [
+        ("the lab's tables", LAB_TABLES.to_owned()),
+        ("Laravel's tables", LARAVEL_TABLES.to_owned()),
+    ] {
+        let answer = said(
+            &schema,
+            "ALTER TABLE orders ADD COLUMN link_color VARCHAR(255) NULL",
+        );
+        assert_eq!(answer.answer, INSTANT, "{label}");
+        assert!(
+            !answer.has_note_starting(PAGE_RECORD_NOTE),
+            "{label}: {:?}",
+            answer.notes
+        );
+    }
+}
+
+#[test]
+fn only_the_plain_new_column_carries_the_note_about_the_record_in_a_page() {
+    for (label, schema) in tables_kilit_does_not_know() {
+        for sql in [
+            "ALTER TABLE orders DROP COLUMN note",
+            "ALTER TABLE orders ADD INDEX idx_orders_amount (amount)",
+            "ALTER TABLE orders RENAME COLUMN note TO memo",
+        ] {
+            let answer = said(&schema, sql);
+            assert!(
+                !answer.has_note_starting(PAGE_RECORD_NOTE),
+                "{label}: {sql}: {:?}",
+                answer.notes
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Step B1b, second fix phase: rows that other things key, foreign keys MySQL
+// renames with their table, FTS_DOC_ID, TEXT and JSON defaults after
+// `SET sql_mode = ''`, and columns too long for any table.
+// The expectations come from the hand tests of the review (the files
+// pkprefix-*, nopkuniq-*, fk-*, md-* and toolong.sql of the second review),
+// the lab's add-column and drop-column scenarios, and the step's decisions.
+
+/// `CREATE TABLE q (...)` as the review's hand tests built it: the columns of
+/// `head`, then CHAR(255) latin1 NOT NULL columns that add up to `filler`
+/// bytes (the last one shorter), then the definitions of `tail`, in a utf8mb4
+/// InnoDB table.
+fn table_q_with_filler(head: &[&str], filler: usize, tail: &[&str]) -> String {
+    let mut parts: Vec<String> = head.iter().map(|part| (*part).to_owned()).collect();
+    let mut left = filler;
+    let mut n = 0;
+    while left > 0 {
+        let size = left.min(255);
+        parts.push(format!("z{n} CHAR({size}) CHARACTER SET latin1 NOT NULL"));
+        left -= size;
+        n += 1;
+    }
+    parts.extend(tail.iter().map(|part| (*part).to_owned()));
+    format!(
+        "CREATE TABLE q ({}) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n",
+        parts.join(", ")
+    )
+}
+
+const ADD_CHAR_200: &str =
+    "ALTER TABLE q ADD COLUMN a CHAR(200) CHARACTER SET latin1 NOT NULL DEFAULT ''";
+const ADD_INT: &str = "ALTER TABLE q ADD COLUMN a INT NOT NULL DEFAULT 0";
+
+/// `q` keyed by a prefix of a column: name VARCHAR(255) latin1 NOT NULL and
+/// PRIMARY KEY (name(200)), with `filler` bytes of other columns.
+fn table_q_keyed_by_a_prefix(filler: usize) -> String {
+    table_q_with_filler(
+        &["name VARCHAR(255) CHARACTER SET latin1 NOT NULL"],
+        filler,
+        &["PRIMARY KEY (name(200))"],
+    )
+}
+
+/// `q` without a primary key whose first UNIQUE index of NOT NULL columns,
+/// uk on u VARCHAR(700) utf8mb4, keys the rows.
+fn table_q_keyed_by_a_unique_index(filler: usize) -> String {
+    table_q_with_filler(&["u VARCHAR(700) NOT NULL"], filler, &["UNIQUE KEY uk (u)"])
+}
+
+#[test]
+fn a_new_column_on_a_table_keyed_by_a_column_prefix_is_unknown_where_mysql_8_0_46_refuses_it() {
+    // pkprefix: 7,500 bytes of filler and CHAR(200) is past the 7,646 bytes
+    // (of filler, with an INT added) that MySQL 8.0.46 accepts; the prefix
+    // key does not make the record shorter. kilit said INSTANT.
+    let schema = table_q_keyed_by_a_prefix(7500);
+    for server in [MYSQL_80, MYSQL_84] {
+        let answer = said_on(server, &schema, ADD_CHAR_200);
+        assert_eq!(answer.answer, "unknown", "{server}: {answer:?}");
+        assert!(!answer.reason.is_empty(), "{server}");
+    }
+}
+
+#[test]
+fn a_new_column_on_a_table_without_a_primary_key_keyed_by_a_unique_index_is_unknown_where_mysql_8_0_46_refuses_it()
+ {
+    // nopkuniq: the unique index of NOT NULL columns keys the rows, so the
+    // record holds its columns again (8.0.46 accepts 5,301 bytes of filler
+    // with an INT added, this has 5,200 and CHAR(200)). kilit said INSTANT.
+    let schema = table_q_keyed_by_a_unique_index(5200);
+    for server in [MYSQL_80, MYSQL_84] {
+        let answer = said_on(server, &schema, ADD_CHAR_200);
+        assert_eq!(answer.answer, "unknown", "{server}: {answer:?}");
+        assert!(!answer.reason.is_empty(), "{server}");
+    }
+}
+
+#[test]
+fn a_new_column_on_a_prefix_keyed_or_unique_keyed_table_far_from_the_page_limit_stays_instant() {
+    // Regression: the same shapes with 1,000 bytes of filler are the lab's
+    // add-column on a small table.
+    for (label, schema) in [
+        ("prefix key", table_q_keyed_by_a_prefix(1000)),
+        ("unique key", table_q_keyed_by_a_unique_index(1000)),
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            let answer = said_on(server, &schema, ADD_CHAR_200);
+            assert_eq!(answer.case, Some("add-column"), "{label}: {server}");
+            assert_eq!(answer.answer, INSTANT, "{label}: {server}");
+        }
+    }
+}
+
+/// `q(id BIGINT PRIMARY KEY, t TEXT, FULLTEXT KEY ft (t))` and `filler`
+/// bytes of other columns.
+fn table_q_with_fulltext(filler: usize) -> String {
+    table_q_with_filler(
+        &["id BIGINT PRIMARY KEY", "t TEXT"],
+        filler,
+        &["FULLTEXT KEY ft (t)"],
+    )
+}
+
+#[test]
+fn a_new_column_on_a_fulltext_table_is_unknown_once_the_hidden_fts_doc_id_pushes_the_record_past_the_limit()
+ {
+    // FULLTEXT adds a hidden FTS_DOC_ID of 8 bytes. Hand test, both servers:
+    // 8,045 bytes of filler are accepted, 8,046 fail with 1118. kilit said
+    // COPY at 8,046.
+    let schema = table_q_with_fulltext(8046);
+    for server in [MYSQL_80, MYSQL_84] {
+        let answer = said_on(server, &schema, ADD_INT);
+        assert_eq!(answer.answer, "unknown", "{server}: {answer:?}");
+        assert!(!answer.answer.starts_with("COPY"), "{server}");
+    }
+}
+
+#[test]
+fn a_new_column_on_a_fulltext_table_at_the_last_filler_both_servers_accept_still_copies() {
+    // Regression: add-column-with-fulltext (COPY) at 8,045 bytes of filler.
+    let schema = table_q_with_fulltext(8045);
+    for server in [MYSQL_80, MYSQL_84] {
+        let answer = said_on(server, &schema, ADD_INT);
+        assert_eq!(answer.case, Some("add-column"), "{server}");
+        assert_eq!(answer.answer, COPY, "{server}");
+    }
+}
+
+/// users and orders as `mysqldump` writes them: orders has the key and the
+/// foreign key MySQL named orders_ibfk_1.
+const IBFK_TABLES: &str = "
+CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `user_id` (`user_id`),
+  CONSTRAINT `orders_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+
+/// The two ways to rename `orders` to `purchases`.
+const RENAMES: [&str; 2] = [
+    "RENAME TABLE orders TO purchases",
+    "ALTER TABLE orders RENAME TO purchases",
+];
+
+#[test]
+fn dropping_the_foreign_key_by_its_renamed_name_and_then_its_column_is_not_a_failure() {
+    // Hand test (fk-m.sql, fk-m2.sql), both servers: MySQL renames
+    // orders_ibfk_1 to purchases_ibfk_1 with the table and runs all three
+    // statements. kilit said 1091 for the drop and 1828 for the column.
+    for rename in RENAMES {
+        let drop_key = "ALTER TABLE purchases DROP FOREIGN KEY purchases_ibfk_1";
+        let drop_column = "ALTER TABLE purchases DROP COLUMN user_id";
+        let sql = format!("{rename};\n{drop_key};\n{drop_column}");
+        let key = said(IBFK_TABLES, &format!("{rename};\n{drop_key}"));
+        assert!(!key.reason.contains("1091"), "{rename}: {}", key.reason);
+        assert!(!key.answer.starts_with("fails"), "{rename}: {key:?}");
+        let column = said(IBFK_TABLES, &sql);
+        assert_ne!(column.answer, FAILS_1828, "{rename}: {column:?}");
+        for answers in all_on_both(IBFK_TABLES, &sql) {
+            assert_ne!(answers[2], FAILS_1828, "{rename}");
+        }
+    }
+}
+
+#[test]
+fn dropping_the_index_of_a_renamed_foreign_key_after_the_key_is_not_a_failure() {
+    // Same hand test with DROP INDEX user_id: MySQL runs it (no 1553).
+    for rename in RENAMES {
+        let sql = format!(
+            "{rename};\nALTER TABLE purchases DROP FOREIGN KEY purchases_ibfk_1;\nALTER TABLE purchases DROP INDEX user_id"
+        );
+        for answers in all_on_both(IBFK_TABLES, &sql) {
+            assert_ne!(answers[2], FAILS_1553, "{rename}");
+        }
+    }
+}
+
+#[test]
+fn changing_the_type_of_the_column_of_a_renamed_foreign_key_after_the_key_is_not_a_failure() {
+    // fk-t.sql: MODIFY user_id INT NOT NULL after the key is gone is
+    // accepted (no 3780). kilit kept the key under its old name.
+    for rename in RENAMES {
+        let sql = format!(
+            "{rename};\nALTER TABLE purchases DROP FOREIGN KEY purchases_ibfk_1;\nALTER TABLE purchases MODIFY user_id INT NOT NULL"
+        );
+        for answers in all_on_both(IBFK_TABLES, &sql) {
+            assert_ne!(answers[2], FAILS_3780, "{rename}");
+        }
+    }
+}
+
+#[test]
+fn a_renamed_table_keeps_its_foreign_key_so_dropping_its_column_still_fails_with_1828() {
+    // Regression: without the drop of the key, MySQL refuses the column.
+    for rename in RENAMES {
+        let sql = format!("{rename};\nALTER TABLE purchases DROP COLUMN user_id");
+        for answers in all_on_both(IBFK_TABLES, &sql) {
+            assert_eq!(answers[1], FAILS_1828, "{rename}");
+        }
+    }
+}
+
+#[test]
+fn laravel_renaming_a_table_and_dropping_its_foreign_key_and_column_is_not_a_failure() {
+    // Schema::rename('orders', 'purchases');
+    // $table->dropForeign('purchases_ibfk_1'); $table->dropColumn('user_id');
+    let output = pretend(
+        "2026_11_10_100000_rename_orders_to_purchases",
+        &[
+            "rename table `orders` to `purchases`",
+            "alter table `purchases` drop foreign key `purchases_ibfk_1`",
+            "alter table `purchases` drop `user_id`",
+        ],
+    );
+    let answers = pretend_on_mysql_84(IBFK_TABLES, &output);
+    assert_ne!(answers[2], FAILS_1828, "{answers:?}");
+}
+
+#[test]
+fn dropping_a_foreign_key_named_after_its_table_that_the_known_table_does_not_have_is_the_1091_unknown()
+ {
+    // Decision of B1b: any name the known table does not have is the 1091
+    // unknown, also orders_ibfk_1, orders_ibfk_x and orders_ibfk_abc; the
+    // table stays known, so its column stays protected.
+    let schema = lab_with_foreign_key_on_user_id();
+    for key in [
+        "orders_ibfk_1",
+        "orders_ibfk_9",
+        "orders_ibfk_12",
+        "orders_ibfk_x",
+        "orders_ibfk_abc",
+    ] {
+        let drop_key = format!("ALTER TABLE orders DROP FOREIGN KEY {key}");
+        let answer = said(&schema, &drop_key);
+        assert_eq!(answer.answer, "unknown", "{key}: {answer:?}");
+        assert!(answer.reason.contains("1091"), "{key}: {}", answer.reason);
+        let sql = format!("{drop_key};\nALTER TABLE orders DROP COLUMN user_id");
+        for answers in all_on_both(&schema, &sql) {
+            assert_eq!(answers, ["unknown", FAILS_1828], "{key}");
+        }
+    }
+}
+
+#[test]
+fn dropping_a_foreign_key_by_the_old_name_after_a_rename_is_the_1091_unknown_and_the_column_still_fails_with_1828()
+ {
+    // Hand test ibfk-rename.txt, both servers: after the rename the key is
+    // purchases_ibfk_1; DROP FOREIGN KEY orders_ibfk_1 gives 1091, and
+    // DROP COLUMN user_id then gives 1828.
+    for rename in RENAMES {
+        let drop_key = "ALTER TABLE purchases DROP FOREIGN KEY orders_ibfk_1";
+        let sql = format!("{rename};\n{drop_key};\nALTER TABLE purchases DROP COLUMN user_id");
+        for answers in all_on_both(IBFK_TABLES, &sql) {
+            assert_eq!(answers[1], "unknown", "{rename}: {answers:?}");
+            assert_eq!(answers[2], FAILS_1828, "{rename}: {answers:?}");
+        }
+        let key = said(IBFK_TABLES, &format!("{rename};\n{drop_key}"));
+        assert!(key.reason.contains("1091"), "{rename}: {}", key.reason);
+    }
+}
+
+#[test]
+fn dropping_a_foreign_key_the_table_does_not_name_keeps_its_answer_when_the_table_has_an_unnamed_key()
+ {
+    // Decision of B1b: a known table holding a foreign key written without
+    // a name may hold the dropped name (MySQL names it itself), so the drop
+    // keeps its measured answer and the table is lost.
+    let schema = lab_after(&["ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users (id)"]);
+    let drop_key = "ALTER TABLE orders DROP FOREIGN KEY orders_ibfk_1";
+    let answer = said(&schema, drop_key);
+    assert!(!answer.reason.contains("1091"), "{answer:?}");
+    assert!(!answer.answer.starts_with("fails"), "{answer:?}");
+    let sql = format!("{drop_key};\nALTER TABLE orders DROP COLUMN user_id");
+    for answers in all_on_both(&schema, &sql) {
+        assert_ne!(answers[1], FAILS_1828, "{answers:?}");
+    }
+}
+
+#[test]
+fn dropping_a_foreign_key_whose_name_is_not_one_mysql_makes_is_still_the_1091_unknown() {
+    // Regression: nosuch, orders_ibfk and orders_ibfk_ (empty suffix, MySQL
+    // does not rename it) are no names MySQL gives; the table stays known
+    // and its column stays protected.
+    let schema = lab_with_foreign_key_on_user_id();
+    for key in ["nosuch", "orders_ibfk_", "orders_ibfk"] {
+        let sql = format!(
+            "ALTER TABLE orders DROP FOREIGN KEY {key};\nALTER TABLE orders DROP COLUMN user_id"
+        );
+        for answers in all_on_both(&schema, &sql) {
+            assert_eq!(answers, ["unknown", FAILS_1828], "{key}");
+        }
+        let answer = said(
+            &schema,
+            &format!("ALTER TABLE orders DROP FOREIGN KEY {key}"),
+        );
+        assert!(answer.reason.contains("1091"), "{key}: {}", answer.reason);
+    }
+}
+
+#[test]
+fn changing_a_text_or_json_column_to_a_quoted_default_after_an_empty_sql_mode_is_unknown_without_saying_mysql_drops_it()
+ {
+    // md-m.sql, both servers: with sql_mode = '' the statement fails with
+    // 1101, it does not drop the default.
+    let schema = "CREATE TABLE t (id INT PRIMARY KEY, c TEXT NULL, j JSON NULL) ENGINE=InnoDB;";
+    for statement in [
+        "ALTER TABLE t MODIFY c TEXT NULL DEFAULT 'x'",
+        "ALTER TABLE t MODIFY j JSON NULL DEFAULT '[]'",
+        "alter table `t` modify `c` text null default 'x'",
+    ] {
+        let sql = format!("SET sql_mode = '';\n{statement}");
+        let answer = said(schema, &sql);
+        assert_eq!(answer.answer, "unknown", "{statement}: {answer:?}");
+        assert!(!answer.reason.is_empty(), "{statement}");
+        assert!(
+            !answer.reason.to_lowercase().contains("drops"),
+            "{statement}: {}",
+            answer.reason
+        );
+    }
+}
+
+#[test]
+fn a_column_too_long_for_any_table_is_unknown_without_a_table_to_look_at() {
+    // toolong.sql, both servers: VARCHAR(70000) and CHAR(300) fail with 1074
+    // in strict mode, whatever the table is.
+    for (label, schema) in tables_kilit_does_not_know() {
+        for sql in [
+            "ALTER TABLE orders ADD COLUMN c VARCHAR(70000) NULL",
+            "ALTER TABLE orders ADD COLUMN d CHAR(300) NULL",
+            "alter table `orders` add `c` varchar(70000) null",
+            "alter table `orders` add `d` char(300) null",
+        ] {
+            for server in [MYSQL_80, MYSQL_84] {
+                let answer = said_on(server, &schema, sql);
+                assert_eq!(answer.answer, "unknown", "{label}: {server}: {sql}");
+                assert!(!answer.reason.is_empty(), "{label}: {server}: {sql}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_longest_char_without_a_table_to_look_at_keeps_its_answer() {
+    // Regression: CHAR(255) is the longest CHAR; it is the lab's add-column.
+    for (label, schema) in tables_kilit_does_not_know() {
+        let answer = said(&schema, "ALTER TABLE orders ADD COLUMN d CHAR(255) NULL");
+        assert_eq!(answer.case, Some("add-column"), "{label}");
+        assert_eq!(answer.answer, INSTANT, "{label}");
+    }
 }

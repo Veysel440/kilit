@@ -45,6 +45,36 @@ pub struct Schema {
     /// hides: the table of that name as it was, if any. A new session sees
     /// it again.
     hidden_by_temporary: BTreeMap<String, Option<Entry>>,
+    /// The tables come from a dump of the database the migration runs on,
+    /// so a table that is not in it, and that no statement creates, is not
+    /// there: see [`Schema::from_dump`].
+    from_dump: bool,
+    /// By name, the statement after the dump that took the table away,
+    /// until a statement creates it again.
+    gone: BTreeMap<String, Gone>,
+    /// The names of the tables the dump has: see [`Schema::from_dump`].
+    dump_tables: BTreeSet<String>,
+}
+
+/// A statement that took a table away from kilit's schema.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Gone {
+    pub line: usize,
+    pub how: GoneHow,
+    /// The statement is in an earlier input file than the one being
+    /// checked, so its line is a line of that file.
+    pub earlier_file: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GoneHow {
+    Dropped,
+    /// A DROP of a name a temporary table had, or `DROP TEMPORARY TABLE`:
+    /// MySQL may have dropped only a temporary table.
+    MaybeDropped,
+    Renamed {
+        to: String,
+    },
 }
 
 // Most tables are known; a lost one is rare, so its smaller size saves little.
@@ -104,6 +134,34 @@ impl Schema {
         schema
     }
 
+    /// The tables of a dump of the database the migration runs on, as
+    /// [`Schema::from_sql`] reads them. A table missing from it is one the
+    /// database does not have, or the dump is out of date.
+    pub fn from_dump(sql: &str) -> Schema {
+        let mut schema = Schema::from_sql(sql);
+        schema.from_dump = true;
+        // A table the dump itself drops is simply not in it.
+        schema.gone.clear();
+        schema.dump_tables = schema.tables.keys().cloned().collect();
+        schema
+    }
+
+    /// Whether the tables come from a dump: see [`Schema::from_dump`].
+    pub(crate) fn is_from_dump(&self) -> bool {
+        self.from_dump
+    }
+
+    /// The statement that took the table `name`, written exactly so, away,
+    /// when no statement created it again since.
+    pub(crate) fn gone(&self, name: &str) -> Option<&Gone> {
+        self.gone.get(&key(name))
+    }
+
+    /// Whether the dump has the table `name`, written exactly so.
+    pub(crate) fn dump_has(&self, name: &str) -> bool {
+        self.dump_tables.contains(&key(name))
+    }
+
     /// What kilit knows about the table `name`, written exactly so: with
     /// lower_case_table_names = 0, the default on Linux, MySQL keeps
     /// `orders` and `ORDERS` apart, and with 1 or 2 it takes them as one
@@ -139,6 +197,9 @@ impl Schema {
     /// The session ends: its temporary tables are gone, and the tables they
     /// hid are seen again as they were.
     pub(crate) fn session_ends(&mut self) {
+        for gone in self.gone.values_mut() {
+            gone.earlier_file = true;
+        }
         for (name, hidden) in std::mem::take(&mut self.hidden_by_temporary) {
             match hidden {
                 Some(entry) => self.put(name, entry),
@@ -447,13 +508,33 @@ impl Schema {
                 self.put(key(&table.name), Entry::Known(table));
             }
             StatementKind::DropTable { tables } => {
+                let temporary = statement
+                    .sql
+                    .split_whitespace()
+                    .nth(1)
+                    .is_some_and(|word| word.eq_ignore_ascii_case("TEMPORARY"));
                 for name in tables {
-                    self.take(&key(name));
+                    let hid = self.hidden_by_temporary.contains_key(&key(name));
+                    if self.take(&key(name)).is_some() {
+                        let how = if temporary || hid {
+                            GoneHow::MaybeDropped
+                        } else {
+                            GoneHow::Dropped
+                        };
+                        self.gone.insert(
+                            key(name),
+                            Gone {
+                                line: statement.line,
+                                how,
+                                earlier_file: false,
+                            },
+                        );
+                    }
                 }
             }
             StatementKind::RenameTable { renames } => {
                 for rename in renames {
-                    self.rename(&rename.from, &rename.to);
+                    self.rename(&rename.from, &rename.to, statement.line);
                 }
             }
             StatementKind::Alter(alter) => self.alter(statement, alter),
@@ -509,13 +590,21 @@ impl Schema {
         }
     }
 
-    fn rename(&mut self, from: &str, to: &str) {
+    fn rename(&mut self, from: &str, to: &str, line: usize) {
         if let Some(mut entry) = self.take(&key(from)) {
             if let Entry::Known(table) = &mut entry {
                 rename_generated_checks(table, to);
                 to.clone_into(&mut table.name);
             }
             self.put(key(to), entry);
+            self.gone.insert(
+                key(from),
+                Gone {
+                    line,
+                    how: GoneHow::Renamed { to: to.to_owned() },
+                    earlier_file: false,
+                },
+            );
         }
     }
 
@@ -557,6 +646,7 @@ impl Schema {
 
     /// Sets the entry of the table `name`, keeping [`Schema::by_fold`].
     fn put(&mut self, name: String, entry: Entry) {
+        self.gone.remove(&name);
         match self.tables.entry(name) {
             std::collections::btree_map::Entry::Occupied(mut known) => {
                 known.insert(entry);
@@ -701,7 +791,7 @@ impl Schema {
             }
         }
         if let Some(name) = new_name {
-            self.rename(&alter.table, name);
+            self.rename(&alter.table, name, statement.line);
         }
     }
 }
@@ -927,8 +1017,13 @@ fn change(table: &mut Table, operation: &Operation) -> Result<(), String> {
             let at = insert_at(table, position.as_ref(), table.columns.len())?;
             table.columns.insert(at, column.clone());
         }
+        // A drop of what the table does not have changes nothing: MySQL
+        // refuses it (error 1091), and if kilit's tables are out of date
+        // and the table had it, what kilit knows of the table stays right.
         Operation::DropColumn { name } => {
-            let at = table.position_of(name).ok_or_else(|| no_column(name))?;
+            let Some(at) = table.position_of(name) else {
+                return Ok(());
+            };
             table.columns.remove(at);
             // MySQL takes the column out of every index, and drops an index
             // left without columns.
@@ -971,12 +1066,27 @@ fn change(table: &mut Table, operation: &Operation) -> Result<(), String> {
             table.indexes.push(index);
         }
         Operation::DropIndex { name } => {
-            let at = table
+            // `PRIMARY` is the primary key, which kilit keeps apart.
+            if same(name, "PRIMARY") {
+                return Err(format!("drops the index {name}"));
+            }
+            match table
                 .indexes
                 .iter()
                 .position(|index| index.name.as_deref().is_some_and(|n| same(n, name)))
-                .ok_or_else(|| format!("drops the index {name}, which kilit does not know"))?;
-            table.indexes.remove(at);
+            {
+                Some(at) => {
+                    table.indexes.remove(at);
+                }
+                // MySQL named the index kilit holds without a name, and
+                // kilit cannot tell whether it is this one.
+                None if table.indexes.iter().any(|index| index.name.is_none()) => {
+                    return Err(format!(
+                        "drops the index {name}, which may be one kilit holds without its name"
+                    ));
+                }
+                None => {}
+            }
         }
         Operation::AddPrimaryKey { columns } => columns.clone_into(&mut table.primary_key),
         Operation::DropPrimaryKey => table.primary_key.clear(),
@@ -991,15 +1101,23 @@ fn change(table: &mut Table, operation: &Operation) -> Result<(), String> {
             index_foreign_key(table, foreign_key);
         }
         Operation::DropForeignKey { name } => {
-            let at = table
+            // The index MySQL made for the key stays.
+            match table
                 .foreign_keys
                 .iter()
                 .position(|key| key.name.as_deref().is_some_and(|n| same(n, name)))
-                .ok_or_else(|| {
-                    format!("drops the foreign key {name}, which kilit does not know")
-                })?;
-            // The index MySQL made for the key stays.
-            table.foreign_keys.remove(at);
+            {
+                Some(at) => {
+                    table.foreign_keys.remove(at);
+                }
+                None if table.foreign_keys.iter().any(|key| key.name.is_none()) => {
+                    return Err(format!(
+                        "drops the foreign key {name}, which may be one kilit holds without \
+                         its name"
+                    ));
+                }
+                None => {}
+            }
         }
         Operation::AddCheck(check) => {
             let mut check = check.clone();
@@ -1212,18 +1330,39 @@ fn generated_check_name(table: &Table) -> String {
     format!("{prefix}{}", largest + 1)
 }
 
-/// MySQL renames a table's automatic CHECK names along with the table.
+/// MySQL renames a table's CHECK names of the form `<table>_chk_<suffix>`
+/// along with the table, and its foreign key names `<table>_ibfk_<suffix>`
+/// too, whatever the suffix, written or generated.
 fn rename_generated_checks(table: &mut Table, to: &str) {
+    // By hand on 8.0.46 and 8.4.13, for both: every name that starts with
+    // the old table's prefix, exactly as written, and goes on after it.
     let from = generated_check_prefix(&table.name);
-    let to = generated_check_prefix(to);
+    let to_prefix = generated_check_prefix(to);
     for check in &mut table.checks {
         let Some(name) = &mut check.name else {
             continue;
         };
-        if let Some(number) = generated_check_number(&from, name) {
-            *name = format!("{to}{number}");
+        if let Some(suffix) = name.strip_prefix(&from).filter(|suffix| !suffix.is_empty()) {
+            *name = format!("{to_prefix}{suffix}");
         }
     }
+    let from = generated_foreign_key_prefix(&table.name);
+    let to_prefix = generated_foreign_key_prefix(to);
+    for key in &mut table.foreign_keys {
+        let Some(name) = &mut key.name else {
+            continue;
+        };
+        if let Some(suffix) = name.strip_prefix(&from).filter(|suffix| !suffix.is_empty()) {
+            *name = format!("{to_prefix}{suffix}");
+        }
+    }
+}
+
+/// The start of the name MySQL gives a foreign key of `table` written
+/// without one: `orders_ibfk_` for `shop.orders`.
+fn generated_foreign_key_prefix(table: &str) -> String {
+    let table = table.rsplit('.').next().unwrap_or(table);
+    format!("{table}_ibfk_")
 }
 
 /// MySQL indexes a foreign key's columns when no index starts with them,
@@ -1876,11 +2015,70 @@ mod tests {
     }
 
     #[test]
+    fn check_and_foreign_key_names_of_mysql_s_form_follow_the_table_whatever_their_suffix() {
+        // By hand on 8.0.46 and 8.4.13: the prefix must match exactly and be
+        // followed by something; the rest is kept.
+        for rename in [
+            "rename table `orders` to `purchases`",
+            "alter table `orders` rename to `purchases`",
+        ] {
+            let schema = after(&format!(
+                "create table `users` (`id` int primary key);
+                 create table `orders` (`id` int primary key, `user_id` int, `amount` int,
+                     constraint `orders_chk_7` check (`amount` > 0),
+                     constraint `orders_chk_abc` check (`amount` > 1),
+                     constraint `orders_chk_0` check (`amount` > 2),
+                     constraint `orders_chk_` check (`amount` > 3),
+                     constraint `ORDERS_CHK_5` check (`amount` > 4),
+                     constraint `orders_ibfk_abc` foreign key (`user_id`) references `users` (`id`),
+                     constraint `orders_ibfk_` foreign key (`user_id`) references `users` (`id`));
+                 {rename}"
+            ));
+            let table = known(&schema, "purchases");
+            let checks: Vec<&str> = table
+                .checks
+                .iter()
+                .filter_map(|check| check.name.as_deref())
+                .collect();
+            assert_eq!(
+                checks,
+                [
+                    "purchases_chk_7",
+                    "purchases_chk_abc",
+                    "purchases_chk_0",
+                    "orders_chk_",
+                    "ORDERS_CHK_5"
+                ],
+                "{rename}"
+            );
+            let keys: Vec<&str> = table
+                .foreign_keys
+                .iter()
+                .filter_map(|key| key.name.as_deref())
+                .collect();
+            assert_eq!(keys, ["purchases_ibfk_abc", "orders_ibfk_"], "{rename}");
+        }
+    }
+
+    #[test]
+    fn dropping_what_a_table_does_not_have_keeps_it_known_and_unchanged() {
+        let sql = "create table `shops` (`id` int primary key, `name` varchar(50), \
+                   index `i_name` (`name`))";
+        let before = after(sql);
+        let schema = after(&format!(
+            "{sql}; alter table `shops` drop `nope`; alter table `shops` drop index `nope`; \
+             alter table `shops` drop foreign key `nope`"
+        ));
+        assert_eq!(schema.lost().count(), 0);
+        assert_eq!(known(&schema, "shops"), known(&before, "shops"));
+    }
+
+    #[test]
     fn a_change_kilit_cannot_follow_loses_the_table() {
         let schema = after(
             "alter table `orders` auto_increment = 1000;
              ALTER TABLE users CONVERT TO CHARACTER SET latin1;
-             alter table `shops` drop `nope`",
+             alter table `shops` rename column `nope` to `yes`",
         );
         let lost: Vec<(&str, &str)> = schema.lost().collect();
         assert_eq!(
@@ -2171,7 +2369,8 @@ mod tests {
 
     #[test]
     fn renaming_a_table_renames_its_automatic_check_names() {
-        // MySQL 8.0.46 and 8.4.13 do the same (run by hand), in both spellings.
+        // MySQL 8.0.46 and 8.4.13 do the same, in both spellings (run by
+        // hand, manual/B1b/chk-rename): orders_chk_x becomes sales_chk_x.
         let schema = from_sql(
             "CREATE TABLE orders (amount INT, CHECK (amount > 0),
                  CONSTRAINT c_one CHECK (amount > 1), CONSTRAINT orders_chk_x CHECK (amount > 2));
@@ -2180,7 +2379,7 @@ mod tests {
         let renamed = [
             "sales_chk_1: amount > 0",
             "c_one: amount > 1",
-            "orders_chk_x: amount > 2",
+            "sales_chk_x: amount > 2",
         ];
         assert_eq!(checks(&known(&schema, "sales")), renamed);
         let schema = from_sql(

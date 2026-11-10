@@ -1,0 +1,4 @@
+title = "Drop a column the table does not have"
+# The name nosuch is used in every scenario of this kind, so MySQL's
+# message names the same object in all of them.
+operation = "DROP COLUMN nosuch"

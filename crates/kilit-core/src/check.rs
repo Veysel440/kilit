@@ -19,9 +19,11 @@ use crate::knowledge::ServerResults;
 use crate::modify::{Change, changes};
 use crate::parse::REJECTED_BY;
 use crate::results::{Server, Variant, Verdict};
+use crate::row;
 use crate::schema::{
-    CheckTarget, ConstraintKind, InAnotherCase, Role, Schema, TableState, creates_temporary,
-    has_descending, names_foreign_key_index, same_in_any_case, with_table_renamed,
+    CheckTarget, ConstraintKind, GoneHow, InAnotherCase, Role, Schema, TableState,
+    creates_temporary, has_descending, names_foreign_key_index, same_in_any_case,
+    with_table_renamed,
 };
 use crate::statement::{
     Alter, Check, CheckColumns, Column, DataType, Engine, ForeignKey, ForeignKeyAction, Index,
@@ -145,6 +147,21 @@ pub enum Condition {
     /// What the schema shows about the foreign key the statement adds, when
     /// both tables are known: see [`KeyProblem`].
     NewForeignKey(KeyProblem),
+    /// The dropped column is the table's whole primary key.
+    PrimaryKeyAlone,
+    /// The dropped column is the second column of a primary key of two.
+    PrimaryKeySecondOfTwo,
+    /// The table has no column, index or foreign key of the name the
+    /// statement drops (error 1091). kilit never answers from it: its tables
+    /// may be out of date, so on a known table the drop is unknown, with the
+    /// measurement in the reason, and the table stays known.
+    NoSuchName,
+    /// The column whose default the statement sets is TEXT, BLOB or JSON,
+    /// and the default a quoted literal, which MySQL refuses (error 1101).
+    BlobDefault,
+    /// The new column, or the longer one, makes the row longer than the
+    /// 65,535 bytes MySQL allows, as kilit counts it from the table.
+    RowTooLarge,
     /// Something no schema shows: the rows, or the table's history.
     Hidden,
 }
@@ -183,10 +200,12 @@ const ORPHAN_ROW: &str = "if a row points to a parent row that does not exist";
 const ORPHAN_ROW_KEPT: &str =
     "if a row points to a parent row that does not exist (the row is kept unchecked)";
 const ROW_BREAKS_CHECK: &str = "if a row breaks the constraint";
+const PRIMARY_KEY_DUPLICATES: &str =
+    "if the column is the second of a primary key of two, and the first holds duplicate values";
 
 /// The measured situations that depend on the rows a table holds. A table
 /// with no rows is in none of them.
-const ROW_SITUATIONS: [&str; 7] = [
+const ROW_SITUATIONS: [&str; 8] = [
     VALUE_OUT_OF_RANGE,
     VALUE_TOO_LONG,
     NULL_IN_A_ROW,
@@ -194,6 +213,7 @@ const ROW_SITUATIONS: [&str; 7] = [
     ORPHAN_ROW,
     ORPHAN_ROW_KEPT,
     ROW_BREAKS_CHECK,
+    PRIMARY_KEY_DUPLICATES,
 ];
 
 /// Whether `note`, one of the notes of a [`Prediction::Measured`], tells
@@ -228,7 +248,76 @@ const ADD_COLUMN: Case = Case {
             when: "if the table has had 64 instant column changes since it was last rebuilt",
             conditions: &[Condition::Hidden],
         },
+        Exception {
+            scenarios: &["add-column-over-row-size-limit"],
+            when: ROW_TOO_LARGE,
+            conditions: &[Condition::RowTooLarge],
+        },
     ],
+};
+
+const ROW_TOO_LARGE: &str = "if the row grows past the 65,535 bytes MySQL allows";
+
+/// A new TEXT, BLOB, JSON or GEOMETRY column with a quoted default: MySQL
+/// refuses it (error 1101) in strict SQL mode, and refuses all but `''` on
+/// TEXT and BLOB in the others. See [`refused_default`].
+const ADD_COLUMN_BLOB_LITERAL_DEFAULT: Case = Case {
+    id: "add-column-blob-literal-default",
+    scenarios: &[
+        "add-column-text-default-literal",
+        "add-column-text-nullable-default-literal",
+        "add-column-blob-default-literal",
+        "add-column-json-default-literal",
+        "add-column-geometry-default-literal",
+        "add-column-text-nullable-default-literal-sql-mode-empty",
+        "add-column-text-nullable-default-literal-sql-mode-not-strict",
+        "add-column-json-default-literal-sql-mode-empty",
+        "add-column-json-default-literal-sql-mode-not-strict",
+        "add-column-geometry-default-literal-sql-mode-empty",
+        "add-column-geometry-default-literal-sql-mode-not-strict",
+    ],
+    exceptions: &[],
+};
+
+/// A new TEXT or BLOB column with `DEFAULT ''` when `sql_mode` is not
+/// strict: MySQL drops the default with a warning and adds the column. The
+/// lab measured it on a plain table only; see [`refused_default`].
+const ADD_COLUMN_BLOB_EMPTY_DEFAULT_NOT_STRICT: Case = Case {
+    id: "add-column-blob-empty-default-not-strict",
+    scenarios: &[
+        "add-column-text-default-literal-sql-mode-empty",
+        "add-column-text-default-literal-sql-mode-not-strict",
+        "add-column-blob-default-literal-sql-mode-empty",
+        "add-column-blob-default-literal-sql-mode-not-strict",
+    ],
+    exceptions: &[],
+};
+
+/// A new TEXT column with `DEFAULT ('')`, or a JSON one with `DEFAULT
+/// ('[]')`: an expression, which MySQL takes on these types, by copying the
+/// table, whatever the SQL mode.
+const ADD_COLUMN_BLOB_EXPRESSION_DEFAULT: Case = Case {
+    id: "add-column-blob-expression-default",
+    scenarios: &[
+        "add-column-text-default-expression",
+        "add-column-text-default-expression-sql-mode-empty",
+        "add-column-text-default-expression-sql-mode-not-strict",
+        "add-column-json-default-expression",
+        "add-column-json-default-expression-sql-mode-empty",
+        "add-column-json-default-expression-sql-mode-not-strict",
+    ],
+    exceptions: &[],
+};
+
+/// A MODIFY or CHANGE whose new definition is a TEXT column with a quoted
+/// default, in strict SQL mode (error 1101). See [`refused_default`].
+const MODIFY_COLUMN_BLOB_LITERAL_DEFAULT: Case = Case {
+    id: "modify-column-blob-literal-default",
+    scenarios: &[
+        "modify-column-text-default-literal",
+        "modify-text-column-default-literal",
+    ],
+    exceptions: &[],
 };
 
 /// A new column whose default is one of the expressions in
@@ -266,7 +355,7 @@ const ADD_COLUMN_BINLOG_UNSAFE_DEFAULT: Case = Case {
 /// The expression defaults the lab measured, as kilit reads them, in
 /// uppercase, with the case of each. Any other expression default is
 /// unknown: a function the lab has not run may behave either way.
-const EXPRESSION_DEFAULTS: [(&str, &Case); 10] = [
+const EXPRESSION_DEFAULTS: [(&str, &Case); 12] = [
     ("(NOW())", &ADD_COLUMN_EXPRESSION_DEFAULT),
     ("(CURRENT_TIMESTAMP)", &ADD_COLUMN_EXPRESSION_DEFAULT),
     ("(CURDATE())", &ADD_COLUMN_EXPRESSION_DEFAULT),
@@ -280,6 +369,9 @@ const EXPRESSION_DEFAULTS: [(&str, &Case); 10] = [
     ("(UUID_SHORT())", &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT),
     ("(SYSDATE())", &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT),
     ("(USER())", &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT),
+    // Measured on a TEXT and on a JSON column only: see [`check_default_type`].
+    ("('')", &ADD_COLUMN_BLOB_EXPRESSION_DEFAULT),
+    ("('[]')", &ADD_COLUMN_BLOB_EXPRESSION_DEFAULT),
 ];
 
 /// Shapes the lab has not measured, such as a column in a foreign key of
@@ -359,6 +451,32 @@ const DROP_COLUMN: Case = Case {
             when: "if the column is in an index and a CHECK constraint uses it and another column",
             conditions: &[Condition::IndexedColumn, Condition::CheckWithAnotherColumn],
         },
+        // The primary key is an index, so the exception for an indexed
+        // column holds too; these were measured with both conditions.
+        Exception {
+            scenarios: &["drop-primary-key-column"],
+            when: "if the column is the primary key",
+            conditions: &[Condition::IndexedColumn, Condition::PrimaryKeyAlone],
+        },
+        Exception {
+            scenarios: &["drop-column-in-two-column-primary-key"],
+            when: "if the column is the second of a primary key of two columns",
+            conditions: &[Condition::IndexedColumn, Condition::PrimaryKeySecondOfTwo],
+        },
+        Exception {
+            scenarios: &["drop-column-in-two-column-primary-key-duplicates"],
+            when: PRIMARY_KEY_DUPLICATES,
+            conditions: &[
+                Condition::IndexedColumn,
+                Condition::PrimaryKeySecondOfTwo,
+                Condition::Hidden,
+            ],
+        },
+        Exception {
+            scenarios: &["drop-column-missing"],
+            when: "if the table has no such column",
+            conditions: &[Condition::NoSuchName],
+        },
     ],
 };
 
@@ -402,7 +520,16 @@ const RENAME_COLUMN: Case = Case {
 const SET_COLUMN_DEFAULT: Case = Case {
     id: "set-column-default",
     scenarios: &["set-column-default"],
-    exceptions: &[],
+    exceptions: &[Exception {
+        scenarios: &[
+            "set-column-default-text-literal",
+            "set-column-default-text-literal-sql-mode-empty",
+            "set-column-default-text-literal-sql-mode-not-strict",
+            "set-column-default-json-literal",
+        ],
+        when: "if the column is TEXT, BLOB or JSON",
+        conditions: &[Condition::BlobDefault],
+    }],
 };
 
 const CHANGE_INTEGER_TYPE: Case = Case {
@@ -431,7 +558,11 @@ const LENGTHEN_VARCHAR: Case = Case {
         "varchar-latin1-200-to-255",
         "varchar-50-to-60-indexed",
     ],
-    exceptions: &[],
+    exceptions: &[Exception {
+        scenarios: &["lengthen-varchar-over-row-size-limit"],
+        when: ROW_TOO_LARGE,
+        conditions: &[Condition::RowTooLarge],
+    }],
 };
 
 const LENGTHEN_VARCHAR_PAST_255_BYTES: Case = Case {
@@ -579,17 +710,24 @@ const DROP_INDEX: Case = Case {
         "drop-index-foreign-key-keeps-first-index",
         "drop-index-foreign-key-keeps-primary-key",
     ],
-    exceptions: &[Exception {
-        scenarios: &[
-            "drop-index-needed-by-foreign-key",
-            "drop-index-needed-by-foreign-key-two-column-index",
-            "drop-index-needed-by-foreign-key-automatic",
-            "drop-index-needed-by-foreign-key-checks-off",
-            "drop-index-needed-by-two-column-foreign-key",
-        ],
-        when: "if the index is the only one that serves a foreign key",
-        conditions: &[Condition::OnlyIndexOfForeignKey],
-    }],
+    exceptions: &[
+        Exception {
+            scenarios: &[
+                "drop-index-needed-by-foreign-key",
+                "drop-index-needed-by-foreign-key-two-column-index",
+                "drop-index-needed-by-foreign-key-automatic",
+                "drop-index-needed-by-foreign-key-checks-off",
+                "drop-index-needed-by-two-column-foreign-key",
+            ],
+            when: "if the index is the only one that serves a foreign key",
+            conditions: &[Condition::OnlyIndexOfForeignKey],
+        },
+        Exception {
+            scenarios: &["drop-index-missing"],
+            when: "if the table has no such index",
+            conditions: &[Condition::NoSuchName],
+        },
+    ],
 };
 
 const ADD_FOREIGN_KEY: Case = Case {
@@ -682,7 +820,11 @@ const ADD_FOREIGN_KEY_CHECKS_OFF: Case = Case {
 const DROP_FOREIGN_KEY: Case = Case {
     id: "drop-foreign-key",
     scenarios: &["drop-foreign-key"],
-    exceptions: &[],
+    exceptions: &[Exception {
+        scenarios: &["drop-foreign-key-missing"],
+        when: "if the table has no such foreign key",
+        conditions: &[Condition::NoSuchName],
+    }],
 };
 
 /// An enforced CHECK constraint with a plain expression over columns of the
@@ -771,10 +913,14 @@ const SET_TABLE_COMMENT: Case = Case {
 const MAX_TABLE_COMMENT: usize = 2048;
 
 /// Every case kilit knows.
-pub const CASES: [&Case; 31] = [
+pub const CASES: [&Case; 35] = [
     &ADD_COLUMN,
     &ADD_COLUMN_EXPRESSION_DEFAULT,
     &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT,
+    &ADD_COLUMN_BLOB_LITERAL_DEFAULT,
+    &ADD_COLUMN_BLOB_EMPTY_DEFAULT_NOT_STRICT,
+    &ADD_COLUMN_BLOB_EXPRESSION_DEFAULT,
+    &MODIFY_COLUMN_BLOB_LITERAL_DEFAULT,
     &DROP_COLUMN,
     &RENAME_COLUMN,
     &SET_COLUMN_DEFAULT,
@@ -1444,6 +1590,7 @@ fn check_one<'r>(
         }
         if sql.contains("sql_mode") {
             session.sql_mode_set = true;
+            session.sql_mode = SqlMode::read(&sql, &statement.kind, statement.line);
         }
         if sql.contains("binlog_format") {
             session.binlog_format_set = true;
@@ -1959,6 +2106,9 @@ struct Session {
     /// refuses a key too long for a MyISAM index or shortens it depends on
     /// it, and the lab measured the default, which is strict.
     sql_mode_set: bool,
+    /// The strictness of `sql_mode` in this session, which decides whether
+    /// MySQL refuses some defaults or drops them with a warning.
+    sql_mode: SqlMode,
     /// The input names `binlog_format`, in any form kilit can see. Whether
     /// MySQL refuses an expression default as unsafe for the binary log
     /// depends on it, and the lab measured it as `ROW`, the default.
@@ -1996,6 +2146,92 @@ struct EarlierSession {
     foreign_key_checks: bool,
     sql_log_bin: bool,
     old_alter_table: bool,
+}
+
+/// Whether `sql_mode` is strict in this session, as far as the input says.
+/// The lab measured its own default, which is strict, and the session
+/// values `''` and `'NO_ENGINE_SUBSTITUTION'`, which are not.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum SqlMode {
+    /// Nothing in the input set it: the MySQL default, which is strict.
+    #[default]
+    ServerDefault,
+    /// Set for the session to a list kilit reads, with
+    /// `STRICT_TRANS_TABLES` or `STRICT_ALL_TABLES`, and other modes of the
+    /// lab's default only.
+    Strict,
+    /// Set for the session to `''` or `'NO_ENGINE_SUBSTITUTION'`.
+    NotStrict,
+    /// Set in any other way, or globally: why kilit cannot tell. It stays
+    /// so for the rest of the input.
+    Unclear(String),
+}
+
+/// The modes of the lab's `sql_mode`, MySQL 8's default, in uppercase.
+const LAB_SQL_MODES: [&str; 6] = [
+    "ONLY_FULL_GROUP_BY",
+    "STRICT_TRANS_TABLES",
+    "NO_ZERO_IN_DATE",
+    "NO_ZERO_DATE",
+    "ERROR_FOR_DIVISION_BY_ZERO",
+    "NO_ENGINE_SUBSTITUTION",
+];
+
+impl SqlMode {
+    /// The mode after a statement that names `sql_mode`, written in
+    /// lowercase as `sql`. Only a session assignment of a quoted list,
+    /// alone in the statement, is read; any other mention, such as a
+    /// global one, `CONCAT(@@sql_mode, ...)` or a SELECT, leaves it unclear.
+    fn read(sql: &str, kind: &StatementKind, line: usize) -> SqlMode {
+        let unclear = || {
+            SqlMode::Unclear(format!(
+                "line {line} sets sql_mode in a form kilit cannot read, or globally"
+            ))
+        };
+        let StatementKind::Set { variables } = kind else {
+            return unclear();
+        };
+        let assigned: Vec<&Variable> = variables
+            .iter()
+            .filter(|variable| variable.name == "sql_mode")
+            .collect();
+        let [variable] = assigned.as_slice() else {
+            return unclear();
+        };
+        if sql.matches("sql_mode").count() != 1 || sql.contains("global") || sql.contains("persist")
+        {
+            return unclear();
+        }
+        let Some(list) = variable
+            .value
+            .strip_prefix('\'')
+            .and_then(|rest| rest.strip_suffix('\''))
+            .filter(|list| !list.contains(['\'', '\\']))
+        else {
+            return unclear();
+        };
+        let modes: Vec<String> = list
+            .split(',')
+            .map(|mode| mode.trim().to_ascii_uppercase())
+            .filter(|mode| !mode.is_empty())
+            .collect();
+        if modes.iter().all(|mode| mode == "NO_ENGINE_SUBSTITUTION") {
+            return SqlMode::NotStrict;
+        }
+        let strict = modes
+            .iter()
+            .any(|mode| mode == "STRICT_TRANS_TABLES" || mode == "STRICT_ALL_TABLES");
+        let measured = modes
+            .iter()
+            .all(|mode| mode == "STRICT_ALL_TABLES" || LAB_SQL_MODES.contains(&mode.as_str()));
+        if strict && measured {
+            SqlMode::Strict
+        } else {
+            SqlMode::Unclear(format!(
+                "line {line} sets sql_mode to '{list}', which the lab has not measured"
+            ))
+        }
+    }
 }
 
 /// `old_alter_table` in this session, as far as the input says.
@@ -2140,6 +2376,11 @@ impl Session {
         } else {
             BinaryLog::NotSet
         };
+        // A session value is gone with its session; an unclear one may
+        // have been global.
+        if matches!(self.sql_mode, SqlMode::Strict | SqlMode::NotStrict) {
+            self.sql_mode = SqlMode::ServerDefault;
+        }
         self.old_alter_table = if later.old_alter_table_unclear {
             OldAlterTable::UnknownFromEarlierSession
         } else {
@@ -2370,6 +2611,22 @@ fn predict<'r>(
         }
     };
     let table = schema.table(&alter.table);
+    if let Some(reason) = not_in_dump(&alter.table, table, schema) {
+        return unknown(format!("the statement is on {reason}"));
+    }
+    if let Operation::AddForeignKey(key) = operation
+        && matches!(
+            session.foreign_key_checks,
+            Setting::On | Setting::ServerDefault
+        )
+        && let Some(reason) = not_in_dump(
+            &key.referenced_table,
+            schema.table(&key.referenced_table),
+            schema,
+        )
+    {
+        return unknown(format!("the foreign key points at {reason}"));
+    }
     match session.old_alter_table {
         OldAlterTable::Unknown(line) => {
             return unknown(format!(
@@ -2436,6 +2693,7 @@ fn predict<'r>(
         case,
         notes,
         column,
+        row,
     } = match classify(operation, sql, session, table, schema, results) {
         Ok(classified) => classified,
         Err(reason) => return unknown(reason),
@@ -2465,6 +2723,15 @@ fn predict<'r>(
             Operation::AddForeignKey(key) => Some(key),
             _ => None,
         },
+        dropped_foreign_key: match operation {
+            Operation::DropForeignKey { name } => Some(name),
+            _ => None,
+        },
+        default: match operation {
+            Operation::SetColumnDefault { default, .. } => Some(default),
+            _ => None,
+        },
+        row: &row,
         session,
         schema,
     };
@@ -2477,6 +2744,55 @@ fn predict<'r>(
         ),
         (None, None) => answer(case, &situation, variant, results, agreements, notes),
     }
+}
+
+/// Why kilit does not answer for the table `name`, when its tables come
+/// from a dump and kilit has no table of that name at this statement.
+fn not_in_dump(name: &str, table: TableState<'_>, schema: &Schema) -> Option<String> {
+    if table != TableState::Missing || !schema.is_from_dump() {
+        return None;
+    }
+    // `shop.orders` next to a table `orders`.
+    if let Some((database, short)) = name.rsplit_once('.')
+        && schema.table(short) != TableState::Missing
+    {
+        let has = if schema.dump_has(short) {
+            "the schema dump has"
+        } else {
+            "kilit has a table"
+        };
+        return Some(format!(
+            "{name}: {has} {short}, and kilit does not know which database {database}.{short} \
+             is in"
+        ));
+    }
+    if let Some(gone) = schema.gone(name) {
+        let statement = if gone.earlier_file {
+            format!(
+                "the statement on line {} of an earlier input file",
+                gone.line
+            )
+        } else {
+            format!("the statement on line {}", gone.line)
+        };
+        let what = match &gone.how {
+            GoneHow::Dropped => format!("which {statement} drops"),
+            GoneHow::MaybeDropped => format!(
+                "which kilit takes as dropped by {statement} (MySQL may have dropped only a \
+                 temporary table of that name)"
+            ),
+            GoneHow::Renamed { to } => format!("which {statement} renames to {to}"),
+        };
+        return Some(format!(
+            "{name}, {what}, and no statement after it creates again: MySQL refuses the \
+             statement if {name} does not exist"
+        ));
+    }
+    Some(format!(
+        "{name}, which kilit has neither in the schema dump nor from a statement before this \
+         one: the dump may be out of date, or {name} does not exist and MySQL refuses the \
+         statement"
+    ))
 }
 
 /// The answer from `case`'s measurements on this server, with what the
@@ -2518,6 +2834,23 @@ fn answer<'r>(
             Err(reason) => return unknown(format!("{}, and {reason}", why.join(", and "))),
         };
         notes.extend(why);
+        // The same situation measured with rows kilit cannot see, such as
+        // duplicates, still becomes a note.
+        for (hidden_at, hidden) in &unseen {
+            if !hidden.conditions.contains(&Condition::Hidden) || !includes(hidden, exception) {
+                continue;
+            }
+            if let Ok(rows) =
+                agreements.agreed(case, Group::Exception(*hidden_at), variant, results)
+            {
+                notes.push(format!(
+                    "{}: {} ({})",
+                    hidden.when,
+                    brief(&rows),
+                    scenario_list(hidden.scenarios)
+                ));
+            }
+        }
         return Prediction::Measured {
             case: case.id,
             verdict: other,
@@ -2748,6 +3081,9 @@ fn measured_apart<'r>(
                     measured.name
                 ));
             }
+            Applies::Maybe if exception.conditions == [Condition::RowTooLarge] => {
+                notes.push(row_not_counted(situation.row, measured.name));
+            }
             Applies::Maybe => {
                 return unknown(format!(
                     "kilit cannot tell {}, and the lab has not measured that {}",
@@ -2964,6 +3300,9 @@ fn on_myisam<'r>(
                     "{}, and the lab has not measured that on a MyISAM table",
                     why.join(", and ")
                 ));
+            }
+            Applies::Maybe if exception.conditions == [Condition::RowTooLarge] => {
+                notes.push(row_not_counted(situation.row, "on a MyISAM table"));
             }
             Applies::Maybe => {
                 return unknown(format!(
@@ -3375,6 +3714,12 @@ struct Situation<'a> {
     dropped_index: Option<&'a str>,
     /// The foreign key the statement adds.
     foreign_key: Option<&'a ForeignKey>,
+    /// The name of the foreign key the statement drops.
+    dropped_foreign_key: Option<&'a str>,
+    /// The default the statement sets with `SET DEFAULT`.
+    default: Option<&'a str>,
+    /// What kilit counted of the row the change leaves.
+    row: &'a RowSize,
     session: &'a Session,
     schema: &'a Schema,
 }
@@ -3423,7 +3768,30 @@ fn applies(condition: Condition, situation: &Situation<'_>) -> Applies {
     };
     match (condition, situation.column) {
         (Condition::NewForeignKey(problem), _) => new_foreign_key(problem, situation),
+        (Condition::NoSuchName, _) => no_such_name(table, situation),
+        (Condition::RowTooLarge, _) => match situation.row {
+            RowSize::Fits => Applies::No,
+            RowSize::TooLarge(why) => Applies::Yes(vec![why.clone()]),
+            RowSize::CannotCount(_) => Applies::Maybe,
+        },
+        (Condition::PrimaryKeyAlone, Some(column)) => match table.primary_key.as_slice() {
+            [key] if same_column(key, column) => {
+                Applies::Yes(vec![format!("{column} is the primary key")])
+            }
+            _ => Applies::No,
+        },
+        (Condition::PrimaryKeySecondOfTwo, Some(column)) => match table.primary_key.as_slice() {
+            [first, second] if same_column(second, column) => Applies::Yes(vec![format!(
+                "{column} is the second column of the primary key ({first}, {second})"
+            )]),
+            _ => Applies::No,
+        },
+        (Condition::BlobDefault, Some(column)) => blob_default(table, column, situation),
         (Condition::Hidden, _)
+        | (
+            Condition::PrimaryKeyAlone | Condition::PrimaryKeySecondOfTwo | Condition::BlobDefault,
+            None,
+        )
         | (
             Condition::IndexedColumn
             | Condition::ForeignKeyColumn
@@ -4156,6 +4524,244 @@ fn may_be_automatic(index: &Index, key: &ForeignKey) -> bool {
 /// the indexes may be automatic: MySQL drops an index it made for a key,
 /// without a word, when another index can serve the key. Then kilit's table
 /// may have an index the server does not, and only the server knows.
+/// What the row a change leaves comes to, against MySQL's limit of 65,535
+/// bytes: see [`row_size`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RowSize {
+    /// The change does not make the row longer, or the row fits.
+    Fits,
+    /// It does not fit, and why.
+    TooLarge(String),
+    /// kilit cannot count it, and why.
+    CannotCount(String),
+}
+
+/// Whether a key or column name of the table is `column`, as MySQL
+/// compares them.
+fn same_column(name: &str, column: &str) -> bool {
+    name.eq_ignore_ascii_case(column)
+}
+
+/// What the row of `table` comes to after the statement adds `column`, or
+/// puts it in place of the column `replaced`. Only a known table is
+/// counted. A row past InnoDB's limit for a record in its page is unknown:
+/// see [`check_page_row`].
+fn row_size(
+    table: TableState<'_>,
+    replaced: Option<&str>,
+    column: &Column,
+) -> Result<RowSize, String> {
+    // MySQL refuses such a column in strict SQL mode (error 1074) and
+    // makes it TEXT in the others: it is no row too long. Some are too long
+    // in any character set.
+    let TableState::Known(table) = table else {
+        if let Some(reason) = row::too_long(None, column) {
+            return Err(reason);
+        }
+        return Ok(RowSize::CannotCount("kilit does not know the table".into()));
+    };
+    if let Some(reason) = row::too_long(Some(table), column) {
+        return Err(reason);
+    }
+    let mut columns: Vec<&Column> = table
+        .columns
+        .iter()
+        .filter(|old| replaced.is_none_or(|name| !same_column(&old.name, name)))
+        .collect();
+    columns.push(column);
+    let counts = match row::count(table, &columns, page_format(table)) {
+        Ok(counts) => counts,
+        Err(reason) => return Ok(RowSize::CannotCount(reason)),
+    };
+    if counts.row > row::MAX_ROW_BYTES {
+        return Ok(RowSize::TooLarge(format!(
+            "the row of {} would take {} bytes, past the {} MySQL allows",
+            table.name,
+            counts.row,
+            row::MAX_ROW_BYTES
+        )));
+    }
+    check_page_row(table, counts)?;
+    Ok(RowSize::Fits)
+}
+
+/// The note for a row kilit cannot count, on a table whose answers were
+/// measured apart (`measured_on`), where the lab did not measure a row
+/// too long.
+fn row_not_counted(row: &RowSize, measured_on: &str) -> String {
+    let why = match row {
+        RowSize::CannotCount(why) => why.as_str(),
+        RowSize::Fits | RowSize::TooLarge(_) => "",
+    };
+    format!(
+        "{ROW_TOO_LARGE}: kilit cannot count the row ({why}); the lab measured error 1118 on \
+         InnoDB's DYNAMIC row format, not {measured_on}"
+    )
+}
+
+/// What kilit cannot tell when it cannot count the row: InnoDB's limit for
+/// a record in a page, which the two servers count differently.
+const PAGE_RECORD_UNSEEN: &str = "if the record grows past what InnoDB keeps in a page (8126 \
+     bytes): MySQL fails with error 1118 (4157 with ALGORITHM=INSTANT), and 8.0.46 and 8.4.13 \
+     count the record differently, so kilit cannot tell (it counts the record when it knows \
+     every column of the table)";
+
+/// A change that makes the row too long was measured for a plain new
+/// column and for a longer VARCHAR only.
+fn row_measured(case: &Case, row: &RowSize) -> Result<(), String> {
+    match row {
+        RowSize::TooLarge(why)
+            if !std::ptr::eq(case, &ADD_COLUMN) && !std::ptr::eq(case, &LENGTHEN_VARCHAR) =>
+        {
+            Err(format!(
+                "{why}, and the lab has measured that for a plain new column and a longer \
+                 VARCHAR only, not for {}",
+                case.id
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The row format whose record kilit counts in a page: `None` for a MyISAM
+/// table, and for a format kilit cannot tell, which gets no answer anyway.
+fn page_format(table: &Table) -> Option<row::Format> {
+    if matches!(table.engine, Some(Engine::MyIsam)) {
+        return None;
+    }
+    match (&table.row_format, &table.key_block_size) {
+        (Some(RowFormat::Compressed), _) | (_, Some(_)) => Some(row::Format::Compressed),
+        (None | Some(RowFormat::Default | RowFormat::Dynamic), None) => Some(row::Format::Dynamic),
+        (Some(RowFormat::Compact), None) => Some(row::Format::Compact),
+        (Some(RowFormat::Redundant), None) => Some(row::Format::Redundant),
+        (Some(RowFormat::Other(_) | RowFormat::Unknown), None) => None,
+    }
+}
+
+/// InnoDB's limit for a record in a page: the two servers count some
+/// columns apart, and a column added to a table with rows may go in place
+/// past the line, so a change past it gets no answer. kilit counts the
+/// larger record of the two. A table kilit cannot count gets the note
+/// [`PAGE_RECORD_UNSEEN`] instead.
+fn check_page_row(table: &Table, counts: row::Counts) -> Result<(), String> {
+    let Some((bytes, limit)) = counts.page else {
+        return Ok(());
+    };
+    if bytes > limit {
+        return Err(format!(
+            "the record of {} would take {bytes} bytes in an InnoDB page, past the {limit} its \
+             row format allows as the lab counted it, the larger count where MySQL 8.0.46 and \
+             8.4.13 differ: MySQL fails with error 1118, or may add the column in place on a \
+             table with rows",
+            table.name
+        ));
+    }
+    Ok(())
+}
+
+/// The lab's scenarios for dropping what a table does not have. MySQL
+/// refuses each with error 1091 on both servers.
+const DROP_MISSING_COLUMN: &str = "drop-column-missing";
+const DROP_MISSING_INDEX: &str = "drop-index-missing";
+const DROP_MISSING_FOREIGN_KEY: &str = "drop-foreign-key-missing";
+
+/// Whether the known table lacks the column, index or foreign key the
+/// statement drops. kilit does not answer "fails" from its tables alone,
+/// which may be out of date: such a drop is unknown, and says what the lab
+/// measured.
+fn no_such_name(table: &Table, situation: &Situation<'_>) -> Applies {
+    let (what, name, scenario, found) = if let Some(name) = situation.dropped {
+        (
+            "column",
+            name,
+            DROP_MISSING_COLUMN,
+            table.column(name).is_some(),
+        )
+    } else if let Some(name) = situation.dropped_index {
+        if name.eq_ignore_ascii_case("PRIMARY") {
+            return Applies::Unmeasured(
+                "dropping the primary key with DROP INDEX has not been measured yet".into(),
+            );
+        }
+        // An index kilit holds without a name has one MySQL picked, which
+        // may be this one.
+        let found = table
+            .indexes
+            .iter()
+            .any(|index| index.name.as_deref().is_none_or(|n| same_column(n, name)));
+        ("index", name, DROP_MISSING_INDEX, found)
+    } else if let Some(name) = situation.dropped_foreign_key {
+        // MySQL keeps no foreign key on a MyISAM table, and drops one of
+        // any name without complaint.
+        if table.engine == Some(Engine::MyIsam) {
+            return Applies::No;
+        }
+        // So may a foreign key's, such as `orders_ibfk_1`.
+        let found = table
+            .foreign_keys
+            .iter()
+            .any(|key| key.name.as_deref().is_none_or(|n| same_column(n, name)));
+        ("foreign key", name, DROP_MISSING_FOREIGN_KEY, found)
+    } else {
+        return Applies::No;
+    };
+    if found {
+        return Applies::No;
+    }
+    Applies::Unmeasured(format!(
+        "{} has no {what} {name} that kilit knows of. If it has none, MySQL fails with error \
+         1091 ({scenario}); kilit does not answer that from its tables alone, which may be \
+         out of date",
+        table.name
+    ))
+}
+
+/// Whether the column whose default the statement sets takes no literal
+/// default, in a shape the lab measured: a quoted default on TEXT or BLOB
+/// in its strict SQL mode and in the two non-strict ones, on JSON in the
+/// strict one only.
+fn blob_default(table: &Table, column: &str, situation: &Situation<'_>) -> Applies {
+    let Some(found) = table.column(column) else {
+        return Applies::Maybe;
+    };
+    let family = match no_literal_default(&found.data_type) {
+        None => return Applies::No,
+        Some(Err(reason)) => return Applies::Unmeasured(reason),
+        Some(Ok(family)) => family,
+    };
+    let Some(default) = situation.default else {
+        return Applies::No;
+    };
+    let type_name = type_name(&found.data_type);
+    if default.eq_ignore_ascii_case("NULL") {
+        return Applies::Unmeasured(format!(
+            "setting the default of the {type_name} column {column} to NULL has not been \
+             measured yet"
+        ));
+    }
+    if !is_quoted(default) {
+        return Applies::Unmeasured(format!(
+            "the default {default} on the {type_name} column {column} has not been measured yet"
+        ));
+    }
+    let why = || Applies::Yes(vec![format!("{column} is {type_name}")]);
+    match (&situation.session.sql_mode, family) {
+        (SqlMode::Unclear(reason), _) => Applies::Unmeasured(format!(
+            "{reason}, and whether MySQL refuses the default {default} on the {type_name} \
+             column {column} depends on it"
+        )),
+        (_, NoLiteralDefault::TextOrBlob) => why(),
+        (SqlMode::NotStrict, NoLiteralDefault::Json) => Applies::Unmeasured(format!(
+            "the input sets a non-strict sql_mode, and kilit has no lab scenario for setting \
+             a default on the JSON column {column} in it"
+        )),
+        (_, NoLiteralDefault::Json) => why(),
+        (_, NoLiteralDefault::Geometry) => Applies::Unmeasured(format!(
+            "setting a default on the {type_name} column {column} has not been measured yet"
+        )),
+    }
+}
+
 fn only_index_of_foreign_key(table: &Table, name: &str, situation: &Situation<'_>) -> Applies {
     let Some(index) = table.indexes.iter().find(|index| {
         can_serve_a_key(index)
@@ -4593,6 +5199,7 @@ fn check_new_constraint(
     check: &Check,
     table: TableState<'_>,
     schema: &Schema,
+    notes: &mut Vec<String>,
 ) -> Result<(), String> {
     let CheckColumns::Plain(columns) = &check.columns else {
         return Err(format!(
@@ -4608,6 +5215,12 @@ fn check_new_constraint(
         );
     }
     let TableState::Known(table) = table else {
+        notes.push(
+            "if the constraint's name is taken, or a column it uses is missing, AUTO_INCREMENT, \
+             generated or in a foreign key: not measured, so kilit cannot tell (it can on a \
+             table it knows)"
+                .to_owned(),
+        );
         return Ok(());
     };
     if let Some(name) = &check.name {
@@ -4821,11 +5434,19 @@ fn blob_or_text_without_prefix(table: &Table, index: &Index) -> Applies {
     }
 }
 
+const JSON_INDEX_UNSEEN: &str = "if a column of the index is JSON: not measured, so kilit cannot tell (it can on a table it \
+     knows)";
+
 /// The lab has not measured an index on a JSON column. MySQL's manual says
 /// it refuses one with error 3152, not the error 1170 of TEXT and BLOB
 /// columns, so on a table kilit knows such an index gets no answer.
-fn check_json_columns(index: &Index, table: TableState<'_>) -> Result<(), String> {
+fn check_json_columns(
+    index: &Index,
+    table: TableState<'_>,
+    notes: &mut Vec<String>,
+) -> Result<(), String> {
     let TableState::Known(table) = table else {
+        notes.push(JSON_INDEX_UNSEEN.to_owned());
         return Ok(());
     };
     for entry in &index.columns {
@@ -4848,6 +5469,8 @@ struct Classified {
     notes: Vec<String>,
     /// The column the change is about, as the table has it now.
     column: Option<String>,
+    /// The row the change leaves, as far as kilit counted it.
+    row: RowSize,
 }
 
 /// Finds the case an operation belongs to, or says why it has none.
@@ -4861,13 +5484,34 @@ fn classify(
 ) -> Result<Classified, String> {
     let mut notes = Vec::new();
     let mut subject = None;
+    let mut row = RowSize::Fits;
     let case = match operation {
         Operation::AddColumn { column, .. } => {
             check_new_column(column)?;
+            row = row_size(table, None, column)?;
             match expression_default(column.default.as_deref()) {
-                None => &ADD_COLUMN,
+                None => match refused_default(column, session, Refused::Add, &mut notes)? {
+                    Some(case) if std::ptr::eq(case, &ADD_COLUMN_BLOB_EMPTY_DEFAULT_NOT_STRICT) => {
+                        if let TableState::Known(table) = table
+                            && let Some(index) = table.fulltext_index()
+                        {
+                            return Err(format!(
+                                "{} has the FULLTEXT index {}, and a TEXT or BLOB column with \
+                                 DEFAULT '' in a non-strict SQL mode has not been measured on \
+                                 such a table",
+                                table.name,
+                                index.name.as_deref().unwrap_or_default()
+                            ));
+                        }
+                        notes.push(PLAIN_TABLE_ONLY.to_owned());
+                        case
+                    }
+                    Some(case) => case,
+                    None => &ADD_COLUMN,
+                },
                 Some(default) => {
                     let case = measured_default(default)?;
+                    check_default_type(case, column, default)?;
                     check_written_default(sql, default)?;
                     if let BinaryLog::Other(setting) = &session.binary_log {
                         return Err(format!(
@@ -4887,7 +5531,7 @@ fn classify(
             }
         }
         Operation::DropColumn { name } => {
-            check_dropped_column(table, name, schema)?;
+            check_dropped_column(table, name, schema, &mut notes)?;
             subject = Some(name.clone());
             &DROP_COLUMN
         }
@@ -4902,14 +5546,23 @@ fn classify(
                     "setting the expression default {default} has not been measured yet"
                 ));
             }
-            if let TableState::Known(table) = table
-                && let Some(old) = table.column(column)
-                && let Some(old_default) = expression_default(old.default.as_deref())
-            {
-                return Err(format!(
-                    "{column} has the expression default {old_default}, and changing it \
-                     has not been measured yet"
-                ));
+            match table {
+                TableState::Known(table) => {
+                    if let Some(old) = table.column(column)
+                        && let Some(old_default) = expression_default(old.default.as_deref())
+                    {
+                        return Err(format!(
+                            "{column} has the expression default {old_default}, and changing \
+                             it has not been measured yet"
+                        ));
+                    }
+                }
+                TableState::Lost { .. } | TableState::Missing => {
+                    notes.push(format!(
+                        "if {column} has an expression default: not measured, so kilit cannot \
+                         tell (it can on a table it knows)"
+                    ));
+                }
             }
             subject = Some(column.clone());
             &SET_COLUMN_DEFAULT
@@ -4917,14 +5570,24 @@ fn classify(
         Operation::ModifyColumn { column, position } => {
             check_new_definition(column)?;
             subject = Some(column.name.clone());
-            modified(
+            if let Some(case) = refused_default(column, session, Refused::Modify, &mut notes)? {
+                return Ok(Classified {
+                    case,
+                    notes,
+                    column: subject,
+                    row: RowSize::Fits,
+                });
+            }
+            let case = modified(
                 table,
                 &column.name,
                 column,
                 position.as_ref(),
                 results,
                 &mut notes,
-            )?
+            )?;
+            row = row_size(table, Some(&column.name), column)?;
+            case
         }
         Operation::ChangeColumn {
             old_name,
@@ -4953,14 +5616,24 @@ fn classify(
                 ));
             }
             subject = Some(old_name.clone());
-            modified(
+            if let Some(case) = refused_default(column, session, Refused::Modify, &mut notes)? {
+                return Ok(Classified {
+                    case,
+                    notes,
+                    column: subject,
+                    row: RowSize::Fits,
+                });
+            }
+            let case = modified(
                 table,
                 old_name,
                 column,
                 position.as_ref(),
                 results,
                 &mut notes,
-            )?
+            )?;
+            row = row_size(table, Some(old_name), column)?;
+            case
         }
         Operation::AddIndex(index) if index.columns.iter().any(|entry| is_expression(entry)) => {
             check_functional_index(index, table)?;
@@ -4968,34 +5641,25 @@ fn classify(
         }
         Operation::AddIndex(index) => match index.kind {
             IndexKind::Plain => {
-                check_json_columns(index, table)?;
+                check_json_columns(index, table, &mut notes)?;
                 &ADD_INDEX
             }
             IndexKind::Unique => {
-                check_json_columns(index, table)?;
+                check_json_columns(index, table, &mut notes)?;
                 &ADD_UNIQUE_INDEX
             }
             IndexKind::Fulltext => &ADD_FULLTEXT_INDEX,
             IndexKind::Spatial => return Err(SPATIAL_NOT_MEASURED.into()),
         },
         Operation::DropIndex { .. } => &DROP_INDEX,
-        Operation::AddForeignKey(key) => match session.foreign_key_checks {
-            Setting::On => &ADD_FOREIGN_KEY,
-            Setting::Off => {
-                foreign_key_with_checks_off(key, table, schema)?;
-                &ADD_FOREIGN_KEY_CHECKS_OFF
+        Operation::AddForeignKey(key) => {
+            if !matches!(table, TableState::Known(_))
+                || !matches!(schema.table(&key.referenced_table), TableState::Known(_))
+            {
+                notes.push(FOREIGN_KEY_UNSEEN.to_owned());
             }
-            Setting::ServerDefault => {
-                notes.push(session.assumes_foreign_key_checks().to_owned());
-                &ADD_FOREIGN_KEY
-            }
-            Setting::Unclear => {
-                return Err(
-                    "foreign_key_checks is set to a value kilit does not understand".into(),
-                );
-            }
-            Setting::Unknown => return Err(session.foreign_key_checks_unknown.clone()),
-        },
+            foreign_key_case(key, session, table, schema, &mut notes)?
+        }
         Operation::DropForeignKey { .. } => &DROP_FOREIGN_KEY,
         Operation::ChangeTableOptions(options) => {
             let changed: Vec<&str> = [
@@ -5027,7 +5691,7 @@ fn classify(
             &SET_TABLE_COMMENT
         }
         Operation::AddCheck(check) => {
-            check_new_constraint(check, table, schema)?;
+            check_new_constraint(check, table, schema, &mut notes)?;
             if check.enforced {
                 &ADD_CHECK_CONSTRAINT
             } else {
@@ -5066,10 +5730,47 @@ fn classify(
             return Err(format!("kilit does not understand this change: {sql}"));
         }
     };
+    row_measured(case, &row)?;
+    // The plain new column, the shape the lab measured both limits on.
+    if std::ptr::eq(case, &ADD_COLUMN) && matches!(row, RowSize::CannotCount(_)) {
+        notes.push(PAGE_RECORD_UNSEEN.to_owned());
+    }
     Ok(Classified {
         case,
         notes,
         column: subject,
+        row,
+    })
+}
+
+/// What kilit cannot see about a new foreign key unless it knows both
+/// tables: the shapes [`foreign_key_seen`] leaves unknown.
+const FOREIGN_KEY_UNSEEN: &str = "if a column of the key is missing, or NOT NULL with ON DELETE \
+     SET NULL, or the table is MyISAM: not measured, so kilit cannot tell (it can when it knows \
+     both tables)";
+
+/// The case of a new foreign key, by the session's foreign_key_checks.
+fn foreign_key_case(
+    key: &ForeignKey,
+    session: &Session,
+    table: TableState<'_>,
+    schema: &Schema,
+    notes: &mut Vec<String>,
+) -> Result<&'static Case, String> {
+    Ok(match session.foreign_key_checks {
+        Setting::On => &ADD_FOREIGN_KEY,
+        Setting::Off => {
+            foreign_key_with_checks_off(key, table, schema)?;
+            &ADD_FOREIGN_KEY_CHECKS_OFF
+        }
+        Setting::ServerDefault => {
+            notes.push(session.assumes_foreign_key_checks().to_owned());
+            &ADD_FOREIGN_KEY
+        }
+        Setting::Unclear => {
+            return Err("foreign_key_checks is set to a value kilit does not understand".into());
+        }
+        Setting::Unknown => return Err(session.foreign_key_checks_unknown.clone()),
     })
 }
 
@@ -5089,6 +5790,166 @@ fn check_new_column(column: &Column) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// How a statement gives a column its default, for [`refused_default`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Refused {
+    Add,
+    Modify,
+}
+
+/// The types that take no literal default, as the lab measured them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoLiteralDefault {
+    /// TINYTEXT to LONGTEXT and TINYBLOB to LONGBLOB: in a non-strict SQL
+    /// mode MySQL takes `''`, drops it and warns.
+    TextOrBlob,
+    Json,
+    /// GEOMETRY and its kinds, such as POINT.
+    Geometry,
+}
+
+/// Whether a column of this type takes no literal default, by the name of
+/// the type; an error for a name of that family the lab has not measured,
+/// such as `TEXT(1000)` or `LONG`.
+fn no_literal_default(data_type: &DataType) -> Option<Result<NoLiteralDefault, String>> {
+    let (DataType::Text(name) | DataType::Other(name)) = data_type else {
+        return None;
+    };
+    let written = name.trim().to_ascii_uppercase();
+    let base = written
+        .split(|c: char| c == '(' || c.is_whitespace())
+        .next()
+        .unwrap_or_default();
+    let family = match base {
+        "TINYTEXT" | "TEXT" | "MEDIUMTEXT" | "LONGTEXT" | "TINYBLOB" | "BLOB" | "MEDIUMBLOB"
+        | "LONGBLOB" => NoLiteralDefault::TextOrBlob,
+        "JSON" => NoLiteralDefault::Json,
+        "GEOMETRY" | "POINT" | "LINESTRING" | "POLYGON" | "MULTIPOINT" | "MULTILINESTRING"
+        | "MULTIPOLYGON" | "GEOMETRYCOLLECTION" => NoLiteralDefault::Geometry,
+        "LONG" | "GEOMCOLLECTION" => {
+            return Some(Err(format!(
+                "a default on a {name} column has not been measured yet"
+            )));
+        }
+        _ => return None,
+    };
+    if written != base {
+        return Some(Err(format!(
+            "a default on a {name} column has not been measured yet; the lab measured the \
+             types without a length"
+        )));
+    }
+    Some(Ok(family))
+}
+
+/// A default that is a quoted string, such as `''` or `'[]'`: the only
+/// literals the lab measured on these types.
+fn is_quoted(default: &str) -> bool {
+    default.len() >= 2 && default.starts_with('\'') && default.ends_with('\'')
+}
+
+/// Laravel's `'strict' => false` sets the session's sql_mode without a
+/// statement kilit can see.
+const STRICT_FOR_AN_EMPTY_DEFAULT: &str = "assumes strict SQL mode, the MySQL default and \
+     Laravel's ('strict' => true); with 'strict' => false Laravel sets sql_mode = \
+     'NO_ENGINE_SUBSTITUTION' without a statement kilit sees, and then";
+
+const PLAIN_TABLE_ONLY: &str = "measured on a plain table only: not on a table with a FULLTEXT \
+     index, nor after 64 instant column changes";
+
+/// The case of a new definition whose default MySQL refuses (error 1101),
+/// or `None` when it has no such default: a TEXT, BLOB, JSON or GEOMETRY
+/// column with a quoted default. The lab measured them in its strict SQL
+/// mode and with `sql_mode` set to `''` and `'NO_ENGINE_SUBSTITUTION'`:
+/// MySQL refuses every one in each, except `''` on TEXT and BLOB, which in
+/// the non-strict modes it drops with a warning. A MODIFY or CHANGE was
+/// measured on TEXT, in strict mode only.
+fn refused_default(
+    column: &Column,
+    session: &Session,
+    refused: Refused,
+    notes: &mut Vec<String>,
+) -> Result<Option<&'static Case>, String> {
+    let Some(family) = no_literal_default(&column.data_type) else {
+        return Ok(None);
+    };
+    let Some(default) = column.default.as_deref() else {
+        return Ok(None);
+    };
+    if default.eq_ignore_ascii_case("NULL") || is_expression(default) {
+        return Ok(None);
+    }
+    let family = family?;
+    let type_name = type_name(&column.data_type);
+    if !is_quoted(default) {
+        return Err(format!(
+            "the default {default} on a {type_name} column has not been measured yet; the lab \
+             measured quoted defaults, which MySQL refuses (error 1101)"
+        ));
+    }
+    let empty = family == NoLiteralDefault::TextOrBlob && default == "''";
+    match (&session.sql_mode, refused) {
+        (SqlMode::Unclear(reason), _) => Err(format!(
+            "{reason}, and whether MySQL refuses the default {default} on a {type_name} column \
+             depends on it"
+        )),
+        (SqlMode::NotStrict, Refused::Add) if empty => {
+            Ok(Some(&ADD_COLUMN_BLOB_EMPTY_DEFAULT_NOT_STRICT))
+        }
+        (SqlMode::NotStrict, Refused::Modify) if empty => Err(format!(
+            "the input sets a non-strict sql_mode, in which MySQL drops the default {default} \
+             of a {type_name} column with a warning, and kilit has no lab scenario for a MODIFY \
+             or CHANGE that does so"
+        )),
+        (SqlMode::NotStrict, Refused::Modify) => Err(format!(
+            "the input sets a non-strict sql_mode, and kilit has no lab scenario for a MODIFY \
+             or CHANGE with the default {default} on a {type_name} column in it"
+        )),
+        (_, Refused::Modify) if family != NoLiteralDefault::TextOrBlob => Err(format!(
+            "a MODIFY or CHANGE with the default {default} on a {type_name} column has not been \
+             measured yet; the lab measured it on TEXT"
+        )),
+        (mode, _) => {
+            if empty && *mode == SqlMode::ServerDefault {
+                notes.push(match refused {
+                    Refused::Add => format!(
+                        "{STRICT_FOR_AN_EMPTY_DEFAULT} MySQL drops the default and adds the \
+                         column (add-column-text-default-literal-sql-mode-not-strict and 3 more \
+                         lab scenarios)"
+                    ),
+                    Refused::Modify => format!(
+                        "{STRICT_FOR_AN_EMPTY_DEFAULT} MySQL drops the default, which the lab \
+                         has not measured for MODIFY or CHANGE"
+                    ),
+                });
+            }
+            Ok(Some(match refused {
+                Refused::Add => &ADD_COLUMN_BLOB_LITERAL_DEFAULT,
+                Refused::Modify => &MODIFY_COLUMN_BLOB_LITERAL_DEFAULT,
+            }))
+        }
+    }
+}
+
+/// The expressions `('')` and `('[]')` were measured as the default of a
+/// TEXT and of a JSON column, and nowhere else.
+fn check_default_type(case: &Case, column: &Column, default: &str) -> Result<(), String> {
+    if !std::ptr::eq(case, &ADD_COLUMN_BLOB_EXPRESSION_DEFAULT) {
+        return Ok(());
+    }
+    let measured_on = if default == "('')" { "TEXT" } else { "JSON" };
+    match &column.data_type {
+        DataType::Text(name) | DataType::Other(name) if name.eq_ignore_ascii_case(measured_on) => {
+            Ok(())
+        }
+        other => Err(format!(
+            "the expression default {default} has been measured on a {measured_on} column \
+             only, not on {}",
+            type_name(other)
+        )),
+    }
 }
 
 /// The default, if it is an expression. MySQL takes an expression only in
@@ -5318,8 +6179,10 @@ fn check_dropped_column(
     table: TableState<'_>,
     column: &str,
     schema: &Schema,
+    notes: &mut Vec<String>,
 ) -> Result<(), String> {
     let TableState::Known(table) = table else {
+        notes.push(DROPPED_COLUMN_UNSEEN.to_owned());
         return Ok(());
     };
     for key in &table.foreign_keys {
@@ -5407,15 +6270,26 @@ fn check_dropped_column(
     if let Some(reason) = functional.or(unmeasured) {
         return Err(reason);
     }
+    // The lab measured the column as the whole primary key, and as the
+    // second of two: see the exceptions of [`DROP_COLUMN`].
     if table.in_primary_key(column) {
-        return Err(if table.primary_key.len() > 1 {
-            format!(
-                "{column} is in the primary key with other columns, which must stay unique \
-                 without it; that depends on the rows, and {DROPPING_NOT_MEASURED}"
-            )
-        } else {
-            format!("{column} is the primary key, and {DROPPING_NOT_MEASURED}")
-        });
+        match table.primary_key.as_slice() {
+            [key] if same_column(key, column) => {}
+            [_, second] if same_column(second, column) => {}
+            [_] => {
+                return Err(format!(
+                    "{column} is in the primary key with a prefix length, and \
+                     {DROPPING_NOT_MEASURED}"
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "{column} is in the primary key with other columns, which must stay \
+                     unique without it; that depends on the rows, and the lab has measured \
+                     dropping the second column of a primary key of two only"
+                ));
+            }
+        }
     }
     // An indexed column that is generated, or that a generated column uses,
     // has not been measured: it must not get the answer for indexed columns.
@@ -5440,6 +6314,13 @@ fn check_dropped_column(
     }
     Ok(())
 }
+
+/// What kilit cannot see when it does not know the table: the shapes
+/// [`check_dropped_column`] leaves unknown on a table it knows.
+const DROPPED_COLUMN_UNSEEN: &str = "if the column is in a foreign key or a unique index with \
+     other columns, in a primary key of another shape than the lab measured, in a functional or \
+     spatial index, or is referenced by another table's foreign key: not measured, so kilit \
+     cannot tell (it can on a table it knows)";
 
 /// The case of a MODIFY or CHANGE, from what it changes in the column. The
 /// change is noted, so the reader sees what kilit compared.
@@ -5504,7 +6385,7 @@ fn case_of(change: &Change) -> Result<&'static Case, String> {
         }
         Change::Length { from, to, charset } => {
             // Up to 255 bytes, MySQL stores a value's length in 1 byte.
-            let one_byte = |length: u64| length * charset.max_bytes <= 255;
+            let one_byte = |length: u64| length.saturating_mul(charset.max_bytes) <= 255;
             if to < from {
                 &SHORTEN_VARCHAR
             } else if one_byte(*from) == one_byte(*to) {
@@ -5657,6 +6538,119 @@ mod tests {
     }
 
     #[test]
+    fn a_foreign_key_name_of_mysql_s_form_follows_the_table_whatever_its_suffix() {
+        // By hand on 8.0.46 and 8.4.13: RENAME TABLE renames orders_ibfk_abc
+        // and orders_ibfk_0 to purchases_ibfk_abc and purchases_ibfk_0; the
+        // drop of the new name and then of the column are accepted.
+        for suffix in ["abc", "0"] {
+            let schema = format!(
+                "CREATE TABLE users (id BIGINT NOT NULL, PRIMARY KEY (id));
+                 CREATE TABLE orders (id BIGINT NOT NULL, user_id BIGINT DEFAULT NULL,
+                     PRIMARY KEY (id), KEY orders_ibfk_{suffix} (user_id),
+                     CONSTRAINT orders_ibfk_{suffix} FOREIGN KEY (user_id) REFERENCES users (id));"
+            );
+            for rename in [
+                "RENAME TABLE orders TO purchases",
+                "ALTER TABLE orders RENAME TO purchases",
+            ] {
+                let predictions = predictions_with(
+                    &schema,
+                    &format!(
+                        "{rename};
+                         ALTER TABLE purchases DROP FOREIGN KEY purchases_ibfk_{suffix};
+                         ALTER TABLE purchases DROP COLUMN user_id;"
+                    ),
+                );
+                let (case, _, _) = measured(predictions[1].clone());
+                assert_eq!(case, "drop-foreign-key", "{suffix}, {rename}");
+                assert!(fails_with(&predictions[2]).is_err(), "{suffix}, {rename}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_varchar_whose_bytes_overflow_is_unknown_and_no_panic() {
+        // 4611686018427387904 utf8mb4 characters are 2^64 bytes: a MODIFY to
+        // it, alone or with a second change, and an ADD COLUMN of it.
+        for sql in [
+            "ALTER TABLE orders MODIFY note VARCHAR(4611686018427387904) NULL",
+            "ALTER TABLE orders MODIFY note VARCHAR(4611686018427387904) \
+             CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL",
+            "ALTER TABLE orders ADD COLUMN c VARCHAR(4611686018427387904) NULL",
+        ] {
+            let prediction = predictions_with(SHOP, sql).pop().unwrap();
+            assert!(
+                matches!(prediction, Prediction::Unknown { .. }),
+                "{sql}: {prediction:?}"
+            );
+            assert!(!reason(prediction).contains(" 0 bytes"), "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_compact_record_past_what_a_page_keeps_is_unknown() {
+        // By hand on both servers: ten VARCHAR(255) utf8mb4 columns fit a
+        // COMPACT page, an eleventh gives error 1118.
+        let columns: Vec<String> = (1..=10)
+            .map(|i| format!("a{i} VARCHAR(255) NULL"))
+            .collect();
+        let schema = format!(
+            "CREATE TABLE c10 (id BIGINT PRIMARY KEY, {}) ENGINE=InnoDB DEFAULT \
+             CHARSET=utf8mb4 ROW_FORMAT=COMPACT;",
+            columns.join(", ")
+        );
+        let prediction =
+            predictions_with(&schema, "ALTER TABLE c10 ADD COLUMN c VARCHAR(255) NULL")
+                .pop()
+                .unwrap();
+        assert!(
+            reason(prediction).contains("past the 8125 its row format allows"),
+            "{schema}"
+        );
+        let fewer = schema.replace(", a10 VARCHAR(255) NULL", "");
+        let prediction = predictions_with(&fewer, "ALTER TABLE c10 ADD COLUMN c VARCHAR(255) NULL")
+            .pop()
+            .unwrap();
+        let (case, _, _) = measured(prediction);
+        assert_eq!(case, "compact-add-column");
+    }
+
+    #[test]
+    fn sql_mode_is_read_only_from_a_session_list_the_lab_measured() {
+        let mode = |sql: &str| {
+            let statement = parse(sql).pop().unwrap();
+            SqlMode::read(&statement.sql.to_ascii_lowercase(), &statement.kind, 1)
+        };
+        for sql in [
+            "SET sql_mode = ''",
+            "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'",
+            "SET @@sql_mode = 'no_engine_substitution'",
+        ] {
+            assert_eq!(mode(sql), SqlMode::NotStrict, "{sql}");
+        }
+        for sql in [
+            "SET sql_mode = 'STRICT_TRANS_TABLES'",
+            "SET sql_mode = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,\
+             ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'",
+            "SET sql_mode = 'STRICT_ALL_TABLES'",
+        ] {
+            assert_eq!(mode(sql), SqlMode::Strict, "{sql}");
+        }
+        for sql in [
+            "SET GLOBAL sql_mode = ''",
+            "SET PERSIST sql_mode = ''",
+            "SET sql_mode = 'ANSI'",
+            "SET sql_mode = 'TRADITIONAL'",
+            "SET sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')",
+            "SET @old = @@sql_mode, sql_mode = ''",
+            "SET sql_mode = DEFAULT",
+            "SELECT @@sql_mode",
+        ] {
+            assert!(matches!(mode(sql), SqlMode::Unclear(_)), "{sql}");
+        }
+    }
+
+    #[test]
     fn every_situation_hidden_in_the_rows_is_a_row_situation() {
         let history = "if the table has had 64 instant column changes since it was last rebuilt";
         let cases = CASES
@@ -5666,7 +6660,7 @@ mod tests {
             .chain(&OLD_ALTER_TABLE_CASES);
         for exception in cases.flat_map(|case| case.exceptions) {
             let row = ROW_SITUATIONS.contains(&exception.when);
-            if exception.conditions == [Condition::Hidden] {
+            if exception.conditions.contains(&Condition::Hidden) {
                 assert!(row || exception.when == history, "{}", exception.when);
             } else {
                 assert!(!row, "{}", exception.when);
@@ -5784,9 +6778,11 @@ mod tests {
         assert_eq!(case, "add-column");
         assert_eq!(verdict.to_string(), "INSTANT, no rebuild, writes continue");
         assert_eq!(evidence.len(), ADD_COLUMN.scenarios.len());
-        // kilit does not know the table, so both exceptions are notes.
-        assert_eq!(notes.len(), 2);
-        assert!(notes[0].starts_with("if the table has a FULLTEXT index: COPY"));
+        // kilit does not know the table, so the exceptions are notes, and
+        // so is the limit of a record in a page.
+        assert_eq!(notes.len(), ADD_COLUMN.exceptions.len() + 1);
+        assert_eq!(notes[0], PAGE_RECORD_UNSEEN);
+        assert!(notes[1].starts_with("if the table has a FULLTEXT index: COPY"));
     }
 
     #[test]
@@ -6648,11 +7644,14 @@ mod tests {
             assert_eq!(
                 notes,
                 [
+                    PAGE_RECORD_UNSEEN,
                     "if the table has a FULLTEXT index: COPY, copies every row, writes wait \
                      (add-column-with-fulltext)",
                     "if the table has had 64 instant column changes since it was last \
                      rebuilt: INPLACE, rebuilds the table, writes continue \
                      (add-column-after-64-changes)",
+                    "if the row grows past the 65,535 bytes MySQL allows: fails with error 1118 \
+                     (add-column-over-row-size-limit)",
                 ],
                 "{unreadable}"
             );
@@ -6850,17 +7849,20 @@ mod tests {
         let places = "CREATE TABLE places (id INT PRIMARY KEY, spot POINT NOT NULL,
                       SPATIAL INDEX places_spot (spot));";
         for (setup, sql, expected) in [
+            // The lab measured the second column of a primary key of two.
             (
-                "ALTER TABLE orders DROP PRIMARY KEY, ADD PRIMARY KEY (id, amount);",
+                "ALTER TABLE orders DROP PRIMARY KEY, ADD PRIMARY KEY (amount, id);",
                 "ALTER TABLE orders DROP COLUMN amount",
                 "amount is in the primary key with other columns, which must stay unique \
-                 without it; that depends on the rows, and dropping such a column has not \
-                 been measured yet",
+                 without it; that depends on the rows, and the lab has measured dropping the \
+                 second column of a primary key of two only",
             ),
             (
-                "",
-                "ALTER TABLE orders DROP COLUMN id",
-                "id is the primary key, and dropping such a column has not been measured yet",
+                "ALTER TABLE orders DROP PRIMARY KEY, ADD PRIMARY KEY (id, user_id, amount);",
+                "ALTER TABLE orders DROP COLUMN user_id",
+                "user_id is in the primary key with other columns, which must stay unique \
+                 without it; that depends on the rows, and the lab has measured dropping the \
+                 second column of a primary key of two only",
             ),
             (
                 "ALTER TABLE orders ADD UNIQUE INDEX uq (user_id, amount);",
@@ -7026,6 +8028,7 @@ mod tests {
         assert_eq!(
             notes,
             [
+                DROPPED_COLUMN_UNSEEN,
                 "if the table keeps a FULLTEXT index: COPY, copies every row, writes wait \
                  (drop-column-with-fulltext)",
                 "if the column is in a plain or FULLTEXT index, or has a UNIQUE index of its \
@@ -7043,6 +8046,14 @@ mod tests {
                  drop-column-in-not-enforced-two-column-check)",
                 "if the column is in an index and a CHECK constraint uses it and another \
                  column: fails with error 3959 (drop-column-indexed-in-two-column-check)",
+                "if the column is the primary key: COPY, copies every row, writes wait \
+                 (drop-primary-key-column)",
+                "if the column is the second of a primary key of two columns: INPLACE, rebuilds \
+                 the table, writes continue (drop-column-in-two-column-primary-key)",
+                "if the column is the second of a primary key of two, and the first holds \
+                 duplicate values: fails with error 1062 \
+                 (drop-column-in-two-column-primary-key-duplicates)",
+                "if the table has no such column: fails with error 1091 (drop-column-missing)",
             ]
         );
     }
@@ -7386,8 +8397,13 @@ mod tests {
                 ("add-column", "INSTANT, no rebuild, writes continue"),
                 "{sql}"
             );
-            // The two exceptions kilit cannot check without the table.
-            assert_eq!(notes.len(), 2, "{sql}: {notes:?}");
+            // The exceptions kilit cannot check without the table, and the
+            // limit of a record in a page.
+            assert_eq!(
+                notes.len(),
+                ADD_COLUMN.exceptions.len() + 1,
+                "{sql}: {notes:?}"
+            );
         }
         assert_eq!(
             measured(on_shop(
@@ -7966,8 +8982,8 @@ mod tests {
             // A prefix in the primary key: the column is in it, and NOT NULL.
             (
                 "ALTER TABLE codes DROP COLUMN code",
-                "unknown: code is the primary key, and dropping such a column has not been \
-                 measured yet",
+                "unknown: code is in the primary key with a prefix length, and dropping such a \
+                 column has not been measured yet",
             ),
             (
                 "ALTER TABLE codes MODIFY code VARCHAR(50)",
@@ -8183,12 +9199,13 @@ mod tests {
         };
         let (_, verdict, notes) = measured(only("ALTER TABLE posts ADD INDEX i (body)"));
         assert_eq!(verdict, "INPLACE, no rebuild, writes continue");
-        assert_eq!(notes, [note(&ADD_INDEX)]);
+        assert_eq!(notes, [JSON_INDEX_UNSEEN.to_owned(), note(&ADD_INDEX)]);
         let (_, verdict, notes) = measured(only("ALTER TABLE posts ADD UNIQUE INDEX i (body)"));
         assert_eq!(verdict, "INPLACE, no rebuild, writes continue");
         assert_eq!(
             notes,
             [
+                JSON_INDEX_UNSEEN.to_owned(),
                 "if the columns hold duplicate values: fails with error 1062 \
                  (add-unique-index-duplicates)"
                     .to_owned(),
@@ -8203,7 +9220,7 @@ mod tests {
         );
         let (_, verdict, notes) = measured(predictions[1].clone());
         assert_eq!(verdict, "INPLACE, no rebuild, writes continue");
-        assert_eq!(notes, [note(&ADD_INDEX)]);
+        assert_eq!(notes, [JSON_INDEX_UNSEEN.to_owned(), note(&ADD_INDEX)]);
     }
 
     #[test]
@@ -8595,7 +9612,8 @@ mod tests {
         );
         assert_eq!(said(&predictions[0]), COPY_ANSWER);
         let (_, _, notes) = measured(predictions[0].clone());
-        assert_eq!(notes.len(), 7, "{notes:?}");
+        assert_eq!(notes.len(), 8, "{notes:?}");
+        assert_eq!(notes[0], FOREIGN_KEY_UNSEEN);
     }
 
     #[test]

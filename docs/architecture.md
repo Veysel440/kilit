@@ -192,12 +192,14 @@ flowchart TD
 ```
 
 The checker places each change in a *case*: a kind of change, together with
-the lab scenarios that measured it. There are 31 cases for InnoDB, and 46 more
+the lab scenarios that measured it. There are 35 cases for InnoDB, and 46 more
 for MyISAM, row formats and `old_alter_table`. For a `MODIFY` or `CHANGE`,
 `modify.rs` compares the new definition with the column's current one,
 character set and collation included, and the one thing that changes decides
 the case. The scenarios of a case must agree on each server, or kilit refuses
-to answer.
+to answer. For a new or longer column, `row.rs` counts the bytes of the row a
+known table would have, against MySQL's limit of 65,535 bytes and InnoDB's
+limit for a record in a page.
 
 A case can have *exceptions*: the same change measured in a situation where the
 answer differs. Each exception has *conditions*. When the situation shows in

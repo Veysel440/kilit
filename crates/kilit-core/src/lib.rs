@@ -33,6 +33,7 @@ mod modify;
 mod parse;
 mod pretend;
 mod results;
+mod row;
 mod schema;
 mod split;
 mod statement;

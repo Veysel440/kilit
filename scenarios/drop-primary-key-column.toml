@@ -1,0 +1,2 @@
+title = "Drop the primary key column"
+operation = "DROP COLUMN id"

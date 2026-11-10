@@ -2911,8 +2911,10 @@ no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE
   alter table `users` add `nickname` varchar(255) null
     INSTANT, no rebuild, writes continue
     measured as add-column (7 lab scenarios)
+    - if the record grows past what InnoDB keeps in a page (8126 bytes): MySQL fails with error 1118 (4157 with ALGORITHM=INSTANT), and 8.0.46 and 8.4.13 count the record differently, so kilit cannot tell (it counts the record when it knows every column of the table)
     - if the table has a FULLTEXT index: COPY, copies every row, writes wait (add-column-with-fulltext)
     - if the table has had 64 instant column changes since it was last rebuilt: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)
+    - if the row grows past the 65,535 bytes MySQL allows: fails with error 1118 (add-column-over-row-size-limit)
   read (not checked): select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as ...
 
 2026_03_01_000002_reads_two_users_table
@@ -2923,8 +2925,10 @@ no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE
   alter table `users` add `phone` varchar(255) null
     INSTANT, no rebuild, writes continue
     measured as add-column (7 lab scenarios)
+    - if the record grows past what InnoDB keeps in a page (8126 bytes): MySQL fails with error 1118 (4157 with ALGORITHM=INSTANT), and 8.0.46 and 8.4.13 count the record differently, so kilit cannot tell (it counts the record when it knows every column of the table)
     - if the table has a FULLTEXT index: COPY, copies every row, writes wait (add-column-with-fulltext)
     - if the table has had 64 instant column changes since it was last rebuilt: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)
+    - if the row grows past the 65,535 bytes MySQL allows: fails with error 1118 (add-column-over-row-size-limit)
 
 metadata lock on users:
   Every ALTER TABLE, DROP TABLE, RENAME TABLE and TRUNCATE TABLE first waits
@@ -4608,7 +4612,7 @@ fn the_json_has_a_format_version_first_and_the_counted_list_just_before_the_exit
         let output = on_example_tables(&all, input);
         let text = stdout(&output);
         assert!(
-            text.starts_with("{\n  \"format_version\": \"1.0\",\n"),
+            text.starts_with("{\n  \"format_version\": \"1.1\",\n"),
             "{text}"
         );
         let fail_on = text.find("\n  \"fail_on\": [").expect(&text);
@@ -4619,7 +4623,7 @@ fn the_json_has_a_format_version_first_and_the_counted_list_just_before_the_exit
             "something sits between fail_on and exit_code: {text}"
         );
         assert!(text.trim_end().ends_with("}"), "{text}");
-        assert_eq!(json_of(&output)["format_version"], "1.0");
+        assert_eq!(json_of(&output)["format_version"], "1.1");
     }
 }
 
@@ -6552,7 +6556,7 @@ fn an_alter_table_still_names_its_table_and_the_warning_has_the_same_keys_as_bef
     let mut keys: Vec<&str> = warning.keys().map(String::as_str).collect();
     keys.sort_unstable();
     assert_eq!(keys, ["id", "message", "tables"]);
-    assert_eq!(json["format_version"], "1.0");
+    assert_eq!(json["format_version"], "1.1");
 }
 
 #[test]
@@ -6582,7 +6586,7 @@ fn drop_rename_and_truncate_keep_their_impacts_and_exit_statuses_with_and_withou
         let (_, json, code) = lock_run(&[], sql);
         assert_eq!(impacts_of(&json), [impact], "{sql}");
         assert_eq!(code, Some(0), "{sql}");
-        assert_eq!(json["format_version"], "1.0", "{sql}");
+        assert_eq!(json["format_version"], "1.1", "{sql}");
         assert_eq!(json["summary"]["fails"], 0, "{sql}");
         assert_eq!(json["summary"]["writes_wait"], 0, "{sql}");
 
@@ -9360,4 +9364,1390 @@ fn laravel_10_0_stopping_at_the_production_confirmation_is_one_error_annotation_
     assert_eq!(json["unreadable"], serde_json::json!([]));
     assert_eq!(json["summary"]["statements"], 0);
     assert_eq!(output.status.code(), Some(2));
+}
+
+// ---------------------------------------------------------------------------
+// Step B1b: literal defaults on text, json and blob columns (error 1101),
+// dropping the primary key column, answers on tables missing from the
+// --schema file, the row size limit (error 1118), dropping what a table does
+// not have (error 1091), and the text a Laravel migration prints itself.
+//
+// The Laravel outputs are real runs of `php artisan migrate --pretend`, bytes
+// as printed: Laravel 12.71.0 (the same bytes in 13.40.0 and, for the forms
+// below, in 10 and 11) and the short form of Laravel 13.40.0.
+
+/// Laravel 12.71.0 (the same bytes in 13.40.0): unit3d's real migration, which prints nine lines of its own.
+const B1B_UNIT3D_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2024_06_06_042258_create_private_message_conversations .....................  \n",
+    "\n",
+    "\tThis migration is long and will take approximately 30-60 seconds per 100 thousand stored private messages.\n",
+    "\tCreating new tables and columns...\n",
+    "\tParsing previous private message structure...\n",
+    "\tInserting all conversations into new conversations table...\n",
+    "\tAdding conversation_id to all private messages...\n",
+    "\tInserting all conversation participants...\n",
+    "\tUpdating all conversation timestamps...\n",
+    "\tUpdating all participant timestamps...\n",
+    "\tDropping unused columns from private messages and adding constraints...\n",
+    "  ⇂ create table `conversations` (`id` int unsigned not null auto_increment primary key, `subject` varchar(255) not null, `created_at` timestamp null, `updated_at` timestamp null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'  \n",
+    "  ⇂ alter table `conversations` add index `conversations_updated_at_index`(`updated_at`)  \n",
+    "  ⇂ alter table `conversations` add index `conversations_created_at_index`(`created_at`)  \n",
+    "  ⇂ create table `participants` (`id` int unsigned not null auto_increment primary key, `conversation_id` int unsigned not null, `user_id` int unsigned not null, `read` tinyint(1) not null default '0', `deleted_at` timestamp null, `created_at` timestamp null, `updated_at` timestamp null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'  \n",
+    "  ⇂ alter table `participants` add unique `participants_user_id_conversation_id_unique`(`user_id`, `conversation_id`)  \n",
+    "  ⇂ alter table `participants` add index `participants_user_id_read_deleted_at_index`(`user_id`, `read`, `deleted_at`)  \n",
+    "  ⇂ alter table `participants` add constraint `participants_conversation_id_foreign` foreign key (`conversation_id`) references `conversations` (`id`) on delete cascade on update cascade  \n",
+    "  ⇂ alter table `participants` add constraint `participants_user_id_foreign` foreign key (`user_id`) references `users` (`id`) on delete cascade on update cascade  \n",
+    "  ⇂ alter table `participants` add index `participants_conversation_id_index`(`conversation_id`)  \n",
+    "  ⇂ alter table `private_messages` add `conversation_id` int unsigned null after `id`  \n",
+    "  ⇂ select `id`, `sender_id`, `receiver_id`, `subject`, `read`, `related_to`, `created_at`, `updated_at` from `private_messages` where `id` is not null order by `id` desc limit 1000  \n",
+    "  ⇂ update `conversations` inner join (select `conversation_id`, MIN(created_at) AS min_created_at from `private_messages` group by `conversation_id`) as `oldest_messages` on `oldest_messages`.`conversation_id` = `conversations`.`id` set `conversations`.`created_at` = oldest_messages.min_created_at  \n",
+    "  ⇂ update `participants` inner join `conversations` on `conversations`.`id` = `participants`.`conversation_id` set `participants`.`created_at` = conversations.created_at  \n",
+    "  ⇂ alter table `private_messages` modify `conversation_id` int unsigned not null  \n",
+    "  ⇂ alter table `private_messages` drop foreign key `private_messages_receiver_id_foreign`  \n",
+    "  ⇂ alter table `private_messages` drop `receiver_id`, drop `subject`, drop `related_to`, drop `read`  \n",
+    "  ⇂ alter table `private_messages` add constraint `private_messages_conversation_id_foreign` foreign key (`conversation_id`) references `conversations` (`id`) on delete cascade on update cascade  \n",
+    "\n",
+);
+
+/// Laravel 13.40.0, the short form: unit3d's real migration.
+const B1B_UNIT3D_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2024_06_06_042258_create_private_message_conversations .. \n",
+    "\n",
+    "\tThis migration is long and will take approximately 30-60 seconds per 100 thousand stored private messages.\n",
+    "\tCreating new tables and columns...\n",
+    "\tParsing previous private message structure...\n",
+    "\tInserting all conversations into new conversations table...\n",
+    "\tAdding conversation_id to all private messages...\n",
+    "\tInserting all conversation participants...\n",
+    "\tUpdating all conversation timestamps...\n",
+    "\tUpdating all participant timestamps...\n",
+    "\tDropping unused columns from private messages and adding constraints...\n",
+    " ⇂ create table `conversations` (`id` int unsigned not null auto_increment primary key, `subject` varchar(255) not null, `created_at` timestamp null, `updated_at` timestamp null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' \n",
+    " ⇂ alter table `conversations` add index `conversations_updated_at_index`(`updated_at`) \n",
+    " ⇂ alter table `conversations` add index `conversations_created_at_index`(`created_at`) \n",
+    " ⇂ create table `participants` (`id` int unsigned not null auto_increment primary key, `conversation_id` int unsigned not null, `user_id` int unsigned not null, `read` tinyint(1) not null default '0', `deleted_at` timestamp null, `created_at` timestamp null, `updated_at` timestamp null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' \n",
+    " ⇂ alter table `participants` add unique `participants_user_id_conversation_id_unique`(`user_id`, `conversation_id`) \n",
+    " ⇂ alter table `participants` add index `participants_user_id_read_deleted_at_index`(`user_id`, `read`, `deleted_at`) \n",
+    " ⇂ alter table `participants` add constraint `participants_conversation_id_foreign` foreign key (`conversation_id`) references `conversations` (`id`) on delete cascade on update cascade \n",
+    " ⇂ alter table `participants` add constraint `participants_user_id_foreign` foreign key (`user_id`) references `users` (`id`) on delete cascade on update cascade \n",
+    " ⇂ alter table `participants` add index `participants_conversation_id_index`(`conversation_id`) \n",
+    " ⇂ alter table `private_messages` add `conversation_id` int unsigned null after `id` \n",
+    " ⇂ select `id`, `sender_id`, `receiver_id`, `subject`, `read`, `related_to`, `created_at`, `updated_at` from `private_messages` where `id` is not null order by `id` desc limit 1000 \n",
+    " ⇂ update `conversations` inner join (select `conversation_id`, MIN(created_at) AS min_created_at from `private_messages` group by `conversation_id`) as `oldest_messages` on `oldest_messages`.`conversation_id` = `conversations`.`id` set `conversations`.`created_at` = oldest_messages.min_created_at \n",
+    " ⇂ update `participants` inner join `conversations` on `conversations`.`id` = `participants`.`conversation_id` set `participants`.`created_at` = conversations.created_at \n",
+    " ⇂ alter table `private_messages` modify `conversation_id` int unsigned not null \n",
+    " ⇂ alter table `private_messages` drop foreign key `private_messages_receiver_id_foreign` \n",
+    " ⇂ alter table `private_messages` drop `receiver_id`, drop `subject`, drop `related_to`, drop `read` \n",
+    " ⇂ alter table `private_messages` add constraint `private_messages_conversation_id_foreign` foreign key (`conversation_id`) references `conversations` (`id`) on delete cascade on update cascade \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 10 to 13): echo between two Schema::table calls.
+const B1B_ECHO_BETWEEN_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_02_000002_e_echo_between ...........................................  \n",
+    "plain text\n",
+    "  ⇂ alter table `orders` add `s_a` int unsigned null  \n",
+    "  ⇂ alter table `orders` add `s_b` int unsigned null  \n",
+    "\n",
+);
+
+/// Laravel 13.40.0, the short form: echo between two Schema::table calls.
+const B1B_ECHO_BETWEEN_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2025_06_02_000002_e_echo_between .. \n",
+    "plain text\n",
+    " ⇂ alter table `orders` add `s_a` int unsigned null \n",
+    " ⇂ alter table `orders` add `s_b` int unsigned null \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 10 to 13): a migration that only prints text.
+const B1B_ECHO_ONLY_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_02_000005_e_echo_only ..............................................  \n",
+    "plain text only\n",
+    "\n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 10 to 13): text printed without a line break runs into the first statement line.
+const B1B_ECHO_NONEWLINE_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_02_000004_e_echo_nonewline .........................................  \n",
+    "no newline  ⇂ alter table `orders` add `s_a` int unsigned null  \n",
+    "  ⇂ alter table `orders` add `s_b` int unsigned null  \n",
+    "\n",
+);
+
+/// Laravel 13.40.0, the short form: text printed without a line break.
+const B1B_ECHO_NONEWLINE_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2025_06_02_000004_e_echo_nonewline .. \n",
+    "no newline ⇂ alter table `orders` add `s_a` int unsigned null \n",
+    " ⇂ alter table `orders` add `s_b` int unsigned null \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 10 to 13): dump() output.
+const B1B_DUMP_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_02_000006_e_dump ...................................................  \n",
+    "\"x\" // database/migrations_b1b/2025_06_02_000006_e_dump.php:14\n",
+    "string(1) \"y\"\n",
+    "  ⇂ alter table `orders` add `s_a` int unsigned null  \n",
+    "  ⇂ alter table `orders` add `s_b` int unsigned null  \n",
+    "\n",
+);
+
+/// Laravel 13.40.0, the short form: dump() output.
+const B1B_DUMP_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2025_06_02_000006_e_dump .. \n",
+    "\"x\" // database/migrations_b1b/2025_06_02_000006_e_dump.php:14\n",
+    "string(1) \"y\"\n",
+    " ⇂ alter table `orders` add `s_a` int unsigned null \n",
+    " ⇂ alter table `orders` add `s_b` int unsigned null \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 10 to 13): a migration prints a line that starts with ALTER TABLE.
+const B1B_SQL_WORD_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_02_000008_e_sql_word ...............................................  \n",
+    "ALTER TABLE x ADD y INT;\n",
+    "  ⇂ alter table `orders` add `s_a` int unsigned null  \n",
+    "  ⇂ alter table `orders` add `s_b` int unsigned null  \n",
+    "\n",
+);
+
+/// Laravel 13.40.0, the short form: a printed line that starts with ALTER TABLE.
+const B1B_SQL_WORD_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2025_06_02_000008_e_sql_word .. \n",
+    "ALTER TABLE x ADD y INT;\n",
+    " ⇂ alter table `orders` add `s_a` int unsigned null \n",
+    " ⇂ alter table `orders` add `s_b` int unsigned null \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 10 to 13): a printed line that starts with create table, and a statement named fake.
+const B1B_SQL_WORD_BEFORE_AND_AFTER_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_02_000009_e_sql_word_before_and_after ..............................  \n",
+    "create table z (id int)\n",
+    "  ⇂ alter table `orders` add `fake` int\n",
+    "  ⇂ alter table `orders` add `s_a` int unsigned null  \n",
+    "\n",
+);
+
+/// Laravel 13.40.0, the short form: text, json and blob columns with a default.
+const B1B_TABLE_DEFAULTS_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2025_06_01_000001_d_table_defaults .. \n",
+    " ⇂ alter table `orders` add `a` text not null default '' \n",
+    " ⇂ alter table `orders` add `b` text null default 'x' \n",
+    " ⇂ alter table `orders` add `c` json null default '[]' \n",
+    " ⇂ alter table `orders` add `d` json not null default ('[]') \n",
+    " ⇂ alter table `orders` modify `note` text not null default '' \n",
+    " ⇂ alter table `orders` add `e` blob not null default '' \n",
+    " ⇂ alter table `orders` add `f` longtext not null default '' \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 11 and 13.40.0): text, json and blob columns with a default.
+const B1B_TABLE_DEFAULTS_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_01_000001_d_table_defaults .........................................  \n",
+    "  ⇂ alter table `orders` add `a` text not null default ''  \n",
+    "  ⇂ alter table `orders` add `b` text null default 'x'  \n",
+    "  ⇂ alter table `orders` add `c` json null default '[]'  \n",
+    "  ⇂ alter table `orders` add `d` json not null default ('[]')  \n",
+    "  ⇂ alter table `orders` modify `note` text not null default ''  \n",
+    "  ⇂ alter table `orders` add `e` blob not null default ''  \n",
+    "  ⇂ alter table `orders` add `f` longtext not null default ''  \n",
+    "\n",
+);
+
+/// A schema file with `users` and `orders` (the tests' usual tables).
+fn b1b_dump() -> PathBuf {
+    write_schema_with_engine("b1b_dump.sql", "InnoDB")
+}
+
+/// kilit's JSON for `input` with `args` after `check`, and the exit status.
+fn b1b_json(args: &[&str], input: &str) -> (serde_json::Value, Option<i32>) {
+    let mut all = vec!["check", "--format", "json"];
+    all.extend(args);
+    let output = kilit(&all, input);
+    (json_of(&output), output.status.code())
+}
+
+/// The same against the schema file `dump`.
+fn b1b_json_against(dump: &Path, extra: &[&str], input: &str) -> (serde_json::Value, Option<i32>) {
+    let mut args = vec!["--schema", dump.to_str().unwrap()];
+    args.extend(extra);
+    b1b_json(&args, input)
+}
+
+/// Statement number `n` of the first source.
+fn b1b_statement(json: &serde_json::Value, n: usize) -> serde_json::Value {
+    statements_of(json, 0)[n].clone()
+}
+
+#[test]
+fn a_text_column_with_a_quoted_default_fails_with_1101_in_json_and_exits_with_1() {
+    // $table->text('a')->default('');
+    let sql = "alter table `orders` add `a` text not null default '';";
+    let dump = b1b_dump();
+    for strict in [&[][..], &["--strict"][..]] {
+        let (json, code) = b1b_json_against(&dump, strict, sql);
+        let statement = b1b_statement(&json, 0);
+        assert_eq!(statement["impact"], "fails", "{strict:?}");
+        assert_eq!(statement["error"], 1101, "{strict:?}");
+        assert_eq!(statement["case"], "add-column-blob-literal-default");
+        assert_eq!(json["summary"]["fails"], 1);
+        assert_eq!(json["exit_code"], 1);
+        assert_eq!(code, Some(1), "{strict:?}");
+        // Without the table too: the statement decides.
+        let (json, code) = b1b_json(strict, sql);
+        assert_eq!(b1b_statement(&json, 0)["error"], 1101, "{strict:?}");
+        assert_eq!(code, Some(1), "{strict:?}");
+    }
+}
+
+#[test]
+fn laravel_s_text_json_and_blob_defaults_fail_and_exit_with_1_in_both_forms() {
+    // The seven statements of one migration, as Laravel prints them.
+    for (form, input) in [
+        ("long form", B1B_TABLE_DEFAULTS_LONG),
+        ("short form", B1B_TABLE_DEFAULTS_SHORT),
+    ] {
+        let (json, code) = b1b_json(&[], input);
+        assert_eq!(
+            impacts_of(&json),
+            [
+                "fails",
+                "fails",
+                "fails",
+                "writes_wait",
+                "fails",
+                "fails",
+                "fails"
+            ],
+            "{form}"
+        );
+        assert_eq!(json["summary"]["fails"], 6, "{form}");
+        assert_eq!(code, Some(1), "{form}");
+        let text = stdout(&kilit(&["check"], input));
+        assert!(text.contains("fails with error 1101"), "{form}: {text}");
+    }
+}
+
+#[test]
+fn an_empty_sql_mode_in_one_file_does_not_carry_to_the_next_file() {
+    // Each input file is a session of its own: the strict mode is back in the
+    // second.
+    let dir = github_scratch("b1b-sql-mode");
+    let first = github_write(
+        &dir,
+        "first.sql",
+        "SET sql_mode = '';\nalter table orders add a text not null default '';\n",
+    );
+    let second = github_write(
+        &dir,
+        "second.sql",
+        "alter table orders add b text not null default '';\n",
+    );
+    let (json, code) = b1b_json(&[first.to_str().unwrap(), second.to_str().unwrap()], "");
+    let first_statements = statements_of(&json, 0);
+    assert_eq!(first_statements[1]["impact"], "writes_continue");
+    assert_eq!(first_statements[1]["algorithm"], "INSTANT");
+    let second_statements = statements_of(&json, 1);
+    assert_eq!(second_statements[0]["impact"], "fails");
+    assert_eq!(second_statements[0]["error"], 1101);
+    assert_eq!(code, Some(1));
+}
+
+#[test]
+fn dropping_the_primary_key_column_copies_the_table_and_exits_with_1() {
+    // $table->dropColumn('id');
+    let dump = b1b_dump();
+    let (json, code) = b1b_json_against(&dump, &[], "alter table `orders` drop `id`;");
+    let statement = b1b_statement(&json, 0);
+    assert_eq!(statement["impact"], "writes_wait");
+    assert_eq!(statement["algorithm"], "COPY");
+    assert_eq!(statement["case"], "drop-column");
+    assert!(
+        statement["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == "drop-primary-key-column"),
+        "{statement}"
+    );
+    assert_eq!(code, Some(1));
+    let (_, strict) = b1b_json_against(&dump, &["--strict"], "alter table `orders` drop `id`;");
+    assert_eq!(strict, Some(1));
+    // ALGORITHM=INSTANT is refused with 1846.
+    let (json, code) = b1b_json_against(
+        &dump,
+        &[],
+        "alter table orders drop column id, algorithm=instant;",
+    );
+    let statement = b1b_statement(&json, 0);
+    assert_eq!(statement["impact"], "fails");
+    assert_eq!(statement["error"], 1846);
+    assert_eq!(code, Some(1));
+}
+
+#[test]
+fn dropping_a_column_without_the_table_is_instant_with_a_note_and_exits_with_0() {
+    let (json, code) = b1b_json(&[], "alter table `orders` drop `id`;");
+    let statement = b1b_statement(&json, 0);
+    assert_eq!(statement["impact"], "writes_continue");
+    assert!(
+        notes_of(&statement).iter().any(|note| note
+            .starts_with("if the column is the primary key: ")
+            && note.contains("drop-primary-key-column")),
+        "{statement}"
+    );
+    assert!(
+        notes_of(&statement).iter().any(|note| note
+            .starts_with("if the column is in a foreign key or a unique index with other columns")),
+        "{statement}"
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        b1b_json(&["--strict"], "alter table `orders` drop `id`;").1,
+        Some(0)
+    );
+}
+
+/// A schema file where `orders` has 62 VARCHAR(255) columns more than the
+/// usual: 64,615 bytes of the 65,535 a row may have in utf8mb4.
+fn write_schema_with_wide_orders() -> PathBuf {
+    let file = Path::new(env!("CARGO_TARGET_TMPDIR")).join("b1b_wide.sql");
+    let columns: String = (1..=62)
+        .map(|n| format!("  `s{n}` varchar(255) DEFAULT NULL,\n"))
+        .collect();
+    std::fs::write(
+        &file,
+        format!(
+            "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  `email` varchar(255) DEFAULT NULL,
+  `note` varchar(50) DEFAULT NULL,
+{columns}  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+"
+        ),
+    )
+    .unwrap();
+    file
+}
+
+#[test]
+fn a_column_that_takes_a_row_past_65535_bytes_fails_with_1118_and_exits_with_1() {
+    // $table->string('s63', 230)->nullable();
+    let dump = write_schema_with_wide_orders();
+    let (json, code) = b1b_json_against(
+        &dump,
+        &[],
+        "alter table `orders` add `s63` varchar(230) null;",
+    );
+    let statement = b1b_statement(&json, 0);
+    assert_eq!(statement["impact"], "fails");
+    assert_eq!(statement["error"], 1118);
+    assert_eq!(code, Some(1));
+    // One character fewer fits exactly.
+    let (json, code) = b1b_json_against(
+        &dump,
+        &[],
+        "alter table `orders` add `s63` varchar(229) null;",
+    );
+    assert_eq!(b1b_statement(&json, 0)["impact"], "writes_continue");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn a_new_column_without_the_table_carries_the_row_size_note() {
+    let (json, code) = b1b_json(
+        &[],
+        "alter table `orders` add `link_color` varchar(255) null;",
+    );
+    let statement = b1b_statement(&json, 0);
+    assert_eq!(statement["impact"], "writes_continue");
+    assert!(
+        notes_of(&statement)
+            .iter()
+            .any(|note| note.starts_with("if the row grows past the 65,535 bytes MySQL allows")),
+        "{statement}"
+    );
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn dropping_what_a_known_table_does_not_have_is_unknown_and_exits_with_0_or_3() {
+    // Not counted by default, counted by --strict (exit 3).
+    let dump = b1b_dump();
+    for (sql, scenario) in [
+        ("alter table `orders` drop `nosuch`;", "drop-column-missing"),
+        (
+            "alter table `orders` drop index `nosuch`;",
+            "drop-index-missing",
+        ),
+        (
+            "alter table `orders` drop foreign key `nosuch`;",
+            "drop-foreign-key-missing",
+        ),
+    ] {
+        let (json, code) = b1b_json_against(&dump, &[], sql);
+        let statement = b1b_statement(&json, 0);
+        assert_eq!(statement["impact"], "unknown", "{sql}");
+        let reason = statement["reason"].as_str().unwrap();
+        assert!(reason.contains("1091"), "{sql}: {reason}");
+        assert!(reason.contains(scenario), "{sql}: {reason}");
+        assert_eq!(code, Some(0), "{sql}");
+        let (_, strict) = b1b_json_against(&dump, &["--strict"], sql);
+        assert_eq!(strict, Some(3), "{sql}");
+    }
+}
+
+#[test]
+fn the_table_stays_known_after_a_drop_of_what_it_does_not_have() {
+    // user_id is the column of a foreign key: dropping it fails with 1828.
+    // 0.1.0 lost the table at the first statement and called the second
+    // INSTANT.
+    let file = Path::new(env!("CARGO_TARGET_TMPDIR")).join("b1b_fk_dump.sql");
+    std::fs::write(
+        &file,
+        "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `orders_user_id_foreign` (`user_id`),
+  CONSTRAINT `orders_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+",
+    )
+    .unwrap();
+    let (json, code) = b1b_json_against(
+        &file,
+        &[],
+        "alter table `orders` drop `nosuch`;
+         alter table `orders` drop `user_id`;",
+    );
+    assert_eq!(impacts_of(&json), ["unknown", "fails"]);
+    assert_eq!(b1b_statement(&json, 1)["error"], 1828);
+    assert_eq!(code, Some(1));
+}
+
+#[test]
+fn a_statement_on_a_table_missing_from_the_dump_is_unknown_and_says_why() {
+    let dump = b1b_dump();
+    let sql = "alter table `coupons` add `code` varchar(20) null;";
+    let (json, code) = b1b_json_against(&dump, &[], sql);
+    let statement = b1b_statement(&json, 0);
+    assert_eq!(statement["impact"], "unknown");
+    let reason = statement["reason"].as_str().unwrap();
+    assert!(reason.contains("the dump may be out of date"), "{reason}");
+    assert!(reason.contains("does not exist"), "{reason}");
+    assert_eq!(code, Some(0));
+    assert_eq!(b1b_json_against(&dump, &["--strict"], sql).1, Some(3));
+    let text = stdout(&kilit(&["check", "--schema", dump.to_str().unwrap()], sql));
+    assert!(text.contains("the dump may be out of date"), "{text}");
+}
+
+#[test]
+fn a_statement_on_a_table_missing_from_the_dump_stays_unknown_for_the_statements_after_it() {
+    let dump = b1b_dump();
+    let (json, _) = b1b_json_against(
+        &dump,
+        &[],
+        "alter table `coupons` add `a` int null;
+         alter table `coupons` add `b` int null;
+         alter table `orders` add `c` int null;",
+    );
+    assert_eq!(impacts_of(&json), ["unknown", "unknown", "writes_continue"]);
+}
+
+#[test]
+fn without_a_schema_file_a_statement_on_any_table_is_answered_as_before() {
+    let (json, code) = b1b_json(&[], "alter table `coupons` add `code` varchar(20) null;");
+    let statement = b1b_statement(&json, 0);
+    assert_eq!(statement["impact"], "writes_continue");
+    assert_eq!(statement["algorithm"], "INSTANT");
+    assert!(statement.get("reason").is_none(), "{statement}");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn a_table_created_earlier_in_the_input_is_answered_as_before_next_to_a_schema_file() {
+    let dump = b1b_dump();
+    let (json, code) = b1b_json_against(
+        &dump,
+        &[],
+        "create table `coupons` (`id` bigint unsigned not null auto_increment primary key);
+         alter table `coupons` add `code` varchar(20) null;",
+    );
+    assert_eq!(impacts_of(&json), ["not_checked", "new_table"]);
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn a_table_created_in_an_earlier_file_is_answered_as_before_next_to_a_schema_file() {
+    let dir = github_scratch("b1b-created-in-first-file");
+    let first = github_write(
+        &dir,
+        "first.sql",
+        "create table coupons (id bigint unsigned not null auto_increment primary key);\n",
+    );
+    let second = github_write(
+        &dir,
+        "second.sql",
+        "alter table coupons add code varchar(20) null;\n",
+    );
+    let dump = b1b_dump();
+    let (json, code) = b1b_json(
+        &[
+            "--schema",
+            dump.to_str().unwrap(),
+            first.to_str().unwrap(),
+            second.to_str().unwrap(),
+        ],
+        "",
+    );
+    assert_eq!(b1b_statement(&json, 0)["impact"], "not_checked");
+    assert_eq!(statements_of(&json, 1)[0]["impact"], "new_table");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn a_laravel_migration_on_a_table_missing_from_the_dump_is_unknown() {
+    // Schema::table('coupons', ...) where the dump does not have coupons.
+    let dump = b1b_dump();
+    let input = pretend_long(&[(
+        "2026_11_02_090100_add_code_to_coupons_table",
+        &["alter table `coupons` add `code` varchar(20) null"],
+    )]);
+    let (json, code) = b1b_json_against(&dump, &[], &input);
+    assert_eq!(impacts_of(&json), ["unknown"]);
+    assert_eq!(code, Some(0));
+    let input = pretend_short(&[(
+        "2026_11_02_090100_add_code_to_coupons_table",
+        &["alter table `coupons` add `code` varchar(20) null"],
+    )]);
+    let (json, _) = b1b_json_against(&dump, &[], &input);
+    assert_eq!(impacts_of(&json), ["unknown"]);
+}
+
+#[test]
+fn a_foreign_key_to_a_parent_missing_from_the_dump_is_unknown_unless_the_checks_are_off() {
+    // $table->foreign('user_id')->references('id')->on('coupons');
+    let dump = b1b_dump();
+    let add = "alter table `orders` add constraint `orders_user_id_foreign` \
+               foreign key (`user_id`) references `coupons` (`id`);";
+    let (json, code) = b1b_json_against(&dump, &[], add);
+    let statement = b1b_statement(&json, 0);
+    assert_eq!(statement["impact"], "unknown");
+    assert!(
+        statement["reason"].as_str().unwrap().contains("coupons"),
+        "{statement}"
+    );
+    assert_eq!(code, Some(0));
+    // The checks off: both kinds of parent give the same answer.
+    let (json, _) = b1b_json_against(&dump, &[], &format!("SET foreign_key_checks = 0;\n{add}"));
+    let statement = b1b_statement(&json, 1);
+    assert_eq!(statement["impact"], "writes_continue");
+    assert_eq!(statement["algorithm"], "INPLACE");
+    // The parent created earlier in the input: the key copies the table, as
+    // it did.
+    let (json, _) = b1b_json_against(
+        &dump,
+        &[],
+        &format!(
+            "create table `coupons` (`id` bigint unsigned not null auto_increment primary key);\n{add}"
+        ),
+    );
+    let statement = b1b_statement(&json, 1);
+    assert_eq!(statement["impact"], "writes_wait");
+    assert_eq!(statement["algorithm"], "COPY");
+}
+
+/// The migration's name in unit3d's real output.
+const B1B_UNIT3D_NAME: &str = "2024_06_06_042258_create_private_message_conversations";
+
+/// The nine lines unit3d's migration prints, without the tab and in order.
+const B1B_UNIT3D_LINES: [&str; 9] = [
+    "This migration is long and will take approximately 30-60 seconds per 100 thousand stored private messages.",
+    "Creating new tables and columns...",
+    "Parsing previous private message structure...",
+    "Inserting all conversations into new conversations table...",
+    "Adding conversation_id to all private messages...",
+    "Inserting all conversation participants...",
+    "Updating all conversation timestamps...",
+    "Updating all participant timestamps...",
+    "Dropping unused columns from private messages and adding constraints...",
+];
+
+/// The warning of the JSON with `id`, if there is one.
+fn b1b_warning(json: &serde_json::Value, id: &str) -> Option<serde_json::Value> {
+    json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|warning| warning["id"] == id)
+        .cloned()
+}
+
+#[test]
+fn what_unit3d_s_migration_prints_is_a_note_in_json_and_text_and_changes_no_exit_status() {
+    for (form, input) in [
+        ("long form", B1B_UNIT3D_LONG),
+        ("short form", B1B_UNIT3D_SHORT),
+    ] {
+        let (json, code) = b1b_json(&[], input);
+        assert_eq!(json["format_version"], "1.1", "{form}");
+        assert_eq!(json["unreadable"], serde_json::json!([]), "{form}");
+        let warning = b1b_warning(&json, "migration-output")
+            .unwrap_or_else(|| panic!("{form}: no migration-output warning in {json}"));
+        assert_eq!(warning["tables"], serde_json::json!([]), "{form}");
+        assert_eq!(warning["migration"], B1B_UNIT3D_NAME, "{form}");
+        assert!(
+            warning["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "{form}"
+        );
+        let lines = warning["lines"].as_array().unwrap();
+        assert_eq!(lines.len(), 9, "{form}: {warning}");
+        for (i, line) in lines.iter().enumerate() {
+            assert_eq!(line["line"], 6 + i, "{form}");
+            assert_eq!(
+                line["text"].as_str().unwrap().trim(),
+                B1B_UNIT3D_LINES[i],
+                "{form}"
+            );
+        }
+        assert_ne!(code, Some(2), "{form}");
+        assert_eq!(json["exit_code"], code.unwrap(), "{form}");
+
+        // The text report shows them.
+        let text = stdout(&kilit(&["check"], input));
+        for line in B1B_UNIT3D_LINES {
+            assert!(text.contains(line), "{form}: {line} is missing from {text}");
+        }
+
+        // The same migration without its printed lines: the same exit status
+        // and the same counts.
+        let without: String = input
+            .lines()
+            .filter(|line| !line.starts_with('\t'))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let (plain, plain_code) = b1b_json(&[], &without);
+        assert_eq!(plain_code, code, "{form}");
+        assert_eq!(plain["summary"], json["summary"], "{form}");
+        assert!(b1b_warning(&plain, "migration-output").is_none(), "{form}");
+    }
+}
+
+#[test]
+fn text_a_migration_prints_is_a_note_with_its_lines_and_the_exit_status_is_0() {
+    // echo "plain text" between two Schema::table calls.
+    for (form, input) in [
+        ("long form", B1B_ECHO_BETWEEN_LONG),
+        ("short form", B1B_ECHO_BETWEEN_SHORT),
+    ] {
+        for strict in [&[][..], &["--strict"][..]] {
+            let (json, code) = b1b_json(strict, input);
+            assert_eq!(json["unreadable"], serde_json::json!([]), "{form}");
+            let warning = b1b_warning(&json, "migration-output").expect(form);
+            assert_eq!(
+                warning["migration"], "2025_06_02_000002_e_echo_between",
+                "{form}"
+            );
+            assert_eq!(warning["lines"].as_array().unwrap().len(), 1, "{form}");
+            assert_eq!(warning["lines"][0]["line"], 5, "{form}");
+            assert_eq!(
+                warning["lines"][0]["text"].as_str().unwrap().trim(),
+                "plain text"
+            );
+            assert_eq!(
+                impacts_of(&json),
+                ["writes_continue", "writes_continue"],
+                "{form}"
+            );
+            assert_eq!(code, Some(0), "{form} {strict:?}");
+        }
+    }
+}
+
+#[test]
+fn dump_output_in_a_migration_is_a_note_with_two_lines() {
+    for (form, input) in [("long form", B1B_DUMP_LONG), ("short form", B1B_DUMP_SHORT)] {
+        let (json, code) = b1b_json(&[], input);
+        assert_eq!(json["unreadable"], serde_json::json!([]), "{form}");
+        let warning = b1b_warning(&json, "migration-output").expect(form);
+        assert_eq!(warning["lines"].as_array().unwrap().len(), 2, "{form}");
+        assert_eq!(code, Some(0), "{form}");
+    }
+}
+
+#[test]
+fn text_from_a_migration_that_has_no_statement_is_a_note_when_another_migration_follows() {
+    // The migration only echoes; Laravel went on to the next one.
+    let input = "
+   INFO  Running migrations.
+
+  2025_06_02_000005_e_echo_only ..............................................
+plain text only
+
+  2025_06_02_000011_e_unit3d_form ............................................
+  \u{21c2} alter table `orders` add `s_a` int unsigned null
+";
+    let (json, code) = b1b_json(&[], input);
+    assert_eq!(json["unreadable"], serde_json::json!([]));
+    let warning = b1b_warning(&json, "migration-output").expect("a migration-output warning");
+    assert_eq!(warning["migration"], "2025_06_02_000005_e_echo_only");
+    assert_eq!(
+        warning["lines"][0]["text"].as_str().unwrap().trim(),
+        "plain text only"
+    );
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn text_at_the_very_end_of_the_output_is_an_unreadable_line_and_exits_with_2() {
+    // An error screen kilit does not recognize ends the output too, so text
+    // there is never taken for a migration's.
+    let (json, code) = b1b_json(&[], B1B_ECHO_ONLY_LONG);
+    let unreadable = json["unreadable"].as_array().unwrap();
+    assert_eq!(unreadable.len(), 1, "{json}");
+    assert_eq!(unreadable[0]["line"], 5);
+    assert_eq!(
+        unreadable[0]["text"].as_str().unwrap().trim(),
+        "plain text only"
+    );
+    assert!(b1b_warning(&json, "migration-output").is_none());
+    assert_eq!(code, Some(2));
+}
+
+#[test]
+fn a_printed_line_that_starts_with_an_sql_word_is_an_unreadable_line_and_exits_with_2() {
+    // echo "ALTER TABLE x ADD y INT;": a statement may hide there.
+    for (form, input, text) in [
+        ("long form", B1B_SQL_WORD_LONG, "ALTER TABLE x ADD y INT;"),
+        ("short form", B1B_SQL_WORD_SHORT, "ALTER TABLE x ADD y INT;"),
+        (
+            "create table",
+            B1B_SQL_WORD_BEFORE_AND_AFTER_LONG,
+            "create table z (id int)",
+        ),
+    ] {
+        let (json, code) = b1b_json(&[], input);
+        let unreadable = json["unreadable"].as_array().unwrap();
+        assert_eq!(unreadable.len(), 1, "{form}: {json}");
+        assert_eq!(unreadable[0]["line"], 5, "{form}");
+        assert_eq!(
+            unreadable[0]["text"].as_str().unwrap().trim(),
+            text,
+            "{form}"
+        );
+        assert!(b1b_warning(&json, "migration-output").is_none(), "{form}");
+        assert_eq!(code, Some(2), "{form}");
+        assert_eq!(json["exit_code"], 2, "{form}");
+        let output = kilit(&["check"], input);
+        assert_eq!(output.status.code(), Some(2), "{form}");
+        assert!(
+            stdout(&output).contains(&format!("line 5: {text}")),
+            "{form}: {}",
+            stdout(&output)
+        );
+    }
+}
+
+#[test]
+fn text_printed_without_a_line_break_in_front_of_a_statement_is_unreadable_and_exits_with_2() {
+    for (form, input) in [
+        ("long form", B1B_ECHO_NONEWLINE_LONG),
+        ("short form", B1B_ECHO_NONEWLINE_SHORT),
+    ] {
+        let (json, code) = b1b_json(&[], input);
+        let unreadable = json["unreadable"].as_array().unwrap();
+        assert_eq!(unreadable.len(), 1, "{form}: {json}");
+        assert_eq!(unreadable[0]["line"], 5, "{form}");
+        assert!(
+            unreadable[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("no newline"),
+            "{form}"
+        );
+        assert!(b1b_warning(&json, "migration-output").is_none(), "{form}");
+        assert_eq!(code, Some(2), "{form}");
+    }
+}
+
+#[test]
+fn two_migrations_that_print_text_get_a_note_each_with_the_lines_of_the_whole_output() {
+    let input = format!("{B1B_ECHO_BETWEEN_LONG}{B1B_DUMP_LONG}");
+    let first_lines = B1B_ECHO_BETWEEN_LONG.lines().count();
+    let (json, code) = b1b_json(&[], &input);
+    let warnings: Vec<serde_json::Value> = json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|warning| warning["id"] == "migration-output")
+        .cloned()
+        .collect();
+    assert_eq!(warnings.len(), 2, "{json}");
+    assert_eq!(warnings[0]["migration"], "2025_06_02_000002_e_echo_between");
+    assert_eq!(warnings[1]["migration"], "2025_06_02_000006_e_dump");
+    assert_eq!(warnings[1]["lines"][0]["line"], first_lines + 5);
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn output_without_printed_text_has_no_migration_output_warning_and_the_demo_keeps_its_answers() {
+    let output = laravel_demo(&["--format", "json"]);
+    let json = json_of(&output);
+    assert!(b1b_warning(&json, "migration-output").is_none());
+    assert_eq!(json["format_version"], "1.1");
+    assert_eq!(json["exit_code"], 1);
+    assert_eq!(json["summary"]["writes_wait"], 3);
+}
+
+// ---------------------------------------------------------------------------
+// Step B1b, fix phase: a statement line with a mark a code page mangled, keys
+// MySQL names itself, a VARCHAR no row can hold, the note about a record past
+// what a page keeps, and the reasons of the answers on a table missing from
+// the dump. The expectations are those of the golden and Laravel tests.
+
+/// A schema file where `orders` has a foreign key written without a name
+/// (MySQL calls it orders_ibfk_1).
+fn write_schema_with_unnamed_foreign_key() -> PathBuf {
+    let file = Path::new(env!("CARGO_TARGET_TMPDIR")).join("b1b_unnamed_fk.sql");
+    std::fs::write(
+        &file,
+        "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  PRIMARY KEY (`id`),
+  FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+",
+    )
+    .unwrap();
+    file
+}
+
+/// A schema file that has `orders` and no `users`.
+fn write_schema_with_orders_only() -> PathBuf {
+    let file = Path::new(env!("CARGO_TARGET_TMPDIR")).join("b1b_orders_only.sql");
+    std::fs::write(
+        &file,
+        "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+",
+    )
+    .unwrap();
+    file
+}
+
+#[test]
+fn a_statement_line_with_a_mangled_mark_is_an_unreadable_line_and_exits_with_2() {
+    // Laravel's mark as code page 936 shows it, in front of a statement.
+    for (form, input) in [
+        (
+            "long form",
+            "\n   INFO  Running migrations.  \n\n  2025_06_02_000020_g_mangled_mark ...........................................  \n  鈬� alter table `orders` add fulltext `orders_note_fulltext`(`note`)  \n  ⇂ alter table `orders` add `s_a` int unsigned null  \n\n",
+        ),
+        (
+            "short form",
+            "\n INFO Running migrations. \n\n 2025_06_02_000020_g_mangled_mark .. \n 鈬� alter table `orders` add fulltext `orders_note_fulltext`(`note`) \n ⇂ alter table `orders` add `s_a` int unsigned null \n\n",
+        ),
+        (
+            "a mark of one letter-led token",
+            "\n   INFO  Running migrations.  \n\n  2025_06_02_000020_g_mangled_mark ...........................................  \n  x alter table `orders` add `b` int null  \n  ⇂ alter table `orders` add `s_a` int unsigned null  \n\n",
+        ),
+    ] {
+        for strict in [&[][..], &["--strict"][..]] {
+            let (json, code) = b1b_json(strict, input);
+            let unreadable = json["unreadable"].as_array().unwrap();
+            assert_eq!(unreadable.len(), 1, "{form}: {json}");
+            assert_eq!(unreadable[0]["line"], 5, "{form}");
+            assert!(
+                unreadable[0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("alter table"),
+                "{form}"
+            );
+            assert!(b1b_warning(&json, "migration-output").is_none(), "{form}");
+            assert_eq!(code, Some(2), "{form} {strict:?}");
+            // The statement Laravel's own mark shows is still checked.
+            assert_eq!(json["summary"]["writes_continue"], 1, "{form}");
+        }
+        let output = kilit(&["check"], input);
+        assert_eq!(output.status.code(), Some(2), "{form}");
+        assert!(
+            stdout(&output).contains("kilit could not read these lines"),
+            "{form}"
+        );
+    }
+}
+
+#[test]
+fn unit3d_s_printed_lines_stay_a_note_and_exit_status_after_the_mangled_mark_rule() {
+    // The rule that refuses a mangled mark leaves real printed text alone.
+    for (form, input) in [
+        ("long form", B1B_UNIT3D_LONG),
+        ("short form", B1B_UNIT3D_SHORT),
+    ] {
+        let (json, code) = b1b_json(&[], input);
+        assert_eq!(json["unreadable"], serde_json::json!([]), "{form}");
+        let warning = b1b_warning(&json, "migration-output").unwrap();
+        assert_eq!(warning["lines"].as_array().unwrap().len(), 9, "{form}");
+        assert_ne!(code, Some(2), "{form}");
+    }
+}
+
+#[test]
+fn dropping_the_foreign_key_mysql_named_itself_and_then_its_column_is_not_refused_with_1828() {
+    // $table->dropForeign('orders_ibfk_1'); $table->dropColumn('user_id');
+    // MySQL 8.0.46 and 8.4.13 accept both.
+    let dump = write_schema_with_unnamed_foreign_key();
+    let sql = "alter table `orders` drop foreign key `orders_ibfk_1`;
+               alter table `orders` drop `user_id`;";
+    for strict in [&[][..], &["--strict"][..]] {
+        let (json, code) = b1b_json_against(&dump, strict, sql);
+        let first = b1b_statement(&json, 0);
+        assert_eq!(first["impact"], "writes_continue", "{strict:?}");
+        assert_eq!(first["algorithm"], "INPLACE", "{strict:?}");
+        let second = b1b_statement(&json, 1);
+        assert_ne!(second["impact"], "fails", "{strict:?}: {second}");
+        assert_ne!(second["error"], 1828, "{strict:?}: {second}");
+        assert_eq!(json["summary"]["fails"], 0, "{strict:?}");
+        assert_eq!(code, Some(0), "{strict:?}: {json}");
+    }
+    // Without dropping the key first the column still fails.
+    let (json, code) = b1b_json_against(&dump, &[], "alter table `orders` drop `user_id`;");
+    assert_eq!(b1b_statement(&json, 0)["error"], 1828);
+    assert_eq!(code, Some(1));
+}
+
+#[test]
+fn a_varchar_no_row_can_hold_is_unknown_and_only_strict_exits_with_3() {
+    // $table->string('c', 20000)->nullable(); MySQL: 1074 in strict mode, a
+    // TEXT column otherwise; never the row size error 1118.
+    let dump = b1b_dump();
+    for sql in [
+        "alter table `orders` add `c` varchar(20000) null;",
+        "alter table `orders` modify `email` varchar(20000) null;",
+        "set sql_mode = '';
+         alter table `orders` add `c` varchar(20000) null;",
+    ] {
+        let (json, code) = b1b_json_against(&dump, &[], sql);
+        let last = statements_of(&json, 0).len() - 1;
+        let statement = b1b_statement(&json, last);
+        assert_eq!(statement["impact"], "unknown", "{sql}: {statement}");
+        assert!(statement.get("error").is_none(), "{sql}: {statement}");
+        assert_eq!(code, Some(0), "{sql}");
+        assert_eq!(
+            b1b_json_against(&dump, &["--strict"], sql).1,
+            Some(3),
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn a_new_column_without_a_known_table_carries_the_note_about_the_record_in_a_page() {
+    let note = "if the record grows past what InnoDB keeps in a page (8126 bytes)";
+    let add = "alter table `orders` add `link_color` varchar(255) null;";
+    // No --schema, and a table kilit stopped trusting.
+    for (label, sql) in [
+        ("no table", add.to_owned()),
+        (
+            "a lost table",
+            format!("alter table `orders` auto_increment = 1000;\n{add}"),
+        ),
+    ] {
+        let (json, code) = b1b_json(&[], &sql);
+        let last = statements_of(&json, 0).len() - 1;
+        let statement = b1b_statement(&json, last);
+        assert_eq!(statement["impact"], "writes_continue", "{label}");
+        assert!(
+            notes_of(&statement).iter().any(|n| n.starts_with(note)),
+            "{label}: {statement}"
+        );
+        assert_eq!(code, Some(0), "{label}");
+        // The text report prints it under the answer.
+        let text = stdout(&kilit(&["check"], &sql));
+        assert!(text.contains(note), "{label}: {text}");
+    }
+    // A table kilit knows: it counts the record, so there is no such note.
+    let (json, code) = b1b_json_against(&b1b_dump(), &[], add);
+    let statement = b1b_statement(&json, 0);
+    assert!(
+        !notes_of(&statement).iter().any(|n| n.starts_with(note)),
+        "{statement}"
+    );
+    assert_eq!(code, Some(0));
+    // Dropping a column on a table kilit does not know has no such note.
+    let (json, _) = b1b_json(&[], "alter table `orders` drop `note`;");
+    assert!(
+        !notes_of(&b1b_statement(&json, 0))
+            .iter()
+            .any(|n| n.starts_with(note))
+    );
+}
+
+#[test]
+fn a_statement_on_a_table_dropped_earlier_in_the_input_is_unknown_and_names_the_statement_that_dropped_it()
+ {
+    let dump = b1b_dump();
+    let sql = "drop table `orders`;
+               alter table `orders` add `c` int null;";
+    let (json, code) = b1b_json_against(&dump, &[], sql);
+    let statement = b1b_statement(&json, 1);
+    assert_eq!(statement["impact"], "unknown");
+    let reason = statement["reason"].as_str().unwrap();
+    for part in ["which the statement on line 1 drops", "does not exist"] {
+        assert!(reason.contains(part), "{part}: {reason}");
+    }
+    for part in ["the dump may be out of date", "(it may have been dropped)"] {
+        assert!(!reason.contains(part), "{part}: {reason}");
+    }
+    assert_ne!(code, Some(2));
+    assert_eq!(json["summary"]["unknown"], 1);
+    // The text report says it too.
+    let text = stdout(&kilit(&["check", "--schema", dump.to_str().unwrap()], sql));
+    assert!(text.contains("the statement on line 1 drops"), "{text}");
+    assert!(!text.contains("(it may have been dropped)"), "{text}");
+}
+
+#[test]
+fn a_foreign_key_to_a_parent_the_dump_does_not_have_says_what_kilit_has_neither() {
+    // $table->foreign('user_id')->references('id')->on('users'); with a
+    // dump that holds orders only.
+    let dump = write_schema_with_orders_only();
+    let sql = "alter table `orders` add constraint `orders_user_id_foreign` \
+               foreign key (`user_id`) references `users` (`id`);";
+    let (json, code) = b1b_json_against(&dump, &[], sql);
+    let statement = b1b_statement(&json, 0);
+    assert_eq!(statement["impact"], "unknown", "{statement}");
+    let reason = statement["reason"].as_str().unwrap();
+    assert!(
+        reason.contains(
+            "the foreign key points at users, which kilit has neither in the schema dump"
+        ),
+        "{reason}"
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(b1b_json_against(&dump, &["--strict"], sql).1, Some(3));
+}
+
+// ---------------------------------------------------------------------------
+// Step B1b, second fix phase: text printed without a line break that runs
+// into a statement line with a mangled mark. Hand test of the review
+// (ron2.txt): `insert ignore` filled the table and MySQL gave 1062 on the
+// ADD UNIQUE after it, so the output is not fully read: exit 2.
+
+/// ron2.txt: a Windows console in code page 1252 shows Laravel's mark as
+/// `â‡‚`, and the second migration prints "Copying codes" without a line
+/// break before its `insert ignore`.
+const RUN_INTO_MANGLED: &str = "
+   INFO  Running migrations.
+
+  2025_06_02_000001_create_t ..............
+  ⇂ create table `t` (`id` bigint unsigned not null auto_increment primary key, `code` varchar(20) not null)
+  2025_06_02_000002_fill_t ..............
+Copying codes  â‡‚ insert ignore into `t` (`code`) values ('a'), ('a')
+  ⇂ alter table `t` add unique `t_code_unique`(`code`)
+
+";
+
+#[test]
+fn text_run_into_a_mangled_statement_line_is_unreadable_and_exits_with_2() {
+    let (json, code) = b1b_json(&[], RUN_INTO_MANGLED);
+    let unreadable = json["unreadable"].as_array().unwrap();
+    assert_eq!(unreadable.len(), 1, "{json}");
+    assert_eq!(unreadable[0]["line"], 7);
+    assert!(
+        unreadable[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("insert ignore into `t`"),
+        "{json}"
+    );
+    assert!(b1b_warning(&json, "migration-output").is_none(), "{json}");
+    assert_eq!(code, Some(2));
+    assert_eq!(json["exit_code"], 2);
+    // With --strict, too, and in the text report.
+    assert_eq!(b1b_json(&["--strict"], RUN_INTO_MANGLED).1, Some(2));
+    let output = kilit(&["check"], RUN_INTO_MANGLED);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stdout(&output).contains("line 7: Copying codes"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn text_printed_before_a_statement_word_on_a_line_with_a_question_mark_is_unreadable_and_exits_with_2()
+ {
+    let input = "
+   INFO  Running migrations.
+
+  2025_06_02_000003_fill_t ..............
+no newline  ? SET FOREIGN_KEY_CHECKS=0;
+  ⇂ alter table `t` add `b` int null
+
+";
+    let (json, code) = b1b_json(&[], input);
+    let unreadable = json["unreadable"].as_array().unwrap();
+    assert_eq!(unreadable.len(), 1, "{json}");
+    assert_eq!(unreadable[0]["line"], 5);
+    assert_eq!(code, Some(2));
+}
+
+// ---------------------------------------------------------------------------
+// Step B1b, final fix: the reason for a table that the dump has but kilit
+// cannot use must be true in every case (repros f6-c, schema-droptemp and
+// read-delimiter of the audit).
+
+/// The dump of those repros: `users` and `orders` with a FULLTEXT index.
+const B1B_REASON_DUMP: &str = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  `email` varchar(255) DEFAULT NULL,
+  `note` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ix_amount` (`amount`),
+  KEY `fk_orders_user` (`user_id`),
+  FULLTEXT KEY `ft_note` (`note`),
+  CONSTRAINT `fk_orders_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+
+/// The statements of the repros, run against `B1B_REASON_DUMP`. Returns the
+/// JSON, the ALTER's JSON statement (the one adding column c), its text
+/// report and the exit status.
+fn b1b_reason_run(input: &str) -> (serde_json::Value, serde_json::Value, String, Option<i32>) {
+    let dump = write_schema("b1b_reason_dump.sql", B1B_REASON_DUMP);
+    let (json, code) = b1b_json_against(&dump, &[], input);
+    let alter = statements_of(&json, 0)
+        .into_iter()
+        .find(|statement| statement["sql"].as_str().unwrap().contains("ADD COLUMN c"))
+        .unwrap_or_else(|| panic!("no ALTER in {json}"));
+    let text = stdout(&kilit(
+        &["check", "--schema", dump.to_str().unwrap()],
+        input,
+    ));
+    (json, alter, text, code)
+}
+
+#[test]
+fn a_database_qualified_name_of_a_table_in_the_dump_says_which_database_kilit_does_not_know() {
+    // Repro f6-c: ALTER TABLE shop.orders, the dump holds orders.
+    let (json, alter, text, code) =
+        b1b_reason_run("ALTER TABLE shop.orders ADD COLUMN c INT NULL;\n");
+    assert_eq!(alter["impact"], "unknown", "{alter}");
+    let reason = alter["reason"].as_str().unwrap();
+    let wording =
+        "the schema dump has orders, and kilit does not know which database shop.orders is in";
+    assert!(reason.contains(wording), "{reason}");
+    assert!(!reason.contains("neither in the schema dump"), "{reason}");
+    assert!(text.contains(wording), "{text}");
+    assert!(!text.contains("neither in the schema dump"), "{text}");
+    assert_eq!(json["summary"]["unknown"], 1, "{json}");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn a_table_the_input_dropped_with_drop_temporary_table_says_the_statement_before_dropped_it() {
+    // Repro schema-droptemp: DROP TEMPORARY TABLE IF EXISTS orders; then an
+    // ALTER of orders, a base table of the dump.
+    let input =
+        "DROP TEMPORARY TABLE IF EXISTS orders;\nALTER TABLE orders ADD COLUMN c INT NULL;\n";
+    let (json, alter, text, code) = b1b_reason_run(input);
+    assert_eq!(alter["impact"], "unknown", "{alter}");
+    let reason = alter["reason"].as_str().unwrap();
+    let wording = "which kilit takes as dropped by the statement on line 1 \
+(MySQL may have dropped only a temporary table of that name)";
+    assert!(reason.contains(wording), "{reason}");
+    assert!(!reason.contains("neither in the schema dump"), "{reason}");
+    assert!(text.contains(wording), "{text}");
+    assert!(!text.contains("neither in the schema dump"), "{text}");
+    assert_eq!(json["summary"]["unknown"], 1, "{json}");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn a_table_dropped_inside_a_routine_body_says_the_statement_before_dropped_it_with_its_line() {
+    // Repro read-delimiter: DELIMITER //, a trigger whose body holds DROP
+    // TABLE IF EXISTS orders (line 5), DELIMITER ;, then an ALTER of orders.
+    let input = "DELIMITER //
+CREATE TRIGGER t BEFORE INSERT ON orders FOR EACH ROW
+BEGIN
+  SET NEW.amount = 1;
+  DROP TABLE IF EXISTS orders;
+END//
+DELIMITER ;
+ALTER TABLE orders ADD COLUMN c INT NULL;
+";
+    let (json, alter, text, code) = b1b_reason_run(input);
+    assert_eq!(alter["impact"], "unknown", "{alter}");
+    let reason = alter["reason"].as_str().unwrap();
+    assert!(reason.contains("the statement on line 5 drops"), "{reason}");
+    assert!(!reason.contains("neither in the schema dump"), "{reason}");
+    assert!(text.contains("the statement on line 5 drops"), "{text}");
+    assert!(!text.contains("neither in the schema dump"), "{text}");
+    // The two unreadable statements were unknown before; the ALTER is the third.
+    assert_eq!(json["summary"]["unknown"], 3, "{json}");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn a_table_that_was_never_in_the_dump_nor_created_still_says_neither_and_may_be_out_of_date() {
+    // Control: coupons is nowhere.
+    let (_, alter, text, code) = b1b_reason_run("ALTER TABLE coupons ADD COLUMN c INT NULL;\n");
+    assert_eq!(alter["impact"], "unknown", "{alter}");
+    let reason = alter["reason"].as_str().unwrap();
+    assert!(reason.contains("neither in the schema dump"), "{reason}");
+    assert!(reason.contains("the dump may be out of date"), "{reason}");
+    assert!(!reason.contains("drops"), "{reason}");
+    assert!(!reason.contains("does not know which database"), "{reason}");
+    assert!(text.contains("neither in the schema dump"), "{text}");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn a_table_the_input_renamed_says_the_statement_before_renamed_it_and_to_what() {
+    // RENAME TABLE orders TO purchases; then an ALTER of orders (a table of
+    // the dump that the rename took away).
+    let input = "RENAME TABLE orders TO purchases;\nALTER TABLE orders ADD COLUMN c INT NULL;\n";
+    let (json, alter, text, code) = b1b_reason_run(input);
+    assert_eq!(alter["impact"], "unknown", "{alter}");
+    let reason = alter["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("which the statement on line 1 renames to purchases"),
+        "{reason}"
+    );
+    assert!(!reason.contains("neither in the schema dump"), "{reason}");
+    assert!(
+        text.contains("which the statement on line 1 renames to purchases"),
+        "{text}"
+    );
+    // The RENAME TABLE itself is unknown too (not measured).
+    assert_eq!(json["summary"]["unknown"], 2, "{json}");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn a_qualified_name_of_a_table_only_the_input_created_says_kilit_has_a_table_of_that_name() {
+    // CREATE TABLE coupons (not in the dump), then ALTER TABLE shop.coupons.
+    let input = "CREATE TABLE coupons (id INT PRIMARY KEY);\nALTER TABLE shop.coupons ADD COLUMN c INT NULL;\n";
+    let (json, alter, text, code) = b1b_reason_run(input);
+    assert_eq!(alter["impact"], "unknown", "{alter}");
+    let reason = alter["reason"].as_str().unwrap();
+    let wording =
+        "kilit has a table coupons, and kilit does not know which database shop.coupons is in";
+    assert!(reason.contains(wording), "{reason}");
+    assert!(!reason.contains("the schema dump has coupons"), "{reason}");
+    assert!(!reason.contains("neither in the schema dump"), "{reason}");
+    assert!(text.contains(wording), "{text}");
+    assert_eq!(json["summary"]["unknown"], 1, "{json}");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn a_table_dropped_in_an_earlier_input_file_says_so() {
+    // First file: DROP TABLE orders. Second file: ALTER TABLE orders.
+    let dump = write_schema("b1b_reason_files_dump.sql", B1B_REASON_DUMP);
+    let first = write_schema("b1b_reason_files_1.sql", "DROP TABLE orders;\n");
+    let second = write_schema(
+        "b1b_reason_files_2.sql",
+        "ALTER TABLE orders ADD COLUMN c INT NULL;\n",
+    );
+    let args = [
+        "check",
+        "--schema",
+        dump.to_str().unwrap(),
+        first.to_str().unwrap(),
+        second.to_str().unwrap(),
+    ];
+    let json = json_of(&kilit(
+        &[args.as_slice(), &["--format", "json"]].concat(),
+        "",
+    ));
+    let alter = statements_of(&json, 1).remove(0);
+    assert_eq!(alter["impact"], "unknown", "{alter}");
+    let reason = alter["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("the statement on line 1 of an earlier input file"),
+        "{reason}"
+    );
+    assert!(!reason.contains("neither in the schema dump"), "{reason}");
+    let output = kilit(&args, "");
+    let text = stdout(&output);
+    assert!(
+        text.contains("the statement on line 1 of an earlier input file"),
+        "{text}"
+    );
+    assert_eq!(output.status.code(), Some(0), "{text}");
 }

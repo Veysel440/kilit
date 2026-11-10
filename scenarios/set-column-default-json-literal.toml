@@ -1,0 +1,5 @@
+title = "Set a literal default on a JSON column"
+# The column is named c in every scenario of this kind, so MySQL's
+# message names the same column in all of them.
+setup = ["ALTER TABLE orders ADD COLUMN c JSON NULL"]
+operation = "ALTER COLUMN c SET DEFAULT '[]'"

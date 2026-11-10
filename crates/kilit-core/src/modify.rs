@@ -66,8 +66,8 @@ impl fmt::Display for Change {
             Change::Length { from, to, charset } => write!(
                 f,
                 "changes VARCHAR({from}) to VARCHAR({to}), {} to {} bytes in {}",
-                from * charset.max_bytes,
-                to * charset.max_bytes,
+                from.saturating_mul(charset.max_bytes),
+                to.saturating_mul(charset.max_bytes),
                 charset.name
             ),
             Change::Charset { from, to, implicit } => {
@@ -348,6 +348,21 @@ mod tests {
         ] {
             assert_eq!(changed(sql), Ok(vec![]), "{sql}");
         }
+    }
+
+    #[test]
+    fn a_length_too_large_for_its_bytes_is_shown_without_wrapping() {
+        // 4611686018427387904 characters of 4 bytes are 2^64 bytes.
+        let change = Change::Length {
+            from: 50,
+            to: 4_611_686_018_427_387_904,
+            charset: Charset::named("utf8mb4").unwrap(),
+        };
+        assert_eq!(
+            change.to_string(),
+            "changes VARCHAR(50) to VARCHAR(4611686018427387904), 200 to \
+             18446744073709551615 bytes in utf8mb4"
+        );
     }
 
     #[test]

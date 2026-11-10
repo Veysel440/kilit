@@ -172,7 +172,7 @@ fn check(args: &CheckArgs) -> Result<u8, String> {
         Some(path) => {
             let text = input::read(path)?;
             warnings = schema_server(&text, results, args.server.is_some())?;
-            Some((path.display().to_string(), Schema::from_sql(&text)))
+            Some((path.display().to_string(), Schema::from_dump(&text)))
         }
         None => None,
     };

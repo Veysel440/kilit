@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use clap::ValueEnum;
 use kilit_core::{
     Algorithm, Impact, PRETEND_READ_NOTE, Prediction, Schema, ServerResults, Statement,
-    StatementKind, Verdict, Writes, check_sessions, depends_on_rows, impacts,
+    StatementKind, UnreadableLine, Verdict, Writes, check_sessions, depends_on_rows, impacts,
     locked_tables as locked_tables_of, metadata_lock_warning, on_empty_tables, only_reads,
 };
 use serde::Serialize;
@@ -73,6 +73,8 @@ struct SourceReport<'a> {
     /// The SQL file, as given.
     file: Option<&'a Path>,
     kind: SourceKind,
+    /// Text a Laravel migration printed itself.
+    printed: &'a [UnreadableLine],
     statements: Vec<Checked<'a>>,
 }
 
@@ -192,6 +194,7 @@ impl<'a> Report<'a> {
                 name: &source.name,
                 file: source.file.as_deref(),
                 kind: source.kind,
+                printed: &source.printed,
                 statements: source
                     .statements
                     .iter()
@@ -335,6 +338,12 @@ impl<'a> Report<'a> {
         for source in &self.sources {
             writeln!(out)?;
             writeln!(out, "{}", source.name)?;
+            if !source.printed.is_empty() {
+                writeln!(out, "  note: this migration {PRINTED_NOTE}:")?;
+                for printed in source.printed {
+                    writeln!(out, "    line {}: {}", printed.line, printed.text)?;
+                }
+            }
             if source.statements.is_empty() {
                 writeln!(out, "  no statements")?;
             }
@@ -585,7 +594,29 @@ impl<'a> Report<'a> {
                     tables: &[],
                     file: None,
                     message: warning.clone(),
+                    migration: None,
+                    lines: Vec::new(),
                 })
+                .chain(
+                    self.sources
+                        .iter()
+                        .filter(|source| !source.printed.is_empty())
+                        .map(|source| JsonWarning {
+                            id: "migration-output",
+                            tables: &[],
+                            file: None,
+                            message: format!("{} {PRINTED_NOTE}", source.name),
+                            migration: Some(source.name),
+                            lines: source
+                                .printed
+                                .iter()
+                                .map(|printed| JsonLine {
+                                    line: printed.line,
+                                    text: &printed.text,
+                                })
+                                .collect(),
+                        }),
+                )
                 .chain(
                     self.laravel_errors
                         .iter()
@@ -594,6 +625,8 @@ impl<'a> Report<'a> {
                             tables: &[],
                             file: Some(input),
                             message: (*error).to_owned(),
+                            migration: None,
+                            lines: Vec::new(),
                         }),
                 )
                 .chain((!self.locked_tables.is_empty()).then(|| JsonWarning {
@@ -601,6 +634,8 @@ impl<'a> Report<'a> {
                     tables: &self.locked_tables,
                     file: None,
                     message: metadata_lock_warning(),
+                    migration: None,
+                    lines: Vec::new(),
                 }))
                 .collect(),
             summary: self.summary(),
@@ -1073,7 +1108,11 @@ impl Summary {
 
 /// The version of the JSON format: a new minor version adds fields, a new
 /// major version removes, renames or changes one.
-const FORMAT_VERSION: &str = "1.0";
+const FORMAT_VERSION: &str = "1.1";
+
+/// What kilit says about text a Laravel migration printed itself.
+const PRINTED_NOTE: &str = "printed these lines itself, between its name and its statements; \
+     kilit read them as text, not as SQL";
 
 /// The names of `counted` as `--fail-on` takes them.
 fn names(counted: &[Count]) -> String {
@@ -1231,6 +1270,18 @@ struct JsonWarning<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     file: Option<&'a str>,
     message: String,
+    /// The Laravel migration that printed text of its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    migration: Option<&'a str>,
+    /// The lines it printed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    lines: Vec<JsonLine<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonLine<'a> {
+    line: usize,
+    text: &'a str,
 }
 
 #[cfg(test)]

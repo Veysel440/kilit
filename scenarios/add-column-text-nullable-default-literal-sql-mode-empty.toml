@@ -1,0 +1,5 @@
+title = "Add a nullable TEXT column with a non-empty literal default, with an empty sql_mode"
+# The new column is named c in every scenario of this kind, so MySQL's
+# message names the same column in all of them.
+session = ["SET sql_mode = ''"]
+operation = "ADD COLUMN c TEXT NULL DEFAULT 'x'"

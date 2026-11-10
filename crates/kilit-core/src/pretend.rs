@@ -97,6 +97,10 @@ pub struct LaravelMigration {
     /// Which of `statements` is the first that asks the database something,
     /// such as the `select exists (...)` of `Schema::hasTable()`.
     pub first_read: Option<usize>,
+    /// Text the migration prints itself, with `echo` or the console's
+    /// `writeln`, between its name and its first statement. A line that
+    /// may be a statement, or one of Laravel's own, is never here.
+    pub printed: Vec<UnreadableLine>,
 }
 
 /// What kilit read from the output of `migrate --pretend`.
@@ -157,14 +161,25 @@ pub fn read_pretend(text: &str) -> Option<Pretend> {
     }
 
     let mut pretend = Pretend::default();
+    // Text a migration may have printed itself: it is that only when
+    // Laravel goes on after it, with a statement or the next migration. An
+    // error screen kilit does not know ends the output instead.
+    let mut printed: Vec<UnreadableLine> = Vec::new();
     for (i, line) in before_error.iter().enumerate() {
         let number = i + 1;
-        match read_line(line) {
+        let read = read_line(line);
+        if matches!(read, Line::Migration(_) | Line::Statement(_))
+            && let Some(migration) = pretend.migrations.last_mut()
+        {
+            migration.printed.append(&mut printed);
+        }
+        match read {
             Line::Blank | Line::Info | Line::Task => {}
             Line::Migration(name) => pretend.migrations.push(LaravelMigration {
                 name: name.to_owned(),
                 statements: Vec::new(),
                 first_read: None,
+                printed: Vec::new(),
             }),
             Line::Statement(sql) => match pretend.migrations.last_mut() {
                 Some(migration) => {
@@ -183,10 +198,30 @@ pub fn read_pretend(text: &str) -> Option<Pretend> {
                     text: line.clone(),
                 }),
             },
-            Line::Other => pretend.unreadable.push(UnreadableLine {
-                line: number,
-                text: line.clone(),
-            }),
+            Line::Other => match pretend.migrations.last_mut() {
+                // Laravel prints a migration's statements after its `up()`
+                // returns, so what the migration prints comes between its
+                // name and its first statement.
+                Some(migration) if migration.statements.is_empty() && printed_text(line) => {
+                    printed.push(UnreadableLine {
+                        line: number,
+                        text: line.clone(),
+                    });
+                }
+                _ => pretend.unreadable.push(UnreadableLine {
+                    line: number,
+                    text: line.clone(),
+                }),
+            },
+        }
+    }
+    if !printed.is_empty() {
+        pretend.unreadable.append(&mut printed);
+        pretend.unreadable.sort_by_key(|unreadable| unreadable.line);
+    }
+    for migration in &mut pretend.migrations {
+        for line in &mut migration.printed {
+            line.text = line.text.chars().map(shown).collect();
         }
     }
     if let Some(screen) = error_screen {
@@ -468,10 +503,157 @@ fn read_line(line: &str) -> Line<'_> {
     {
         return Line::Migration(name);
     }
-    if line.contains(" ..") {
+    // A line like that may be a statement printed by a migration itself:
+    // it is not skipped.
+    if line.contains(" ..") && !looks_like_sql(line) {
         return Line::Task;
     }
     Line::Other
+}
+
+/// Whether a line between a migration's name and its first statement is
+/// text the migration printed itself, such as unit3d's `This migration is
+/// long ...`, and not something kilit must check. A line that starts with
+/// a word that starts an SQL statement may be one printed instead of run,
+/// so it is not; nor is one that holds Laravel's mark before a statement,
+/// as text printed without a line break runs on into the statement line,
+/// nor one whose second word starts a statement, which is what a statement
+/// line looks like with a mark kilit does not know; nor one of Laravel's
+/// own, such as `ERROR  [...] failed to dump queries.`
+fn printed_text(line: &str) -> bool {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let laravel = words
+        .first()
+        .is_some_and(|word| LARAVEL_LABELS.contains(word));
+    // A mark kilit does not know, such as one a code page it has not seen
+    // made of `⇂`, comes before the statement's first word.
+    let mark = line.contains(STATEMENT_MARK)
+        || words.get(1).is_some_and(|word| starts_statement(word))
+        // Text printed without a line break runs on into the statement
+        // line, whose mark may have come through as other characters.
+        || words.windows(2).any(|pair| {
+            (MANGLED_MARKS.contains(&pair[0]) || !pair[0].is_ascii())
+                && starts_statement(pair[1])
+        })
+        || words.windows(2).any(|pair| {
+            starts_statement(pair[0])
+                && (pair[1].starts_with('`')
+                    || STATEMENT_SECOND_WORDS
+                        .iter()
+                        .any(|second| pair[1].eq_ignore_ascii_case(second)))
+        });
+    !laravel && !mark && !looks_like_sql(line) && symfony_header(line).is_none()
+}
+
+/// Words that follow the first word of a statement Laravel writes, such as
+/// `alter table` or `insert into`: text printed without a line break may
+/// run on into a statement line with a mark kilit does not know.
+const STATEMENT_SECOND_WORDS: [&str; 12] = [
+    "TABLE",
+    "INDEX",
+    "UNIQUE",
+    "FULLTEXT",
+    "SPATIAL",
+    "VIEW",
+    "TRIGGER",
+    "INTO",
+    "FROM",
+    "TEMPORARY",
+    "DATABASE",
+    "SCHEMA",
+];
+
+/// The labels Laravel's console puts before its own messages.
+const LARAVEL_LABELS: [&str; 7] = ["INFO", "WARN", "WARNING", "ERROR", "ALERT", "FAIL", "DONE"];
+
+/// Whether `line` starts, after any punctuation, with a word that starts
+/// an SQL statement in MySQL.
+fn looks_like_sql(line: &str) -> bool {
+    starts_statement(line.trim_start_matches(|c: char| !c.is_alphanumeric()))
+}
+
+fn starts_statement(text: &str) -> bool {
+    let word: String = text
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    SQL_STATEMENT_WORDS
+        .iter()
+        .any(|keyword| word.eq_ignore_ascii_case(keyword))
+}
+
+/// The words a MySQL statement can start with.
+const SQL_STATEMENT_WORDS: [&str; 60] = [
+    "ALTER",
+    "ANALYZE",
+    "BEGIN",
+    "BINLOG",
+    "CACHE",
+    "CALL",
+    "CHANGE",
+    "CHECK",
+    "CHECKSUM",
+    "CLONE",
+    "COMMIT",
+    "CREATE",
+    "DEALLOCATE",
+    "DECLARE",
+    "DELETE",
+    "DESC",
+    "DESCRIBE",
+    "DO",
+    "DROP",
+    "EXECUTE",
+    "EXPLAIN",
+    "FLUSH",
+    "GET",
+    "GRANT",
+    "HANDLER",
+    "HELP",
+    "IMPORT",
+    "INSERT",
+    "INSTALL",
+    "KILL",
+    "LOAD",
+    "LOCK",
+    "OPTIMIZE",
+    "PREPARE",
+    "PURGE",
+    "RELEASE",
+    "RENAME",
+    "REPAIR",
+    "REPLACE",
+    "RESET",
+    "RESIGNAL",
+    "RESTART",
+    "REVOKE",
+    "ROLLBACK",
+    "SAVEPOINT",
+    "SELECT",
+    "SET",
+    "SHOW",
+    "SHUTDOWN",
+    "SIGNAL",
+    "START",
+    "TABLE",
+    "TRUNCATE",
+    "UNINSTALL",
+    "UNLOCK",
+    "UPDATE",
+    "USE",
+    "VALUES",
+    "WITH",
+    "XA",
+];
+
+/// A character of printed text as kilit shows it: a control character,
+/// which a terminal would act on, as U+FFFD.
+fn shown(c: char) -> char {
+    if c.is_control() && c != '\t' {
+        '\u{fffd}'
+    } else {
+        c
+    }
 }
 
 /// The SQL after Laravel's mark, `⇂ alter table ...`, or after the mark as
@@ -923,6 +1105,81 @@ In 2026_02_01_000041_first_alter_orders_table.php line 15:
         assert_eq!(pretend.error, None);
         assert_eq!(pretend.migrations[0].statements.len(), 1);
         assert_eq!(pretend.unreadable[0].line, 5);
+    }
+
+    #[test]
+    fn text_a_migration_prints_before_its_statements_is_kept_apart() {
+        let pretend = read_pretend(
+            "
+   INFO  Running migrations.
+
+  2024_06_06_042258_create_private_message_conversations .....................
+
+\tThis migration is long.
+\tCreating new tables and columns...
+  ⇂ alter table `orders` add `qty` int null
+",
+        )
+        .unwrap();
+        assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
+        let printed: Vec<(usize, &str)> = pretend.migrations[0]
+            .printed
+            .iter()
+            .map(|line| (line.line, line.text.as_str()))
+            .collect();
+        assert_eq!(
+            printed,
+            [
+                (6, "This migration is long."),
+                (7, "Creating new tables and columns...")
+            ]
+        );
+        assert_eq!(
+            sql(&pretend.migrations[0]),
+            ["alter table `orders` add `qty` int null"]
+        );
+    }
+
+    #[test]
+    fn printed_text_that_may_hide_a_statement_stays_unreadable() {
+        for line in [
+            "ALTER TABLE x ADD y INT;",
+            "  create table z (id int)",
+            "no newline  ⇂ alter table `orders` add `s_a` int unsigned null",
+            "ERROR  [2026_11_01_000002_widen_amount_on_orders_table] failed to dump queries.",
+            "ALTER TABLE x ADD y INT ..",
+        ] {
+            let pretend = read_pretend(&format!(
+                "
+   INFO  Running migrations.
+
+  2026_11_01_000002_widen_amount_on_orders_table .............................
+{line}
+  ⇂ alter table `orders` add `qty` int null
+"
+            ))
+            .unwrap();
+            assert_eq!(pretend.unreadable.len(), 1, "{line}");
+            assert!(pretend.migrations[0].printed.is_empty(), "{line}");
+        }
+    }
+
+    #[test]
+    fn text_at_the_end_of_the_output_stays_unreadable() {
+        // Laravel goes on after text a migration prints; an error screen
+        // kilit does not know ends the output.
+        let pretend = read_pretend(
+            "
+   INFO  Running migrations.
+
+  2026_11_01_000002_widen_amount_on_orders_table .............................
+
+  Something went wrong
+",
+        )
+        .unwrap();
+        assert_eq!(pretend.unreadable.len(), 1);
+        assert!(pretend.migrations[0].printed.is_empty());
     }
 
     #[test]

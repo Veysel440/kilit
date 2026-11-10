@@ -1,0 +1,5 @@
+title = "Change a VARCHAR column to TEXT with a literal default"
+# The column is named c in every scenario of this kind, so MySQL's
+# message names the same column in all of them.
+setup = ["ALTER TABLE orders ADD COLUMN c VARCHAR(50) NULL"]
+operation = "MODIFY c TEXT NULL DEFAULT ''"

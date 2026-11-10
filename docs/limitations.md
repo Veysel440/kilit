@@ -6,6 +6,8 @@ safe.
 
 - [Input](#input)
 - [What is measured](#what-is-measured)
+- [Tables kilit cannot see](#tables-kilit-cannot-see)
+- [Defaults and row size](#defaults-and-row-size)
 - [The server kilit cannot see](#the-server-kilit-cannot-see)
 - [Sessions and several files](#sessions-and-several-files)
 - [The metadata lock warning](#the-metadata-lock-warning)
@@ -75,6 +77,67 @@ safe.
   together, is `UNKNOWN`. `KEY_BLOCK_SIZE` is measured at 8 only.
 - The cases of 64 instant column changes and of duplicate values were measured
   on DYNAMIC tables only; on other row formats the answer carries a note.
+
+## Tables kilit cannot see
+
+- With `--schema`, a statement on a table kilit does not have at that point
+  is `UNKNOWN`, and so is an `ADD FOREIGN KEY` whose parent table is missing,
+  with the checks on. The reason says which statement dropped or renamed the
+  table, with its line; for a name with a database, such as `shop.orders`,
+  that kilit has `orders` but does not know which database `shop.orders` is
+  in; otherwise that the dump may be out of date, or that the table does not
+  exist and MySQL refuses the statement.
+- `DROP COLUMN`, `DROP INDEX` and `DROP FOREIGN KEY` of a name the known table
+  does not have are `UNKNOWN`. The reason names error 1091 and the scenarios
+  `drop-column-missing`, `drop-index-missing` and `drop-foreign-key-missing`.
+  The table stays known, since kilit's view of it is right whether the name
+  existed or not. The exception: when the table holds an index or a foreign
+  key without a name (MySQL named it, such as `orders_ibfk_1`), kilit does not
+  know which names it has, so the drop keeps its measured answer and the table
+  is lost. kilit gives no names to the keys of a `CREATE TABLE`.
+- Without a table kilit knows (no `--schema`, a table that is missing or lost),
+  what the table would decide becomes a note under the answer: the primary key
+  and the key shapes of `DROP COLUMN` that are not measured, error 1091 for a
+  name that may not exist, a `JSON` column under `ADD INDEX` and `ADD UNIQUE`,
+  `ADD CHECK`, `ADD FOREIGN KEY` (either table unknown), an expression default
+  under `SET DEFAULT`, and the row size and the record kept in a page under
+  `ADD COLUMN`.
+- A table that kilit does not know is still answered as an InnoDB table with
+  the DYNAMIC row format, the defaults. This is a decision: a table that is
+  MyISAM, COMPRESSED, or another engine gets the answer for InnoDB with
+  DYNAMIC when its `CREATE TABLE` is not in the input or the dump.
+
+## Defaults and row size
+
+- A quoted default on `TEXT`, `BLOB`, `JSON` or `GEOMETRY` is a failure (error
+  1101) in strict `sql_mode`, the MySQL default and Laravel's
+  `'strict' => true`. kilit cannot see that a Laravel connection has
+  `'strict' => false`: it sets `sql_mode` to `NO_ENGINE_SUBSTITUTION` without a
+  statement in `--pretend` output, and then `TEXT` and `BLOB` with `''` are
+  accepted. Such an application gets "fails" for a statement MySQL accepts. The
+  note under the answer names the case. Some real Laravel applications run with
+  `'strict' => false`.
+- `sql_mode` is read only from a session `SET` of a quoted list. `GLOBAL`,
+  `PERSIST`, an expression or a list kilit has no measurement for make the
+  answer `UNKNOWN`. Each input file is a new session.
+- `ALTER COLUMN ... SET DEFAULT` with a quoted literal on a `JSON` column
+  fails in strict mode (error 1101) and is also refused in a non-strict mode;
+  kilit answers `UNKNOWN` there. A `MODIFY` to `TEXT` with a quoted default
+  after a non-strict `sql_mode` is `UNKNOWN`. Both were run in the lab, but
+  are not among kilit's scenarios.
+- MySQL renames foreign key names `<table>_ibfk_<suffix>` and CHECK names
+  `<table>_chk_<suffix>`, whatever the suffix, with their table (by hand on
+  both servers), and kilit follows that. It also follows a rename that MySQL
+  refuses because a new name is too long (1059) or taken (1826, 3822).
+- The row size counts 16K pages only. It leaves out bytes MySQL keeps
+  hidden: columns dropped instantly, row versions, and the `FTS_DOC_ID` a
+  dropped `FULLTEXT` index leaves behind. Columns it
+  cannot count (generated, long `ENUM` and `SET`, `BIT` over 16, other
+  spatial types, unknown types or character sets) make a note.
+- Under `--pretend` every read returns nothing, so a migration that tests the
+  database (`Schema::hasColumn()`) prints statements that would not run, and
+  the row kilit counts may hold columns the real run never adds. On one real
+  application this gave error 1118 where the real run passes.
 
 ## The server kilit cannot see
 

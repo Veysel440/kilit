@@ -137,7 +137,7 @@ flowchart LR
     check --> status["exit status"]
 ```
 
-The lab runs each of 240 scenarios six ways on fresh tables. kilit follows your
+The lab runs each of 275 scenarios six ways on fresh tables. kilit follows your
 tables through the migration and answers each change from the matching
 measurement: [architecture](docs/architecture.md).
 
@@ -189,6 +189,8 @@ newer; older versions could report success when no attestation matched:
 ```sh
 gh attestation verify "kilit-$VERSION-$TARGET.tar.gz" --repo Veysel440/kilit
 ```
+
+The command needs a login: run `gh auth login`, or set `GH_TOKEN` in CI.
 
 An archive downloaded in a browser on macOS is quarantined, and macOS refuses
 to open the binary. Clear the mark on the archive before you unpack it:

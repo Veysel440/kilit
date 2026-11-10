@@ -1,0 +1,6 @@
+title = "Set a literal default on a TEXT column, with an empty sql_mode"
+# The column is named c in every scenario of this kind, so MySQL's
+# message names the same column in all of them.
+setup = ["ALTER TABLE orders ADD COLUMN c TEXT NULL"]
+session = ["SET sql_mode = ''"]
+operation = "ALTER COLUMN c SET DEFAULT ''"

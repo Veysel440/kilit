@@ -1,0 +1,4 @@
+title = "Add a BLOB column with a literal default"
+# The new column is named c in every scenario of this kind, so MySQL's
+# message names the same column in all of them.
+operation = "ADD COLUMN c BLOB DEFAULT ''"

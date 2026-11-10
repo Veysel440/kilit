@@ -1,0 +1,5 @@
+title = "Drop the second column of a two-column primary key when the first repeats"
+# user_id repeats, so the key that is left, (user_id), does not hold. id
+# keeps its AUTO_INCREMENT only while it starts an index, hence ix_id.
+setup = ["ALTER TABLE orders DROP PRIMARY KEY, ADD PRIMARY KEY (user_id, id), ADD INDEX ix_id (id)"]
+operation = "DROP COLUMN id"

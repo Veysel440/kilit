@@ -4129,3 +4129,1080 @@ fn laravel_10_stopping_at_the_production_confirmation_before_10_25_is_an_error_o
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Step B1b: what Laravel prints for `->default()` on text, json and blob
+// columns, and the text a migration prints itself (echo, print, dump(), the
+// console's writeln). The outputs are real runs of `php artisan migrate
+// --pretend` on Laravel 12.71.0 and 13.40.0 (the long form, and the short
+// form of 13.40.0), bytes as printed; the printed-text forms are the same in
+// Laravel 10 to 13, whose source prints it the same way. The one Laravel 10
+// output is derived from the framework's source at 10.50.4 and was not run:
+// Laravel 10 joins the columns of one Schema::table into one ALTER TABLE.
+
+/// Laravel 12.71.0 (the same bytes in 13.40.0): unit3d's real migration, which prints nine lines of its own.
+const B1B_UNIT3D_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2024_06_06_042258_create_private_message_conversations .....................  \n",
+    "\n",
+    "\tThis migration is long and will take approximately 30-60 seconds per 100 thousand stored private messages.\n",
+    "\tCreating new tables and columns...\n",
+    "\tParsing previous private message structure...\n",
+    "\tInserting all conversations into new conversations table...\n",
+    "\tAdding conversation_id to all private messages...\n",
+    "\tInserting all conversation participants...\n",
+    "\tUpdating all conversation timestamps...\n",
+    "\tUpdating all participant timestamps...\n",
+    "\tDropping unused columns from private messages and adding constraints...\n",
+    "  ⇂ create table `conversations` (`id` int unsigned not null auto_increment primary key, `subject` varchar(255) not null, `created_at` timestamp null, `updated_at` timestamp null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'  \n",
+    "  ⇂ alter table `conversations` add index `conversations_updated_at_index`(`updated_at`)  \n",
+    "  ⇂ alter table `conversations` add index `conversations_created_at_index`(`created_at`)  \n",
+    "  ⇂ create table `participants` (`id` int unsigned not null auto_increment primary key, `conversation_id` int unsigned not null, `user_id` int unsigned not null, `read` tinyint(1) not null default '0', `deleted_at` timestamp null, `created_at` timestamp null, `updated_at` timestamp null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'  \n",
+    "  ⇂ alter table `participants` add unique `participants_user_id_conversation_id_unique`(`user_id`, `conversation_id`)  \n",
+    "  ⇂ alter table `participants` add index `participants_user_id_read_deleted_at_index`(`user_id`, `read`, `deleted_at`)  \n",
+    "  ⇂ alter table `participants` add constraint `participants_conversation_id_foreign` foreign key (`conversation_id`) references `conversations` (`id`) on delete cascade on update cascade  \n",
+    "  ⇂ alter table `participants` add constraint `participants_user_id_foreign` foreign key (`user_id`) references `users` (`id`) on delete cascade on update cascade  \n",
+    "  ⇂ alter table `participants` add index `participants_conversation_id_index`(`conversation_id`)  \n",
+    "  ⇂ alter table `private_messages` add `conversation_id` int unsigned null after `id`  \n",
+    "  ⇂ select `id`, `sender_id`, `receiver_id`, `subject`, `read`, `related_to`, `created_at`, `updated_at` from `private_messages` where `id` is not null order by `id` desc limit 1000  \n",
+    "  ⇂ update `conversations` inner join (select `conversation_id`, MIN(created_at) AS min_created_at from `private_messages` group by `conversation_id`) as `oldest_messages` on `oldest_messages`.`conversation_id` = `conversations`.`id` set `conversations`.`created_at` = oldest_messages.min_created_at  \n",
+    "  ⇂ update `participants` inner join `conversations` on `conversations`.`id` = `participants`.`conversation_id` set `participants`.`created_at` = conversations.created_at  \n",
+    "  ⇂ alter table `private_messages` modify `conversation_id` int unsigned not null  \n",
+    "  ⇂ alter table `private_messages` drop foreign key `private_messages_receiver_id_foreign`  \n",
+    "  ⇂ alter table `private_messages` drop `receiver_id`, drop `subject`, drop `related_to`, drop `read`  \n",
+    "  ⇂ alter table `private_messages` add constraint `private_messages_conversation_id_foreign` foreign key (`conversation_id`) references `conversations` (`id`) on delete cascade on update cascade  \n",
+    "\n",
+);
+
+/// Laravel 13.40.0, the short form: unit3d's real migration.
+const B1B_UNIT3D_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2024_06_06_042258_create_private_message_conversations .. \n",
+    "\n",
+    "\tThis migration is long and will take approximately 30-60 seconds per 100 thousand stored private messages.\n",
+    "\tCreating new tables and columns...\n",
+    "\tParsing previous private message structure...\n",
+    "\tInserting all conversations into new conversations table...\n",
+    "\tAdding conversation_id to all private messages...\n",
+    "\tInserting all conversation participants...\n",
+    "\tUpdating all conversation timestamps...\n",
+    "\tUpdating all participant timestamps...\n",
+    "\tDropping unused columns from private messages and adding constraints...\n",
+    " ⇂ create table `conversations` (`id` int unsigned not null auto_increment primary key, `subject` varchar(255) not null, `created_at` timestamp null, `updated_at` timestamp null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' \n",
+    " ⇂ alter table `conversations` add index `conversations_updated_at_index`(`updated_at`) \n",
+    " ⇂ alter table `conversations` add index `conversations_created_at_index`(`created_at`) \n",
+    " ⇂ create table `participants` (`id` int unsigned not null auto_increment primary key, `conversation_id` int unsigned not null, `user_id` int unsigned not null, `read` tinyint(1) not null default '0', `deleted_at` timestamp null, `created_at` timestamp null, `updated_at` timestamp null) default character set utf8mb4 collate 'utf8mb4_unicode_ci' \n",
+    " ⇂ alter table `participants` add unique `participants_user_id_conversation_id_unique`(`user_id`, `conversation_id`) \n",
+    " ⇂ alter table `participants` add index `participants_user_id_read_deleted_at_index`(`user_id`, `read`, `deleted_at`) \n",
+    " ⇂ alter table `participants` add constraint `participants_conversation_id_foreign` foreign key (`conversation_id`) references `conversations` (`id`) on delete cascade on update cascade \n",
+    " ⇂ alter table `participants` add constraint `participants_user_id_foreign` foreign key (`user_id`) references `users` (`id`) on delete cascade on update cascade \n",
+    " ⇂ alter table `participants` add index `participants_conversation_id_index`(`conversation_id`) \n",
+    " ⇂ alter table `private_messages` add `conversation_id` int unsigned null after `id` \n",
+    " ⇂ select `id`, `sender_id`, `receiver_id`, `subject`, `read`, `related_to`, `created_at`, `updated_at` from `private_messages` where `id` is not null order by `id` desc limit 1000 \n",
+    " ⇂ update `conversations` inner join (select `conversation_id`, MIN(created_at) AS min_created_at from `private_messages` group by `conversation_id`) as `oldest_messages` on `oldest_messages`.`conversation_id` = `conversations`.`id` set `conversations`.`created_at` = oldest_messages.min_created_at \n",
+    " ⇂ update `participants` inner join `conversations` on `conversations`.`id` = `participants`.`conversation_id` set `participants`.`created_at` = conversations.created_at \n",
+    " ⇂ alter table `private_messages` modify `conversation_id` int unsigned not null \n",
+    " ⇂ alter table `private_messages` drop foreign key `private_messages_receiver_id_foreign` \n",
+    " ⇂ alter table `private_messages` drop `receiver_id`, drop `subject`, drop `related_to`, drop `read` \n",
+    " ⇂ alter table `private_messages` add constraint `private_messages_conversation_id_foreign` foreign key (`conversation_id`) references `conversations` (`id`) on delete cascade on update cascade \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 10 to 13): echo "plain text" before Schema::table.
+const B1B_ECHO_BEFORE_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_02_000001_e_echo_before ............................................  \n",
+    "plain text\n",
+    "  ⇂ alter table `orders` add `s_a` int unsigned null  \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 10 to 13): echo between two Schema::table calls.
+const B1B_ECHO_BETWEEN_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_02_000002_e_echo_between ...........................................  \n",
+    "plain text\n",
+    "  ⇂ alter table `orders` add `s_a` int unsigned null  \n",
+    "  ⇂ alter table `orders` add `s_b` int unsigned null  \n",
+    "\n",
+);
+
+/// Laravel 13.40.0, the short form: echo between two Schema::table calls.
+const B1B_ECHO_BETWEEN_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2025_06_02_000002_e_echo_between .. \n",
+    "plain text\n",
+    " ⇂ alter table `orders` add `s_a` int unsigned null \n",
+    " ⇂ alter table `orders` add `s_b` int unsigned null \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 10 to 13): echo after the last Schema::table.
+const B1B_ECHO_AFTER_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_02_000003_e_echo_after .............................................  \n",
+    "plain text\n",
+    "  ⇂ alter table `orders` add `s_a` int unsigned null  \n",
+    "  ⇂ alter table `orders` add `s_b` int unsigned null  \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 10 to 13): a migration that only prints text.
+const B1B_ECHO_ONLY_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_02_000005_e_echo_only ..............................................  \n",
+    "plain text only\n",
+    "\n",
+    "\n",
+);
+
+/// Laravel 13.40.0, the short form: a migration that only prints text.
+const B1B_ECHO_ONLY_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2025_06_02_000005_e_echo_only .. \n",
+    "plain text only\n",
+    "\n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 10 to 13): a tab-indented line and no statement.
+const B1B_UNIT3D_ONLY_OUTPUT_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_02_000012_e_unit3d_only_output .....................................  \n",
+    "\tOnly text, no statement.\n",
+    "\n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 10 to 13): text printed without a line break runs into the first statement line.
+const B1B_ECHO_NONEWLINE_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_02_000004_e_echo_nonewline .........................................  \n",
+    "no newline  ⇂ alter table `orders` add `s_a` int unsigned null  \n",
+    "  ⇂ alter table `orders` add `s_b` int unsigned null  \n",
+    "\n",
+);
+
+/// Laravel 13.40.0, the short form: text printed without a line break.
+const B1B_ECHO_NONEWLINE_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2025_06_02_000004_e_echo_nonewline .. \n",
+    "no newline ⇂ alter table `orders` add `s_a` int unsigned null \n",
+    " ⇂ alter table `orders` add `s_b` int unsigned null \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 10 to 13): printed text with a color escape, a tab and indentation.
+const B1B_ECHO_BLANK_AND_ANSI_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_02_000013_e_echo_blank_and_ansi ....................................  \n",
+    "\n",
+    "\u{1b}[32mgreen text\u{1b}[0m\n",
+    "\ttabbed text\n",
+    "  indented text\n",
+    "  ⇂ alter table `orders` add `s_a` int unsigned null  \n",
+    "  ⇂ alter table `orders` add `s_b` int unsigned null  \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 10 to 13): dump() output.
+const B1B_DUMP_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_02_000006_e_dump ...................................................  \n",
+    "\"x\" // database/migrations_b1b/2025_06_02_000006_e_dump.php:14\n",
+    "string(1) \"y\"\n",
+    "  ⇂ alter table `orders` add `s_a` int unsigned null  \n",
+    "  ⇂ alter table `orders` add `s_b` int unsigned null  \n",
+    "\n",
+);
+
+/// Laravel 13.40.0, the short form: dump() output.
+const B1B_DUMP_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2025_06_02_000006_e_dump .. \n",
+    "\"x\" // database/migrations_b1b/2025_06_02_000006_e_dump.php:14\n",
+    "string(1) \"y\"\n",
+    " ⇂ alter table `orders` add `s_a` int unsigned null \n",
+    " ⇂ alter table `orders` add `s_b` int unsigned null \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 10 to 13): what reaches standard output from echo, print and printf.
+const B1B_STDERR_PRINT_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_02_000010_e_stderr_print ...........................................  \n",
+    "to STDOUT\n",
+    "print text\n",
+    "printf text\n",
+    "  ⇂ alter table `orders` add `s_a` int unsigned null  \n",
+    "  ⇂ alter table `orders` add `s_b` int unsigned null  \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 10 to 13): a migration prints a line that starts with ALTER TABLE.
+const B1B_SQL_WORD_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_02_000008_e_sql_word ...............................................  \n",
+    "ALTER TABLE x ADD y INT;\n",
+    "  ⇂ alter table `orders` add `s_a` int unsigned null  \n",
+    "  ⇂ alter table `orders` add `s_b` int unsigned null  \n",
+    "\n",
+);
+
+/// Laravel 13.40.0, the short form: a printed line that starts with ALTER TABLE.
+const B1B_SQL_WORD_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2025_06_02_000008_e_sql_word .. \n",
+    "ALTER TABLE x ADD y INT;\n",
+    " ⇂ alter table `orders` add `s_a` int unsigned null \n",
+    " ⇂ alter table `orders` add `s_b` int unsigned null \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 10 to 13): a printed line that starts with create table, and a statement named fake.
+const B1B_SQL_WORD_BEFORE_AND_AFTER_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_02_000009_e_sql_word_before_and_after ..............................  \n",
+    "create table z (id int)\n",
+    "  ⇂ alter table `orders` add `fake` int\n",
+    "  ⇂ alter table `orders` add `s_a` int unsigned null  \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 11 and 13.40.0): text, json and blob columns with a default.
+const B1B_TABLE_DEFAULTS_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_01_000001_d_table_defaults .........................................  \n",
+    "  ⇂ alter table `orders` add `a` text not null default ''  \n",
+    "  ⇂ alter table `orders` add `b` text null default 'x'  \n",
+    "  ⇂ alter table `orders` add `c` json null default '[]'  \n",
+    "  ⇂ alter table `orders` add `d` json not null default ('[]')  \n",
+    "  ⇂ alter table `orders` modify `note` text not null default ''  \n",
+    "  ⇂ alter table `orders` add `e` blob not null default ''  \n",
+    "  ⇂ alter table `orders` add `f` longtext not null default ''  \n",
+    "\n",
+);
+
+/// Laravel 13.40.0, the short form: text, json and blob columns with a default.
+const B1B_TABLE_DEFAULTS_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2025_06_01_000001_d_table_defaults .. \n",
+    " ⇂ alter table `orders` add `a` text not null default '' \n",
+    " ⇂ alter table `orders` add `b` text null default 'x' \n",
+    " ⇂ alter table `orders` add `c` json null default '[]' \n",
+    " ⇂ alter table `orders` add `d` json not null default ('[]') \n",
+    " ⇂ alter table `orders` modify `note` text not null default '' \n",
+    " ⇂ alter table `orders` add `e` blob not null default '' \n",
+    " ⇂ alter table `orders` add `f` longtext not null default '' \n",
+    "\n",
+);
+
+/// Laravel 10.50.4, derived from the framework source and not run: Laravel 10 joins the columns of one Schema::table into one ALTER TABLE.
+const B1B_TABLE_DEFAULTS_L10: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_01_000008_d_table_defaults_nochange ................................  \n",
+    "  ⇂ alter table `orders` add `a` text not null default '', add `b` text null default 'x', add `c` json null default '[]', add `d` json not null default ('[]'), add `e` blob not null default '', add `f` longtext not null default ''  \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 11 and 13.40.0): ->change() to text not null default ''.
+const B1B_NOTE_CHANGE_ONLY_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_01_000007_d_note_change_only .......................................  \n",
+    "  ⇂ alter table `orders` modify `note` text not null default ''  \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 11 and 13.40.0): expression defaults and a quoted json default.
+const B1B_EXPR_JSON_ARRAY_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_01_000006_d_expr_json_array ........................................  \n",
+    "  ⇂ alter table `orders` add `j5` json not null default (JSON_ARRAY())  \n",
+    "  ⇂ alter table `orders` add `t6` text not null default ('')  \n",
+    "  ⇂ alter table `orders` add `j7` json not null default '[]'  \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 (the same bytes in 13.40.0): a text default with a quote and a backslash.
+const B1B_QUOTE_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_06_01_000009_d_quote ..................................................  \n",
+    "  ⇂ alter table `orders` add `q1` text not null default 'it''s'  \n",
+    "  ⇂ alter table `orders` add `q2` text not null default 'a\\b'  \n",
+    "\n",
+);
+
+/// `orders` as a mysqldump schema writes it, with a VARCHAR `note` that a
+/// migration changes into text.
+const B1B_ORDERS_WITH_NOTE: &str = "create table `orders` (`id` bigint unsigned not null auto_increment, \
+    `note` varchar(50) default null, primary key (`id`)) \
+    engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;\n";
+
+const B1B_FAILS_1101: &str = "fails with error 1101";
+
+/// What kilit says about every statement of `output` on both servers, with
+/// the tables of `schema`: the same on both, or the test fails.
+fn b1b_answers(schema: &str, output: &str) -> Vec<String> {
+    let on_80 = answers("mysql-8.0.46", schema, output);
+    let on_84 = answers("mysql-8.4.13", schema, output);
+    assert_eq!(on_80, on_84, "{output}");
+    on_84
+}
+
+#[test]
+fn laravel_12_and_13_text_json_and_blob_defaults_fail_with_1101_where_mysql_refuses_them() {
+    // $table->text('a')->default(''); $table->text('b')->nullable()->default('x');
+    // $table->json('c')->nullable()->default('[]');
+    // $table->json('d')->default(new Expression("('[]')"));
+    // $table->text('note')->default('')->change();
+    // $table->binary('e')->default(''); $table->longText('f')->default('');
+    for (form, output) in [
+        ("Laravel 12 and 13, long form", B1B_TABLE_DEFAULTS_LONG),
+        ("Laravel 13, short form", B1B_TABLE_DEFAULTS_SHORT),
+    ] {
+        for (tables, schema) in [("no table", ""), ("the table", B1B_ORDERS_WITH_NOTE)] {
+            assert_eq!(
+                b1b_answers(schema, output),
+                [
+                    B1B_FAILS_1101, // a text not null default ''
+                    B1B_FAILS_1101, // b text null default 'x'
+                    B1B_FAILS_1101, // c json null default '[]'
+                    COPY,           // d json not null default ('[]'): an expression
+                    B1B_FAILS_1101, // modify note text not null default ''
+                    B1B_FAILS_1101, // e blob not null default ''
+                    B1B_FAILS_1101, // f longtext not null default ''
+                ],
+                "{form}, {tables}"
+            );
+        }
+    }
+}
+
+#[test]
+fn laravel_changing_a_column_to_text_with_a_default_fails_with_1101_with_or_without_the_table() {
+    // $table->text('note')->default('')->change(); in Laravel 11 to 13
+    // (Laravel 10 goes through Doctrine, which prints other SQL).
+    for schema in ["", B1B_ORDERS_WITH_NOTE] {
+        assert_eq!(
+            b1b_answers(schema, B1B_NOTE_CHANGE_ONLY_LONG),
+            [B1B_FAILS_1101],
+            "{schema}"
+        );
+    }
+}
+
+#[test]
+fn laravel_json_defaults_written_as_a_literal_fail_and_as_an_expression_copy() {
+    // $table->json('j7')->default('[]'); the expression form is
+    // default(new Expression("('')")) on text.
+    let answers = b1b_answers("", B1B_EXPR_JSON_ARRAY_LONG);
+    assert_eq!(answers.len(), 3, "{answers:?}");
+    // j5 json not null default (JSON_ARRAY()): not an answer of MySQL's
+    // success list.
+    assert_ne!(answers[0], INSTANT);
+    assert_eq!(answers[1], COPY, "t6 text not null default ('')");
+    assert_eq!(answers[2], B1B_FAILS_1101, "j7 json not null default '[]'");
+}
+
+#[test]
+fn laravel_text_defaults_with_a_quote_or_a_backslash_fail_with_1101() {
+    // $table->text('q1')->default("it's"); $table->text('q2')->default('a\b');
+    // Laravel 12 and 13 double the quote.
+    assert_eq!(
+        b1b_answers("", B1B_QUOTE_LONG),
+        [B1B_FAILS_1101, B1B_FAILS_1101]
+    );
+}
+
+#[test]
+fn laravel_10_joins_the_columns_of_a_table_into_one_alter_and_that_is_never_called_safe() {
+    // Derived, not run: the six columns of the migration are one statement.
+    // MySQL refuses it with 1101 at the first text column; kilit says that or
+    // that it cannot tell, and never a success.
+    for schema in ["", B1B_ORDERS_WITH_NOTE] {
+        let answers = b1b_answers(schema, B1B_TABLE_DEFAULTS_L10);
+        assert_eq!(answers.len(), 1, "{answers:?}");
+        assert!(
+            answers[0] == B1B_FAILS_1101 || answers[0] == "unknown",
+            "{answers:?}"
+        );
+    }
+}
+
+/// The text of the lines a migration printed, as kilit keeps it apart from
+/// the statements: the line number, and the text without the white space
+/// around it.
+fn b1b_printed(migration: &LaravelMigration) -> Vec<(usize, String)> {
+    migration
+        .printed
+        .iter()
+        .map(|line| (line.line, line.text.trim().to_owned()))
+        .collect()
+}
+
+/// The lines of the output that kilit could not read, as (line, text with
+/// the white space around it removed).
+fn b1b_unreadable(pretend: &Pretend) -> Vec<(usize, String)> {
+    pretend
+        .unreadable
+        .iter()
+        .map(|line| (line.line, line.text.trim().to_owned()))
+        .collect()
+}
+
+fn b1b_read(output: &str) -> Pretend {
+    read_pretend(output).expect("the output of migrate --pretend")
+}
+
+/// The SQL of the statements of the only migration of `pretend`.
+fn b1b_sql(pretend: &Pretend) -> Vec<String> {
+    assert_eq!(pretend.migrations.len(), 1, "{:?}", pretend.migrations);
+    pretend.migrations[0]
+        .statements
+        .iter()
+        .map(|statement| statement.sql.clone())
+        .collect()
+}
+
+#[test]
+fn what_unit3d_s_migration_prints_between_its_name_and_its_statements_is_text_not_an_unreadable_line()
+ {
+    // A real migration (unit3d, create_private_message_conversations) that
+    // tells the user what it does with a tab-indented line per step.
+    let expected = [
+        (
+            6,
+            "This migration is long and will take approximately 30-60 seconds per 100 thousand stored private messages.",
+        ),
+        (7, "Creating new tables and columns..."),
+        (8, "Parsing previous private message structure..."),
+        (
+            9,
+            "Inserting all conversations into new conversations table...",
+        ),
+        (10, "Adding conversation_id to all private messages..."),
+        (11, "Inserting all conversation participants..."),
+        (12, "Updating all conversation timestamps..."),
+        (13, "Updating all participant timestamps..."),
+        (
+            14,
+            "Dropping unused columns from private messages and adding constraints...",
+        ),
+    ];
+    for (form, output) in [
+        ("Laravel 12 and 13, long form", B1B_UNIT3D_LONG),
+        ("Laravel 13, short form", B1B_UNIT3D_SHORT),
+    ] {
+        let pretend = b1b_read(output);
+        assert!(
+            pretend.unreadable.is_empty(),
+            "{form}: {:?}",
+            pretend.unreadable
+        );
+        assert_eq!(pretend.error, None, "{form}");
+        assert_eq!(pretend.migrations.len(), 1, "{form}");
+        let migration = &pretend.migrations[0];
+        assert_eq!(
+            migration.name, "2024_06_06_042258_create_private_message_conversations",
+            "{form}"
+        );
+        assert_eq!(migration.statements.len(), 17, "{form}");
+        let expected: Vec<(usize, String)> = expected
+            .iter()
+            .map(|(line, text)| (*line, (*text).to_owned()))
+            .collect();
+        assert_eq!(b1b_printed(migration), expected, "{form}");
+    }
+}
+
+#[test]
+fn text_printed_before_the_statements_of_a_migration_is_kept_apart_in_every_place_it_can_sit() {
+    // echo "plain text" before, between and after the Schema::table calls:
+    // Laravel prints the statements after up() returns, so the text always
+    // comes first.
+    for (form, output, statements) in [
+        ("echo before", B1B_ECHO_BEFORE_LONG, 1),
+        ("echo between", B1B_ECHO_BETWEEN_LONG, 2),
+        ("echo between, short form", B1B_ECHO_BETWEEN_SHORT, 2),
+        ("echo after", B1B_ECHO_AFTER_LONG, 2),
+    ] {
+        let pretend = b1b_read(output);
+        assert!(
+            pretend.unreadable.is_empty(),
+            "{form}: {:?}",
+            pretend.unreadable
+        );
+        let sql = b1b_sql(&pretend);
+        assert_eq!(sql.len(), statements, "{form}: {sql:?}");
+        assert_eq!(
+            sql[0], "alter table `orders` add `s_a` int unsigned null",
+            "{form}"
+        );
+        assert_eq!(
+            b1b_printed(&pretend.migrations[0]),
+            [(5, "plain text".to_owned())],
+            "{form}"
+        );
+    }
+}
+
+#[test]
+fn dump_output_and_the_output_of_print_and_printf_are_text_of_the_migration() {
+    let pretend = b1b_read(B1B_DUMP_LONG);
+    assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
+    assert_eq!(
+        b1b_printed(&pretend.migrations[0]),
+        [
+            (
+                5,
+                "\"x\" // database/migrations_b1b/2025_06_02_000006_e_dump.php:14".to_owned()
+            ),
+            (6, "string(1) \"y\"".to_owned()),
+        ]
+    );
+    assert_eq!(b1b_sql(&pretend).len(), 2);
+
+    let pretend = b1b_read(B1B_DUMP_SHORT);
+    assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
+    assert_eq!(pretend.migrations[0].printed.len(), 2);
+
+    let pretend = b1b_read(B1B_STDERR_PRINT_LONG);
+    assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
+    assert_eq!(
+        b1b_printed(&pretend.migrations[0]),
+        [
+            (5, "to STDOUT".to_owned()),
+            (6, "print text".to_owned()),
+            (7, "printf text".to_owned()),
+        ]
+    );
+    assert_eq!(b1b_sql(&pretend).len(), 2);
+}
+
+#[test]
+fn printed_text_with_a_color_a_tab_and_indentation_is_text_of_the_migration() {
+    // The migration prints a blank line, a line in green, a tabbed line and
+    // an indented one.
+    let pretend = b1b_read(B1B_ECHO_BLANK_AND_ANSI_LONG);
+    assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
+    let printed = b1b_printed(&pretend.migrations[0]);
+    assert_eq!(printed.len(), 3, "{printed:?}");
+    assert!(printed[0].1.contains("green text"), "{printed:?}");
+    assert!(printed[1].1.contains("tabbed text"), "{printed:?}");
+    assert!(printed[2].1.contains("indented text"), "{printed:?}");
+    assert_eq!(b1b_sql(&pretend).len(), 2);
+}
+
+#[test]
+fn text_from_a_migration_with_no_statement_is_text_when_another_migration_follows() {
+    // A migration that only echoes, then the next migration's name line:
+    // Laravel went on, so the text is the migration's.
+    let output = "
+   INFO  Running migrations.
+
+  2025_06_02_000005_e_echo_only ..............................................
+plain text only
+
+  2025_06_02_000011_e_unit3d_form ............................................
+  \u{21c2} alter table `orders` add `s_a` int unsigned null
+";
+    let pretend = b1b_read(output);
+    assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
+    assert_eq!(pretend.migrations.len(), 2);
+    assert!(pretend.migrations[0].statements.is_empty());
+    assert_eq!(
+        b1b_printed(&pretend.migrations[0]),
+        [(5, "plain text only".to_owned())]
+    );
+    assert!(pretend.migrations[1].printed.is_empty());
+}
+
+#[test]
+fn text_at_the_very_end_of_the_output_is_an_unreadable_line() {
+    // Real runs of a migration that only prints, as the last one: an error
+    // screen kilit does not recognize also ends the output, so the text is
+    // never taken for the migration's. (Laravel exits 0 on these; kilit
+    // cannot tell them from an error.)
+    for (form, output, expected) in [
+        ("echo only", B1B_ECHO_ONLY_LONG, "plain text only"),
+        (
+            "echo only, short form",
+            B1B_ECHO_ONLY_SHORT,
+            "plain text only",
+        ),
+        (
+            "tabbed line only",
+            B1B_UNIT3D_ONLY_OUTPUT_LONG,
+            "Only text, no statement.",
+        ),
+    ] {
+        let pretend = b1b_read(output);
+        assert_eq!(
+            b1b_unreadable(&pretend),
+            [(5, expected.to_owned())],
+            "{form}"
+        );
+        assert!(pretend.migrations[0].printed.is_empty(), "{form}");
+        assert!(pretend.migrations[0].statements.is_empty(), "{form}");
+    }
+}
+
+#[test]
+fn a_symfony_style_file_and_line_header_is_never_printed_text() {
+    let output = "
+   INFO  Running migrations.
+
+  2026_02_01_000041_first_alter_orders_table .................................
+In 2026_02_01_000041_first_alter_orders_table.php line 15:
+  \u{21c2} alter table `orders` add `qty` int null
+";
+    let pretend = b1b_read(output);
+    assert!(pretend.migrations[0].printed.is_empty());
+}
+
+#[test]
+fn a_printed_line_that_starts_with_an_sql_word_is_an_unreadable_line_and_nothing_is_skipped() {
+    // echo "ALTER TABLE x ADD y INT;": the user may have printed a statement
+    // instead of running it; kilit does not skip it.
+    for (form, output) in [
+        ("long form", B1B_SQL_WORD_LONG),
+        ("short form", B1B_SQL_WORD_SHORT),
+    ] {
+        let pretend = b1b_read(output);
+        assert_eq!(
+            b1b_unreadable(&pretend),
+            [(5, "ALTER TABLE x ADD y INT;".to_owned())],
+            "{form}"
+        );
+        assert!(pretend.migrations[0].printed.is_empty(), "{form}");
+        // The two real statements are still read.
+        assert_eq!(b1b_sql(&pretend).len(), 2, "{form}");
+    }
+    let pretend = b1b_read(B1B_SQL_WORD_BEFORE_AND_AFTER_LONG);
+    assert_eq!(
+        b1b_unreadable(&pretend),
+        [(5, "create table z (id int)".to_owned())]
+    );
+    assert!(pretend.migrations[0].printed.is_empty());
+    assert_eq!(
+        b1b_sql(&pretend),
+        [
+            "alter table `orders` add `fake` int",
+            "alter table `orders` add `s_a` int unsigned null"
+        ]
+    );
+}
+
+#[test]
+fn text_printed_without_a_line_break_that_runs_into_a_statement_line_is_unreadable() {
+    // echo "no newline": the text and Laravel's mark share a line, so the
+    // statement on it is not read. kilit must not take the line for text.
+    for (form, output) in [
+        ("long form", B1B_ECHO_NONEWLINE_LONG),
+        ("short form", B1B_ECHO_NONEWLINE_SHORT),
+    ] {
+        let pretend = b1b_read(output);
+        assert_eq!(
+            pretend.unreadable.len(),
+            1,
+            "{form}: {:?}",
+            pretend.unreadable
+        );
+        assert_eq!(pretend.unreadable[0].line, 5, "{form}");
+        let text = &pretend.unreadable[0].text;
+        assert!(text.contains("no newline"), "{form}: {text}");
+        assert!(
+            text.contains("alter table `orders` add `s_a` int unsigned null"),
+            "{form}: {text}"
+        );
+        assert!(pretend.migrations[0].printed.is_empty(), "{form}");
+        // The statement on the next line is read.
+        assert_eq!(
+            b1b_sql(&pretend),
+            ["alter table `orders` add `s_b` int unsigned null"],
+            "{form}"
+        );
+    }
+}
+
+#[test]
+fn a_laravel_10_dump_error_line_after_a_migration_name_stays_unreadable() {
+    // Laravel 10 prints `ERROR  [name] failed to dump queries.` when it
+    // cannot dump a migration's queries. It is Laravel's own line: neither the
+    // migration's text nor skipped.
+    let output = "
+   INFO  Running migrations.
+
+  2026_11_02_090100_widen_amount_on_orders_table .............................
+
+   ERROR  [2026_11_02_090100_widen_amount_on_orders_table] failed to dump queries.
+  \u{21c2} alter table `orders` add `qty` int null
+";
+    for output in [
+        output.to_owned(),
+        output.replace("  \u{21c2} alter table `orders` add `qty` int null\n", ""),
+    ] {
+        let pretend = b1b_read(&output);
+        assert_eq!(
+            b1b_unreadable(&pretend),
+            [(
+                6,
+                "ERROR  [2026_11_02_090100_widen_amount_on_orders_table] failed to dump queries."
+                    .to_owned()
+            )]
+        );
+        assert!(pretend.migrations[0].printed.is_empty());
+    }
+}
+
+#[test]
+fn a_printed_sql_statement_that_looks_like_laravel_s_dotted_line_is_unreadable() {
+    // A line with " .." in it was skipped as Laravel's own dotted task line
+    // before, statement or not.
+    for line in [
+        "ALTER TABLE x ADD y INT ..",
+        "alter table `x` add `y` int ..",
+        "  create table z (id int) ..",
+        "DROP TABLE x ..",
+    ] {
+        let output = format!(
+            "
+   INFO  Running migrations.
+
+  2026_11_02_090100_widen_amount_on_orders_table .............................
+{line}
+  \u{21c2} alter table `orders` add `qty` int null
+"
+        );
+        let pretend = b1b_read(&output);
+        assert_eq!(
+            pretend.unreadable.len(),
+            1,
+            "{line}: {:?}",
+            pretend.unreadable
+        );
+        assert_eq!(pretend.unreadable[0].line, 5, "{line}");
+        assert_eq!(pretend.unreadable[0].text.trim(), line.trim(), "{line}");
+        assert!(pretend.migrations[0].printed.is_empty(), "{line}");
+    }
+}
+
+#[test]
+fn printed_text_belongs_to_the_migration_that_printed_it() {
+    // Two migrations: the first prints nothing, the second prints a line. And
+    // the other way round, with the text of the first followed by the second's
+    // name line.
+    let first_plain = "
+   INFO  Running migrations.
+
+  2026_11_02_090000_add_qty_to_orders_table ..................................
+  \u{21c2} alter table `orders` add `qty` int null
+  2026_11_02_090100_widen_amount_on_orders_table .............................
+plain text
+  \u{21c2} alter table `orders` modify `amount` bigint not null
+";
+    let pretend = b1b_read(first_plain);
+    assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
+    assert_eq!(pretend.migrations.len(), 2);
+    assert!(pretend.migrations[0].printed.is_empty());
+    assert_eq!(
+        b1b_printed(&pretend.migrations[1]),
+        [(7, "plain text".to_owned())]
+    );
+
+    let second_plain = "
+   INFO  Running migrations.
+
+  2026_11_02_090000_add_qty_to_orders_table ..................................
+plain text
+  \u{21c2} alter table `orders` add `qty` int null
+  2026_11_02_090100_widen_amount_on_orders_table .............................
+  \u{21c2} alter table `orders` modify `amount` bigint not null
+";
+    let pretend = b1b_read(second_plain);
+    assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
+    assert_eq!(
+        b1b_printed(&pretend.migrations[0]),
+        [(5, "plain text".to_owned())]
+    );
+    assert!(pretend.migrations[1].printed.is_empty());
+}
+
+#[test]
+fn text_a_migration_prints_does_not_change_what_kilit_reads_of_its_statements() {
+    // unit3d's migration without its nine lines gives the same statements.
+    let without_text: String = B1B_UNIT3D_LONG
+        .lines()
+        .filter(|line| !line.starts_with('\t'))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let with = b1b_read(B1B_UNIT3D_LONG);
+    let without = b1b_read(&without_text);
+    assert!(without.unreadable.is_empty(), "{:?}", without.unreadable);
+    assert_eq!(b1b_sql(&with), b1b_sql(&without));
+    assert!(without.migrations[0].printed.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Step B1b, fix phase: a statement line whose mark a code page has mangled.
+// Windows passes Laravel's mark `⇂` (the bytes E2 87 82) on as the characters
+// of the console's code page; in code page 936 they read `鈬�`. The line is
+// still a statement, so it must not be taken for text a migration printed.
+// The lines are built from the bytes of Laravel 12.71.0's output with the
+// mark replaced, as the review saw them.
+
+/// A long-form output whose first migration has `line` between its name and
+/// its first known statement.
+fn mangled_before_a_statement(line: &str) -> String {
+    format!(
+        "\n   INFO  Running migrations.  \n\n  2025_06_02_000020_g_mangled_mark ...........................................  \n{line}\n  ⇂ alter table `orders` add `s_a` int unsigned null  \n\n"
+    )
+}
+
+/// The same with the short form's spacing.
+fn mangled_before_a_statement_short(line: &str) -> String {
+    format!(
+        "\n INFO Running migrations. \n\n 2025_06_02_000020_g_mangled_mark .. \n{line}\n ⇂ alter table `orders` add `s_a` int unsigned null \n\n"
+    )
+}
+
+/// Marks and statements a code page can make of one statement line.
+const MANGLED_STATEMENT_LINES: [&str; 9] = [
+    // Code page 936, the review's form.
+    "  鈬� alter table `orders` add fulltext `orders_note_fulltext`(`note`)  ",
+    "  鈬� create index `orders_amount_index` on `orders` (`amount`)  ",
+    // A mark of a single letter-led token.
+    "  x alter table `orders` add `b` int null  ",
+    "  ab drop index `orders_amount_index`  ",
+    "  Z insert into `orders` (`amount`) values (1)  ",
+    // A mark of two tokens.
+    "  â ‡ alter table `orders` add `c` int null  ",
+    "  a b create index `i` on `orders` (`note`)  ",
+    // An SQL word followed by a backticked name, far from the line's start.
+    "  a b c update `orders` set `amount` = 1  ",
+    "  é\u{2021}\u{201a} delete from `orders`  ",
+];
+
+#[test]
+fn a_statement_line_with_a_mark_kilit_does_not_know_stays_an_unreadable_line() {
+    for line in MANGLED_STATEMENT_LINES {
+        for (form, output) in [
+            ("long form", mangled_before_a_statement(line)),
+            ("short form", mangled_before_a_statement_short(line)),
+        ] {
+            let pretend = b1b_read(&output);
+            assert_eq!(
+                b1b_unreadable(&pretend),
+                [(5, line.trim().to_owned())],
+                "{form}: {line}"
+            );
+            assert!(
+                pretend.migrations[0].printed.is_empty(),
+                "{form}: {line}: {:?}",
+                pretend.migrations[0].printed
+            );
+            // Laravel's own statement after it is still read.
+            assert_eq!(
+                b1b_sql(&pretend),
+                ["alter table `orders` add `s_a` int unsigned null"],
+                "{form}: {line}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_statement_line_with_an_unknown_mark_before_the_next_migration_stays_an_unreadable_line() {
+    // The first migration has no statement a known mark shows; the next
+    // migration's name ends what it printed.
+    for line in MANGLED_STATEMENT_LINES {
+        let output = format!(
+            "\n   INFO  Running migrations.  \n\n  2025_06_02_000021_g_first ..................................................  \n{line}\n  2025_06_02_000022_g_second .................................................  \n  ⇂ alter table `orders` add `s_a` int unsigned null  \n\n"
+        );
+        let pretend = b1b_read(&output);
+        assert_eq!(
+            b1b_unreadable(&pretend),
+            [(5, line.trim().to_owned())],
+            "{line}"
+        );
+        assert_eq!(pretend.migrations.len(), 2, "{line}");
+        assert!(pretend.migrations[0].printed.is_empty(), "{line}");
+        assert_eq!(
+            pretend.migrations[1].statements.len(),
+            1,
+            "{line}: {:?}",
+            pretend.migrations[1].statements
+        );
+    }
+}
+
+#[test]
+fn a_mangled_statement_line_between_printed_text_and_the_statements_is_unreadable_and_the_text_is_not()
+ {
+    // Text the migration printed, then a statement line with a mangled mark.
+    let output = "
+   INFO  Running migrations.
+
+  2025_06_02_000023_g_text_and_mark ..........................................
+\tCreating new tables and columns...
+  鈬� alter table `orders` add fulltext `orders_note_fulltext`(`note`)
+  ⇂ alter table `orders` add `s_a` int unsigned null
+
+";
+    let pretend = b1b_read(output);
+    assert_eq!(
+        b1b_unreadable(&pretend),
+        [(
+            6,
+            "鈬� alter table `orders` add fulltext `orders_note_fulltext`(`note`)".to_owned()
+        )]
+    );
+    assert_eq!(
+        b1b_sql(&pretend),
+        ["alter table `orders` add `s_a` int unsigned null"]
+    );
+}
+
+#[test]
+fn unit3d_s_lines_with_words_such_as_table_and_columns_stay_printed_text() {
+    // unit3d's lines, which hold words such as "table" and "columns" but
+    // start no statement, are still text.
+    let pretend = b1b_read(B1B_UNIT3D_LONG);
+    assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
+    assert_eq!(pretend.migrations[0].printed.len(), 9);
+}
+
+// ---------------------------------------------------------------------------
+// Step B1b, second fix phase: text a migration prints without a line break
+// runs into the statement line that follows it. When the console's code
+// page has mangled that line's mark, the line is a statement kilit cannot
+// read (it may change data), not text. The inputs are the review's ron.txt
+// and ron2.txt (cp1252 shows the mark `⇂` as `â‡‚`); the expectation is the
+// hand test's: `insert ignore` filled the table, MySQL gave 1062 on the
+// ADD UNIQUE after it, so the output must not be taken as fully read.
+
+/// The statement lines the review saw, with the text printed before them.
+const RUN_INTO_LINES: [&str; 7] = [
+    "no newline  â‡‚ SET FOREIGN_KEY_CHECKS=0;",
+    "Copying codes  â‡‚ insert ignore into `t` (`code`) values ('a'), ('a')",
+    "Done  â‡‚ update orders set x = 1",
+    "Done  â‡‚ alter table `orders` add `b` int null",
+    // A mark that came through as a question mark.
+    "Copying codes  ? insert ignore into `t` (`code`) values ('a')",
+    // A mark of a double-byte code page.
+    "Copying codes  鈬� delete from `t`",
+    // A mark of one non-ASCII token.
+    "Copying codes  é‡ truncate table `t`",
+];
+
+#[test]
+fn text_printed_without_a_line_break_before_a_mangled_statement_line_is_an_unreadable_line() {
+    for line in RUN_INTO_LINES {
+        for (form, output) in [
+            ("long form", mangled_before_a_statement(line)),
+            ("short form", mangled_before_a_statement_short(line)),
+        ] {
+            let pretend = b1b_read(&output);
+            assert_eq!(
+                b1b_unreadable(&pretend),
+                [(5, line.trim().to_owned())],
+                "{form}: {line}"
+            );
+            assert!(
+                pretend.migrations[0].printed.is_empty(),
+                "{form}: {line}: {:?}",
+                pretend.migrations[0].printed
+            );
+            assert_eq!(
+                b1b_sql(&pretend),
+                ["alter table `orders` add `s_a` int unsigned null"],
+                "{form}: {line}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_reviews_run_in_output_keeps_its_insert_ignore_as_an_unreadable_line() {
+    // ron2.txt with Laravel's own lines in the right mark: a migration that
+    // prints "Copying codes" without a line break and then runs
+    // `insert ignore`, before an ADD UNIQUE.
+    let output = "
+   INFO  Running migrations.
+
+  2025_06_02_000001_create_t ..............
+  ⇂ create table `t` (`id` bigint unsigned not null auto_increment primary key, `code` varchar(20) not null)
+  2025_06_02_000002_fill_t ..............
+Copying codes  â‡‚ insert ignore into `t` (`code`) values ('a'), ('a')
+  ⇂ alter table `t` add unique `t_code_unique`(`code`)
+
+";
+    let pretend = b1b_read(output);
+    assert_eq!(
+        b1b_unreadable(&pretend),
+        [(
+            7,
+            "Copying codes  â‡‚ insert ignore into `t` (`code`) values ('a'), ('a')".to_owned()
+        )]
+    );
+    assert!(pretend.migrations[1].printed.is_empty());
+    assert_eq!(pretend.migrations[1].statements.len(), 1);
+}
+
+#[test]
+fn plain_text_printed_before_a_statement_line_stays_text() {
+    // Regression: a printed line with no mark and no statement word (as in
+    // unit3d's nine lines) is still text.
+    let output = mangled_before_a_statement("\tCreating new tables and columns...");
+    let pretend = b1b_read(&output);
+    assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
+    assert_eq!(pretend.migrations[0].printed.len(), 1);
+}
