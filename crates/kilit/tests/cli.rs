@@ -557,6 +557,277 @@ fn the_action_installs_the_workspace_version_by_default() {
     );
 }
 
+/// The digits and dots right after `prefix` in `text`, for every place the
+/// prefix occurs.
+fn versions_after(text: &str, prefix: &str) -> Vec<String> {
+    text.match_indices(prefix)
+        .map(|(at, _)| {
+            text[at + prefix.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect::<String>()
+                .trim_end_matches('.')
+                .to_owned()
+        })
+        .collect()
+}
+
+/// The text of the newest CHANGELOG.md entry: from the first line that
+/// starts `## [` up to the next line that starts `## `, which is what
+/// release.yml copies into the release notes.
+fn newest_changelog_entry(changelog: &str) -> (String, Vec<&str>) {
+    let mut lines = changelog
+        .lines()
+        .skip_while(|line| !line.starts_with("## ["));
+    let heading = lines
+        .next()
+        .expect("CHANGELOG.md has no entry: add a line `## [x.y.z] - YYYY-MM-DD`")
+        .to_owned();
+    (
+        heading,
+        lines.take_while(|line| !line.starts_with("## ")).collect(),
+    )
+}
+
+/// The version of kilit at the start of `text`: digits and dots with at least
+/// one dot, such as `0.1.0`; `None` for anything else (`$VERSION`, `v7`).
+fn version_at(text: &str) -> Option<String> {
+    let version = text
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect::<String>();
+    let version = version.trim_end_matches('.');
+    (version.starts_with(|c: char| c.is_ascii_digit()) && version.contains('.'))
+        .then(|| version.to_owned())
+}
+
+/// Every version of kilit that `text` writes out, as (line, form, version).
+/// The forms: `kilit-<x.y.z>-` (an archive name), `Veysel440/kilit@v<x.y.z>`,
+/// `/v<x.y.z>` on a line with a Veysel440/kilit URL, `# v<x.y.z>` on a line
+/// with `Veysel440/kilit@`, `VERSION=<x.y.z>`, and `version: <x.y.z>` (quoted
+/// or not) in a fenced block that has `uses: Veysel440/kilit`. Other versions
+/// (MySQL, Laravel, other actions, tools) are not looked at.
+fn kilit_versions_in(text: &str) -> Vec<(usize, &'static str, String)> {
+    let mut found = Vec::new();
+    // The fenced blocks: (first line, last line) in 0-based line numbers.
+    let lines: Vec<&str> = text.lines().collect();
+    let mut blocks = Vec::new();
+    let mut open = None;
+    for (index, line) in lines.iter().enumerate() {
+        if line.trim_start().starts_with("```") {
+            match open.take() {
+                Some(start) => blocks.push((start, index)),
+                None => open = Some(index),
+            }
+        }
+    }
+    for (index, line) in lines.iter().enumerate() {
+        let number = index + 1;
+        let mut take = |form: &'static str, prefix: &str, after: Option<char>| {
+            for (at, _) in line.match_indices(prefix) {
+                let rest = &line[at + prefix.len()..];
+                if let Some(version) = version_at(rest) {
+                    let end = &rest[version.len()..];
+                    if after.is_none_or(|c| end.starts_with(c)) {
+                        found.push((number, form, version));
+                    }
+                }
+            }
+        };
+        take("kilit-<version>-", "kilit-", Some('-'));
+        take("Veysel440/kilit@v<version>", "Veysel440/kilit@v", None);
+        if line.contains("Veysel440/kilit") {
+            take("/v<version> in a Veysel440/kilit URL", "/v", None);
+        }
+        if line.contains("Veysel440/kilit@") {
+            take("# v<version> after a uses line", "# v", None);
+        }
+        for (at, _) in line.match_indices("VERSION=") {
+            let alone = line[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_');
+            let rest = line[at + "VERSION=".len()..].trim_start_matches(['"', '\'']);
+            if let (true, Some(version)) = (alone, version_at(rest)) {
+                found.push((number, "VERSION=<version>", version));
+            }
+        }
+    }
+    for (start, end) in blocks {
+        if !lines[start..end]
+            .iter()
+            .any(|line| line.contains("uses: Veysel440/kilit"))
+        {
+            continue;
+        }
+        for (index, line) in lines.iter().enumerate().take(end).skip(start) {
+            let value = line
+                .trim_start()
+                .trim_start_matches("- ")
+                .trim_start()
+                .strip_prefix("version:")
+                .map(|rest| rest.trim_start().trim_start_matches(['"', '\'']));
+            if let Some(version) = value.and_then(version_at) {
+                found.push((
+                    index + 1,
+                    "version: <version> next to uses: Veysel440/kilit",
+                    version,
+                ));
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+#[test]
+fn every_place_that_names_the_current_version_agrees_with_the_workspace_version() {
+    let version = env!("CARGO_PKG_VERSION");
+    let root = repository_root();
+    let read = |name: &str| {
+        std::fs::read_to_string(root.join(name))
+            .unwrap_or_else(|error| panic!("cannot read {name}: {error}"))
+    };
+
+    // The newest CHANGELOG.md entry: `## [x.y.z] - YYYY-MM-DD`.
+    let changelog = read("CHANGELOG.md");
+    let (heading, entry) = newest_changelog_entry(&changelog);
+    let named = heading
+        .strip_prefix("## [")
+        .and_then(|rest| rest.split_once("] - "))
+        .unwrap_or_else(|| {
+            panic!("the newest CHANGELOG.md entry is {heading:?}: write it as `## [x.y.z] - YYYY-MM-DD`")
+        });
+    assert_eq!(
+        named.0, version,
+        "the newest CHANGELOG.md entry is for {:?}, but the workspace version is {version:?}: \
+         add an entry for {version} at the top of CHANGELOG.md",
+        named.0
+    );
+    let date: Vec<&str> = named.1.split('-').collect();
+    assert!(
+        date.len() == 3
+            && [4, 2, 2].iter().zip(&date).all(|(width, part)| {
+                part.len() == *width && part.chars().all(|c| c.is_ascii_digit())
+            }),
+        "the date of the CHANGELOG.md entry is {:?}: write it as YYYY-MM-DD",
+        named.1
+    );
+    assert!(
+        entry.iter().any(|line| !line.trim().is_empty()),
+        "the CHANGELOG.md entry for {version} is empty: release.yml refuses to publish it, so \
+         write what changed under the heading"
+    );
+
+    // release.yml copies the entry as it is: no link definitions anywhere.
+    for (number, line) in changelog.lines().enumerate() {
+        let definition = line
+            .trim_start()
+            .strip_prefix('[')
+            .and_then(|rest| rest.split_once("]:"))
+            .is_some_and(|(label, after)| {
+                !label.is_empty() && !label.contains(']') && after.starts_with(char::is_whitespace)
+            });
+        assert!(
+            !definition,
+            "CHANGELOG.md line {} is a link definition ({line:?}): write the link inline, \
+             because release.yml copies the entry into the release notes without the definitions",
+            number + 1
+        );
+    }
+
+    // The README's `VERSION=x.y.z` line, exactly one.
+    let readme = read("README.md");
+    let lines: Vec<&str> = readme
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("VERSION="))
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "README.md has {} lines that start `VERSION=` ({lines:?}): it needs exactly one, \
+         `VERSION={version}`",
+        lines.len()
+    );
+    let value = lines[0]["VERSION=".len()..].trim_matches(|c| c == '"' || c == '\'');
+    assert_eq!(
+        value, version,
+        "README.md has the line {:?}, but the workspace version is {version:?}: change it to \
+         `VERSION={version}`",
+        lines[0]
+    );
+
+    // Every `Veysel440/kilit@v<x.y.z>` in the README and in docs/.
+    let mut pages = vec![("README.md".to_owned(), readme)];
+    let mut docs: Vec<PathBuf> = std::fs::read_dir(root.join("docs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+        .collect();
+    docs.sort();
+    for path in docs {
+        let name = format!("docs/{}", path.file_name().unwrap().to_str().unwrap());
+        pages.push((name.clone(), read(&name)));
+    }
+    assert!(
+        !versions_after(&pages[0].1, "Veysel440/kilit@v").is_empty(),
+        "README.md never says `uses: Veysel440/kilit@v{version}`: the In CI section needs it"
+    );
+    for (name, text) in &pages {
+        for (line, form, named) in kilit_versions_in(text) {
+            assert_eq!(
+                named, version,
+                "{name} line {line} writes {named:?} as {form}, but the workspace version is \
+                 {version:?}: change it to {version}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_version_scan_finds_the_versions_of_kilit_and_no_others() {
+    let text = "\
+MySQL 8.0.46 and 8.4.13, Laravel 12.71, rust 1.88, setup-php 2.40.0
+keepachangelog 1.1.0: https://keepachangelog.com/en/1.1.0/
+- uses: actions/checkout@3d3c42e5 # v7.0.1
+https://img.shields.io/github/v/release/Veysel440/kilit
+VERSION=0.0.1
+curl -O \"https://github.com/Veysel440/kilit/releases/download/v$VERSION/kilit-$VERSION-$TARGET.tar.gz\"
+kilit-0.0.2-x86_64-pc-windows-msvc.zip kilit-lab kilit-core
+gh api repos/Veysel440/kilit/commits/v0.0.3 --jq .sha
+PHP_VERSION=8.3.1
+```yaml
+- uses: Veysel440/kilit@v0.0.4
+  with:
+    version: \"0.0.5\"
+    php-version: 8.3
+- uses: Veysel440/kilit@3d3c42e5 # v0.0.6
+```
+```yaml
+- uses: shivammathur/setup-php@v2
+  with:
+    version: 2.40.0
+```
+";
+    let found: Vec<(usize, String)> = kilit_versions_in(text)
+        .into_iter()
+        .map(|(line, _, version)| (line, version))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (5, "0.0.1".to_owned()),
+            (7, "0.0.2".to_owned()),
+            (8, "0.0.3".to_owned()),
+            (11, "0.0.4".to_owned()),
+            (13, "0.0.5".to_owned()),
+            (15, "0.0.6".to_owned()),
+        ]
+    );
+}
+
 #[test]
 fn the_readme_example_is_real_output() {
     // The README shows some migrations of the demo, run from a Laravel
@@ -5987,6 +6258,7 @@ fn every_relative_link_points_at_a_file() {
     let mut files = vec![
         root.join("README.md"),
         root.join("CONTRIBUTING.md"),
+        root.join("CHANGELOG.md"),
         root.join("scenarios/README.md"),
     ];
     let mut docs: Vec<PathBuf> = std::fs::read_dir(root.join("docs"))
@@ -8912,4 +9184,180 @@ fn a_title_of_255_characters_or_fewer_is_unchanged_and_a_longer_one_is_cut_to_25
         assert_eq!(github.status, Some(3));
         assert_well_formed(&github);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Laravel stops at its confirmation for an application in production.
+//
+// Real runs of Laravel 12.71.0 (APP_ENV not set, no terminal; the output of
+// Laravel 10.25 and later and of Laravel 11 is derived from their source and
+// is the same bytes, not a real run; Laravel 10.0 to 10.24 print other bytes) and, answered `y` in a terminal, the migration that then ran.
+// ---------------------------------------------------------------------------
+
+/// `php artisan migrate --pretend > out`, APP_ENV not set: the box, then the
+/// cancel line; nothing ran.
+const CONFIRM_STOP_L12_PIPED: &str = concat!(
+    "\n",
+    "                                                                                \n",
+    "                           APPLICATION IN PRODUCTION.                           \n",
+    "                                                                                \n",
+    "\n",
+    "   WARN  Command cancelled.  \n",
+    "\n",
+);
+/// Laravel 12.71.0 in a terminal, answered `y`: the migration ran under
+/// --pretend.
+const CONFIRM_YES_L12_TERMINAL: &str = concat!(
+    "\r\n",
+    "  \u{1b}[30;43m                                                                            \u{1b}[39;49m  \r\n",
+    "  \u{1b}[30;43m                         APPLICATION IN PRODUCTION.                         \u{1b}[39;49m  \r\n",
+    "  \u{1b}[30;43m                                                                            \u{1b}[39;49m  \r\n",
+    "\u{1b}[?25l\r\n",
+    "\u{1b}[90m ┌\u{1b}[39m \u{1b}[36mAre you sure you want to run this command?\u{1b}[39m \u{1b}[90m──────────────────┐\u{1b}[39m\r\n",
+    "\u{1b}[90m │\u{1b}[39m \u{1b}[2m○ Yes /\u{1b}[22m \u{1b}[32m●\u{1b}[39m No                                                 \u{1b}[90m│\u{1b}[39m\r\n",
+    "\u{1b}[90m └──────────────────────────────────────────────────────────────┘\u{1b}[39m\r\n",
+    "\r\n",
+    "\u{1b}[1G\u{1b}[5A\u{1b}[J\r\n",
+    "\u{1b}[90m ┌\u{1b}[39m \u{1b}[36mAre you sure you want to run this command?\u{1b}[39m \u{1b}[90m──────────────────┐\u{1b}[39m\r\n",
+    "\u{1b}[90m │\u{1b}[39m \u{1b}[32m●\u{1b}[39m Yes \u{1b}[2m/ ○ No\u{1b}[22m                                                 \u{1b}[90m│\u{1b}[39m\r\n",
+    "\u{1b}[90m └──────────────────────────────────────────────────────────────┘\u{1b}[39m\r\n",
+    "\r\n",
+    "\u{1b}[1G\u{1b}[5A\u{1b}[J\r\n",
+    "\u{1b}[90m ┌\u{1b}[39m \u{1b}[2mAre you sure you want to run this command?\u{1b}[22m \u{1b}[90m──────────────────┐\u{1b}[39m\r\n",
+    "\u{1b}[90m │\u{1b}[39m Yes                                                          \u{1b}[90m│\u{1b}[39m\r\n",
+    "\u{1b}[90m └──────────────────────────────────────────────────────────────┘\u{1b}[39m\r\n",
+    "\r\n",
+    "\u{1b}[?25h  \u{1b}[37;44m INFO \u{1b}[39;49m Running migrations.  \r\n",
+    "\r\n",
+    "  2025_03_01_000000_widen_orders_amount \u{1b}[90m......................................\u{1b}[39m  \r\n",
+    "  \u{1b}[90m⇂ alter table `orders` modify `amount` bigint unsigned not null\u{1b}[39m  \r\n",
+    "  \u{1b}[90m⇂ alter table `orders` add index `orders_user_id_idx`(`user_id`)\u{1b}[39m  \r\n",
+    "\r\n",
+);
+const CONFIRM_STOP_MESSAGE: &str = "Laravel stopped at its confirmation for an application in \
+     production (APP_ENV is production or not set) and cancelled the command; no statement was seen";
+
+#[test]
+fn laravel_stopping_at_the_production_confirmation_exits_with_2_also_with_strict() {
+    for args in [&["check"][..], &["check", "--strict"][..]] {
+        let output = kilit(args, CONFIRM_STOP_L12_PIPED);
+        let text = stdout(&output);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {text}");
+        assert!(text.contains(CONFIRM_STOP_MESSAGE), "{args:?}: {text}");
+        // The stop's text is not a statement, and not a line kilit could not read.
+        for read_as_sql in [
+            "APPLICATION IN PRODUCTION",
+            "UNKNOWN",
+            "line 3",
+            "Command cancelled",
+        ] {
+            assert!(!text.contains(read_as_sql), "{args:?}: {text}");
+        }
+    }
+}
+
+#[test]
+fn the_production_confirmation_is_one_laravel_error_warning_in_the_json() {
+    for args in [
+        &["check", "--format", "json"][..],
+        &["check", "--format", "json", "--strict"][..],
+    ] {
+        let output = kilit(args, CONFIRM_STOP_L12_PIPED);
+        let json = json_of(&output);
+        assert_eq!(
+            json["warnings"],
+            serde_json::json!([{
+                "id": "laravel-error",
+                "tables": [],
+                "file": "standard input",
+                "message": CONFIRM_STOP_MESSAGE,
+            }]),
+            "{args:?}"
+        );
+        assert_eq!(json["sources"], serde_json::json!([]), "{args:?}");
+        assert_eq!(json["unreadable"], serde_json::json!([]), "{args:?}");
+        assert_eq!(json["summary"]["statements"], 0, "{args:?}");
+        assert_eq!(json["exit_code"], 2, "{args:?}");
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[test]
+fn the_production_confirmation_is_one_error_annotation_and_no_warning_annotation() {
+    let dir = github_scratch("laravel-production-confirmation");
+    let schema = example_schema();
+    for args in [&[][..], &["--strict"][..], &["--schema", &schema][..]] {
+        let github = github_at(&dir, None, args, CONFIRM_STOP_L12_PIPED);
+        assert_eq!(
+            github.annotations,
+            [annotation(
+                "error",
+                None,
+                "Laravel stopped with an error",
+                CONFIRM_STOP_MESSAGE
+            )],
+            "{args:?}"
+        );
+        assert_eq!(github.status, Some(2), "{args:?}");
+        assert!(
+            github
+                .annotations
+                .iter()
+                .all(|line| !line.starts_with("::warning")),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn answering_yes_at_the_production_confirmation_is_checked_and_its_lines_are_unreadable() {
+    // The migration ran: its two statements are checked; the box and the
+    // question are lines kilit cannot read, so the exit status is 2 as before.
+    let output = kilit(&["check", "--format", "json"], CONFIRM_YES_L12_TERMINAL);
+    let json = json_of(&output);
+    assert!(laravel_error_warnings(&json).is_empty(), "{json}");
+    assert_eq!(json["summary"]["statements"], 2);
+    assert!(!json["unreadable"].as_array().unwrap().is_empty());
+    assert_eq!(output.status.code(), Some(2));
+}
+
+/// Laravel 10.0.0 (and 10.16.1), `php artisan migrate --pretend > out`, stdin
+/// not a terminal, no -n: Symfony's question between the warning and
+/// `Command canceled.` (one l). DERIVED from the framework's own console
+/// classes run in a harness, not a real Laravel run.
+const CONFIRM_STOP_L10_0_PIPED: &str = concat!(
+    "\n",
+    "                                                                                \n",
+    "                           APPLICATION IN PRODUCTION.                           \n",
+    "                                                                                \n",
+    "\n",
+    "  Do you really wish to run this command? (yes/no) [no]\n",
+    "❯ \n",
+    "   WARN  Command canceled.  \n",
+    "\n",
+);
+
+#[test]
+fn laravel_10_0_stopping_at_the_production_confirmation_is_one_error_annotation_and_exit_2() {
+    let dir = github_scratch("laravel-10-0-production-confirmation");
+    for args in [&[][..], &["--strict"][..]] {
+        let github = github_at(&dir, None, args, CONFIRM_STOP_L10_0_PIPED);
+        assert_eq!(
+            github.annotations,
+            [annotation(
+                "error",
+                None,
+                "Laravel stopped with an error",
+                CONFIRM_STOP_MESSAGE
+            )],
+            "{args:?}"
+        );
+        assert_eq!(github.status, Some(2), "{args:?}");
+    }
+    // The question and the answer are not statements and not unreadable lines.
+    let output = kilit(&["check", "--format", "json"], CONFIRM_STOP_L10_0_PIPED);
+    let json = json_of(&output);
+    assert_eq!(json["unreadable"], serde_json::json!([]));
+    assert_eq!(json["summary"]["statements"], 0);
+    assert_eq!(output.status.code(), Some(2));
 }

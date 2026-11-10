@@ -101,7 +101,7 @@ SQL
 ```json
 {
   "format_version": "1.0",
-  "kilit": "0.0.0",
+  "kilit": "0.1.0",
   "server": "mysql-8.4.13",
   "schema": {
     "file": "mysql-schema.sql",

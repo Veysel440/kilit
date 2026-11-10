@@ -3610,3 +3610,522 @@ fn laravel_s_collation_and_comment_on_a_string_keep_their_answers() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Laravel's stop at its confirmation for an application in production.
+//
+// With APP_ENV set to production or not set, and without --force, `migrate`
+// asks "Are you sure you want to run this command?" before it does anything.
+// Without a terminal to answer, or with the answer no, it prints
+// "APPLICATION IN PRODUCTION." and "Command cancelled." and nothing ran.
+//
+// The captures are real runs of Laravel 12.71.0 and 13.40.0 on PHP 8.3. The
+// output of Laravel 10.25 and later and of Laravel 11 is derived from the
+// source of v10.50.4 and v11.57.1, which has the same code, so it is the
+// bytes of Laravel 12 (not a real run). Laravel 10.0 to 10.24 print other
+// bytes: see the block at the end of this file. The Windows question is a SIMULATED run: `windows_os()` forced
+// true so that Symfony asks instead of Laravel Prompts; it is not a real
+// Windows run.
+// ---------------------------------------------------------------------------
+
+use kilit_core::LaravelError;
+
+/// `php artisan migrate --pretend > out` on Laravel 12.71.0, APP_ENV not set,
+/// no terminal: the box, then the cancel line. Laravel 10.25 and later and
+/// Laravel 11 print the same (derived from the source, not run); 10.0 to 10.24
+/// do not.
+const CONFIRM_STOP_L12_PIPED: &str = concat!(
+    "\n",
+    "                                                                                \n",
+    "                           APPLICATION IN PRODUCTION.                           \n",
+    "                                                                                \n",
+    "\n",
+    "   WARN  Command cancelled.  \n",
+    "\n",
+);
+
+/// Laravel 13.40.0 where it detects an automated environment.
+const CONFIRM_STOP_L13_SHORT: &str = concat!(
+    "\n",
+    " APPLICATION IN PRODUCTION. \n",
+    " \n",
+    "\n",
+    " WARN Command cancelled. \n",
+    "\n",
+);
+
+/// Laravel 13.40.0, long form.
+const CONFIRM_STOP_L13_LONG: &str = concat!(
+    "\n",
+    "                                                                                \n",
+    "                           APPLICATION IN PRODUCTION.                           \n",
+    "                                                                                \n",
+    "\n",
+    "   WARN  Command cancelled.  \n",
+    "\n",
+);
+
+/// `--ansi` on Laravel 12.71.0: the box and the label in color.
+const CONFIRM_STOP_L12_ANSI: &str = concat!(
+    "\n",
+    "  \u{1b}[30;43m                                                                            \u{1b}[39;49m  \n",
+    "  \u{1b}[30;43m                         APPLICATION IN PRODUCTION.                         \u{1b}[39;49m  \n",
+    "  \u{1b}[30;43m                                                                            \u{1b}[39;49m  \n",
+    "\n",
+    "  \u{1b}[30;43m WARN \u{1b}[39;49m Command cancelled.  \n",
+    "\n",
+);
+
+/// `COLUMNS=10` on Laravel 12.71.0: the warning is cut to `APPLIC`.
+const CONFIRM_STOP_L12_COLUMNS_10: &str = concat!(
+    "\n",
+    "          \n",
+    "  APPLIC  \n",
+    "          \n",
+    "\n",
+    "   WARN  Command cancelled.  \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 in a terminal, answered `n`: every byte the terminal got.
+const CONFIRM_STOP_L12_TERMINAL_NO: &str = concat!(
+    "\r\n",
+    "  \u{1b}[30;43m                                                                            \u{1b}[39;49m  \r\n",
+    "  \u{1b}[30;43m                         APPLICATION IN PRODUCTION.                         \u{1b}[39;49m  \r\n",
+    "  \u{1b}[30;43m                                                                            \u{1b}[39;49m  \r\n",
+    "\u{1b}[?25l\r\n",
+    "\u{1b}[90m ┌\u{1b}[39m \u{1b}[36mAre you sure you want to run this command?\u{1b}[39m \u{1b}[90m──────────────────┐\u{1b}[39m\r\n",
+    "\u{1b}[90m │\u{1b}[39m \u{1b}[2m○ Yes /\u{1b}[22m \u{1b}[32m●\u{1b}[39m No                                                 \u{1b}[90m│\u{1b}[39m\r\n",
+    "\u{1b}[90m └──────────────────────────────────────────────────────────────┘\u{1b}[39m\r\n",
+    "\r\n",
+    "\u{1b}[1G\u{1b}[5A\u{1b}[J\r\n",
+    "\u{1b}[90m ┌\u{1b}[39m \u{1b}[2mAre you sure you want to run this command?\u{1b}[22m \u{1b}[90m──────────────────┐\u{1b}[39m\r\n",
+    "\u{1b}[90m │\u{1b}[39m No                                                           \u{1b}[90m│\u{1b}[39m\r\n",
+    "\u{1b}[90m └──────────────────────────────────────────────────────────────┘\u{1b}[39m\r\n",
+    "\r\n",
+    "\u{1b}[?25h  \u{1b}[30;43m WARN \u{1b}[39;49m Command cancelled.  \r\n",
+    "\r\n",
+);
+
+/// Laravel 13.40.0 in a terminal where it detects an automated environment,
+/// answered `n`.
+const CONFIRM_STOP_L13_SHORT_TERMINAL_NO: &str = concat!(
+    "\r\n",
+    " APPLICATION IN PRODUCTION. \r\n",
+    " \r\n",
+    "\u{1b}[?25l\r\n",
+    " Are you sure you want to run this command? \r\n",
+    " ○ Yes / No \r\n",
+    "\u{1b}[1G\u{1b}[5A\u{1b}[J\r\n",
+    " Are you sure you want to run this command? \r\n",
+    " No \r\n",
+    "\u{1b}[?25h\r\n",
+    " WARN Command cancelled. \r\n",
+    "\r\n",
+);
+
+/// Laravel 12.71.0 with the terminal as input and stdout in a pipe, answered
+/// `n`: the question is drawn in the pipe too.
+const CONFIRM_STOP_L12_PIPE_AFTER_TERMINAL_NO: &str = concat!(
+    "\n",
+    "                                                                                \n",
+    "                           APPLICATION IN PRODUCTION.                           \n",
+    "                                                                                \n",
+    "\u{1b}[?25l\n",
+    "\u{1b}[90m ┌\u{1b}[39m \u{1b}[36mAre you sure you want to run this command?\u{1b}[39m \u{1b}[90m──────────────────┐\u{1b}[39m\n",
+    "\u{1b}[90m │\u{1b}[39m \u{1b}[2m○ Yes /\u{1b}[22m \u{1b}[32m●\u{1b}[39m No                                                 \u{1b}[90m│\u{1b}[39m\n",
+    "\u{1b}[90m └──────────────────────────────────────────────────────────────┘\u{1b}[39m\n",
+    "\n",
+    "\u{1b}[1G\u{1b}[5A\u{1b}[J\n",
+    "\u{1b}[90m ┌\u{1b}[39m \u{1b}[2mAre you sure you want to run this command?\u{1b}[22m \u{1b}[90m──────────────────┐\u{1b}[39m\n",
+    "\u{1b}[90m │\u{1b}[39m No                                                           \u{1b}[90m│\u{1b}[39m\n",
+    "\u{1b}[90m └──────────────────────────────────────────────────────────────┘\u{1b}[39m\n",
+    "\n",
+    "\u{1b}[?25h   WARN  Command cancelled.  \n",
+    "\n",
+);
+
+/// SIMULATED Windows form on Laravel 12.71.0 (`windows_os()` forced true, so
+/// Symfony asks `(yes/no) [no]` instead of Laravel Prompts); not a real
+/// Windows run.
+const CONFIRM_STOP_L12_WINDOWS_QUESTION: &str = concat!(
+    "\n",
+    "                                                                                \n",
+    "                           APPLICATION IN PRODUCTION.                           \n",
+    "                                                                                \n",
+    "\n",
+    "  Are you sure you want to run this command? (yes/no) [no]\n",
+    "❯ \n",
+    "   WARN  Command cancelled.  \n",
+    "\n",
+);
+
+/// The same simulated Windows form in a terminal, answered `no`.
+const CONFIRM_STOP_L12_WINDOWS_QUESTION_NO: &str = concat!(
+    "\r\n",
+    "  \u{1b}[30;43m                                                                            \u{1b}[39;49m  \r\n",
+    "  \u{1b}[30;43m                         APPLICATION IN PRODUCTION.                         \u{1b}[39;49m  \r\n",
+    "  \u{1b}[30;43m                                                                            \u{1b}[39;49m  \r\n",
+    "\r\n",
+    "\u{1b}[32m  \u{1b}[39m\u{1b}[39;1mAre you sure you want to run this command?\u{1b}[39;22m (yes/no) [\u{1b}[33mno\u{1b}[39m]\r\n",
+    "\u{1b}[1m❯ \u{1b}[22mno\r\n",
+    "\r\n",
+    "  \u{1b}[30;43m WARN \u{1b}[39;49m Command cancelled.  \r\n",
+    "\r\n",
+);
+
+/// Laravel 13.40.0, APP_ENV not set, every migration already applied: the
+/// confirmation comes before Laravel looks at the migrations.
+const NOTHING_TO_MIGRATE_IN_PRODUCTION_L13: &str = concat!(
+    "\n",
+    "                                                                                \n",
+    "                           APPLICATION IN PRODUCTION.                           \n",
+    "                                                                                \n",
+    "\n",
+    "   WARN  Command cancelled.  \n",
+    "\n",
+);
+
+/// Laravel 12.71.0 in a terminal, answered `y`: the migration ran under
+/// --pretend.
+const CONFIRM_YES_L12_TERMINAL: &str = concat!(
+    "\r\n",
+    "  \u{1b}[30;43m                                                                            \u{1b}[39;49m  \r\n",
+    "  \u{1b}[30;43m                         APPLICATION IN PRODUCTION.                         \u{1b}[39;49m  \r\n",
+    "  \u{1b}[30;43m                                                                            \u{1b}[39;49m  \r\n",
+    "\u{1b}[?25l\r\n",
+    "\u{1b}[90m ┌\u{1b}[39m \u{1b}[36mAre you sure you want to run this command?\u{1b}[39m \u{1b}[90m──────────────────┐\u{1b}[39m\r\n",
+    "\u{1b}[90m │\u{1b}[39m \u{1b}[2m○ Yes /\u{1b}[22m \u{1b}[32m●\u{1b}[39m No                                                 \u{1b}[90m│\u{1b}[39m\r\n",
+    "\u{1b}[90m └──────────────────────────────────────────────────────────────┘\u{1b}[39m\r\n",
+    "\r\n",
+    "\u{1b}[1G\u{1b}[5A\u{1b}[J\r\n",
+    "\u{1b}[90m ┌\u{1b}[39m \u{1b}[36mAre you sure you want to run this command?\u{1b}[39m \u{1b}[90m──────────────────┐\u{1b}[39m\r\n",
+    "\u{1b}[90m │\u{1b}[39m \u{1b}[32m●\u{1b}[39m Yes \u{1b}[2m/ ○ No\u{1b}[22m                                                 \u{1b}[90m│\u{1b}[39m\r\n",
+    "\u{1b}[90m └──────────────────────────────────────────────────────────────┘\u{1b}[39m\r\n",
+    "\r\n",
+    "\u{1b}[1G\u{1b}[5A\u{1b}[J\r\n",
+    "\u{1b}[90m ┌\u{1b}[39m \u{1b}[2mAre you sure you want to run this command?\u{1b}[22m \u{1b}[90m──────────────────┐\u{1b}[39m\r\n",
+    "\u{1b}[90m │\u{1b}[39m Yes                                                          \u{1b}[90m│\u{1b}[39m\r\n",
+    "\u{1b}[90m └──────────────────────────────────────────────────────────────┘\u{1b}[39m\r\n",
+    "\r\n",
+    "\u{1b}[?25h  \u{1b}[37;44m INFO \u{1b}[39;49m Running migrations.  \r\n",
+    "\r\n",
+    "  2025_03_01_000000_widen_orders_amount \u{1b}[90m......................................\u{1b}[39m  \r\n",
+    "  \u{1b}[90m⇂ alter table `orders` modify `amount` bigint unsigned not null\u{1b}[39m  \r\n",
+    "  \u{1b}[90m⇂ alter table `orders` add index `orders_user_id_idx`(`user_id`)\u{1b}[39m  \r\n",
+    "\r\n",
+);
+
+/// The SIMULATED Windows form answered `yes` (not a real Windows run).
+const CONFIRM_YES_L12_WINDOWS_QUESTION: &str = concat!(
+    "\r\n",
+    "  \u{1b}[30;43m                                                                            \u{1b}[39;49m  \r\n",
+    "  \u{1b}[30;43m                         APPLICATION IN PRODUCTION.                         \u{1b}[39;49m  \r\n",
+    "  \u{1b}[30;43m                                                                            \u{1b}[39;49m  \r\n",
+    "\r\n",
+    "\u{1b}[32m  \u{1b}[39m\u{1b}[39;1mAre you sure you want to run this command?\u{1b}[39;22m (yes/no) [\u{1b}[33mno\u{1b}[39m]\r\n",
+    "\u{1b}[1m❯ \u{1b}[22myes\r\n",
+    "\r\n",
+    "  \u{1b}[37;44m INFO \u{1b}[39;49m Running migrations.  \r\n",
+    "\r\n",
+    "  2025_03_01_000000_widen_orders_amount \u{1b}[90m......................................\u{1b}[39m  \r\n",
+    "  \u{1b}[90m⇂ alter table `orders` modify `amount` bigint unsigned not null\u{1b}[39m  \r\n",
+    "  \u{1b}[90m⇂ alter table `orders` add index `orders_user_id_idx`(`user_id`)\u{1b}[39m  \r\n",
+    "\r\n",
+);
+
+/// Laravel 12.71.0, APP_ENV=production with `--force`: no question.
+const PRODUCTION_FORCE_L12: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_03_01_000000_widen_orders_amount ......................................  \n",
+    "  ⇂ alter table `orders` modify `amount` bigint unsigned not null  \n",
+    "  ⇂ alter table `orders` add index `orders_user_id_idx`(`user_id`)  \n",
+    "\n",
+);
+
+/// Laravel 13.40.0, APP_ENV=testing: no question.
+const TESTING_L13: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2025_03_01_000000_widen_orders_amount ......................................  \n",
+    "  ⇂ alter table `orders` modify `amount` bigint unsigned not null  \n",
+    "  ⇂ alter table `orders` add index `orders_user_id_idx`(`user_id`)  \n",
+    "\n",
+);
+
+const CONFIRM_STOP_MESSAGE: &str = "Laravel stopped at its confirmation for an application in \
+     production (APP_ENV is production or not set) and cancelled the command; no statement was seen";
+
+/// Each stop with the line of its warning, counting from 1; the cancel line
+/// when the output has no warning.
+const CONFIRM_STOPS: [(&str, &str, usize); 12] = [
+    (
+        "piped, Laravel 12 (and 10.25 on, 11)",
+        CONFIRM_STOP_L12_PIPED,
+        3,
+    ),
+    ("piped, Laravel 13", CONFIRM_STOP_L13_LONG, 3),
+    ("piped, shorter form", CONFIRM_STOP_L13_SHORT, 2),
+    ("--ansi", CONFIRM_STOP_L12_ANSI, 3),
+    ("COLUMNS=10", CONFIRM_STOP_L12_COLUMNS_10, 3),
+    ("terminal, answer n", CONFIRM_STOP_L12_TERMINAL_NO, 3),
+    (
+        "terminal, answer n, shorter form",
+        CONFIRM_STOP_L13_SHORT_TERMINAL_NO,
+        2,
+    ),
+    (
+        "terminal in, pipe out, answer n",
+        CONFIRM_STOP_L12_PIPE_AFTER_TERMINAL_NO,
+        3,
+    ),
+    (
+        "simulated Windows question, no terminal",
+        CONFIRM_STOP_L12_WINDOWS_QUESTION,
+        3,
+    ),
+    (
+        "simulated Windows question, answer no",
+        CONFIRM_STOP_L12_WINDOWS_QUESTION_NO,
+        3,
+    ),
+    (
+        "nothing to migrate",
+        NOTHING_TO_MIGRATE_IN_PRODUCTION_L13,
+        3,
+    ),
+    ("cancel line alone", "\n   WARN  Command cancelled.  \n", 2),
+];
+
+#[test]
+fn laravel_stopping_at_the_production_confirmation_is_an_error_on_the_warning_s_line() {
+    for (form, output, line) in CONFIRM_STOPS {
+        let pretend =
+            read_pretend(output).unwrap_or_else(|| panic!("{form}: not Laravel's output"));
+        assert!(pretend.migrations.is_empty(), "{form}");
+        assert!(pretend.unreadable.is_empty(), "{form}");
+        assert_eq!(
+            pretend.error,
+            Some(LaravelError {
+                line,
+                migration: None,
+                message: CONFIRM_STOP_MESSAGE.into(),
+            }),
+            "{form}"
+        );
+    }
+}
+
+#[test]
+fn the_question_laravel_draws_in_a_terminal_is_not_read_as_a_statement() {
+    // The box, the question drawn twice with cursor moves, and the answer.
+    for (form, output) in [
+        ("Laravel Prompts", CONFIRM_STOP_L12_TERMINAL_NO),
+        (
+            "Laravel Prompts, shorter form",
+            CONFIRM_STOP_L13_SHORT_TERMINAL_NO,
+        ),
+        ("Symfony question", CONFIRM_STOP_L12_WINDOWS_QUESTION),
+    ] {
+        let pretend = read_pretend(output).unwrap();
+        assert!(pretend.unreadable.is_empty(), "{form}");
+        assert!(pretend.migrations.is_empty(), "{form}");
+    }
+}
+
+#[test]
+fn answering_yes_at_the_production_confirmation_is_not_a_stop() {
+    // The migration ran under --pretend: its statements are read and Laravel
+    // did not stop. The warning and the question lines are lines kilit
+    // cannot read, as before.
+    for (form, output) in [
+        ("Laravel Prompts", CONFIRM_YES_L12_TERMINAL),
+        (
+            "simulated Windows question",
+            CONFIRM_YES_L12_WINDOWS_QUESTION,
+        ),
+    ] {
+        let pretend = read_pretend(output).unwrap();
+        assert_eq!(pretend.error, None, "{form}");
+        assert_eq!(
+            migration_names(&pretend),
+            ["2025_03_01_000000_widen_orders_amount"],
+            "{form}"
+        );
+        assert_eq!(
+            sql_of(&pretend.migrations[0]),
+            [
+                "alter table `orders` modify `amount` bigint unsigned not null",
+                "alter table `orders` add index `orders_user_id_idx`(`user_id`)",
+            ],
+            "{form}"
+        );
+        assert!(!pretend.unreadable.is_empty(), "{form}");
+        assert!(
+            pretend
+                .unreadable
+                .iter()
+                .any(|line| line.text.contains("APPLICATION IN PRODUCTION")),
+            "{form}: {:?}",
+            pretend.unreadable
+        );
+        assert!(
+            pretend
+                .unreadable
+                .iter()
+                .all(|line| !line.text.contains("cancelled")),
+            "{form}: {:?}",
+            pretend.unreadable
+        );
+    }
+}
+
+#[test]
+fn migrations_run_with_force_or_outside_production_are_read_without_an_error() {
+    // APP_ENV=production with --force, and APP_ENV=testing: no question.
+    for (form, output) in [
+        ("production --force", PRODUCTION_FORCE_L12),
+        ("testing", TESTING_L13),
+    ] {
+        let pretend = read_pretend(output).unwrap();
+        assert_eq!(pretend.error, None, "{form}");
+        assert!(pretend.unreadable.is_empty(), "{form}");
+        assert_eq!(
+            migration_names(&pretend),
+            ["2025_03_01_000000_widen_orders_amount"],
+            "{form}"
+        );
+        assert_eq!(sql_of(&pretend.migrations[0]).len(), 2, "{form}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Laravel 10.0 to 10.24: the stop at the production confirmation before
+// Laravel 10.25.
+//
+// DERIVED, not real runs: the framework's own console classes of v10.0.0,
+// v10.16.1, v10.17.0 and v10.24.0 run in a harness (symfony/console 6.4,
+// termwind, laravel/prompts), with the Laravel 12.71.0 runs as the check of
+// the harness. The captures are in the review folder, laravel/A4/fix/l10/.
+//
+// Laravel 10.0 to 10.16 print `Command canceled.` (one l) and, when stdin is
+// not a terminal and there is no -n, Symfony's question between the warning
+// and the cancel line. With -n the two question lines are absent. v10.17.0 is
+// the first tag with `Command cancelled.` and Laravel Prompts; from v10.17 to
+// v10.24 with -n there is no blank line between the warning and the cancel
+// line. From v10.25.0 on the bytes are those of Laravel 12.
+// ---------------------------------------------------------------------------
+
+/// v10.0.0 and v10.16.1 (the same bytes), `php artisan migrate --pretend > out`,
+/// stdin not a terminal, no -n: Symfony's question and its empty answer.
+const CONFIRM_STOP_L10_0_PIPED: &str = concat!(
+    "\n",
+    "                                                                                \n",
+    "                           APPLICATION IN PRODUCTION.                           \n",
+    "                                                                                \n",
+    "\n",
+    "  Do you really wish to run this command? (yes/no) [no]\n",
+    "❯ \n",
+    "   WARN  Command canceled.  \n",
+    "\n",
+);
+
+/// v10.0.0 and v10.16.1 with `-n`: no question, and `canceled` with one l.
+const CONFIRM_STOP_L10_0_NO_INTERACTION: &str = concat!(
+    "\n",
+    "                                                                                \n",
+    "                           APPLICATION IN PRODUCTION.                           \n",
+    "                                                                                \n",
+    "\n",
+    "   WARN  Command canceled.  \n",
+    "\n",
+);
+
+/// v10.0.0 and v10.16.1 with `--ansi`.
+const CONFIRM_STOP_L10_0_ANSI: &str = concat!(
+    "\n",
+    "  \u{1b}[30;43m                                                                            \u{1b}[39;49m  \n",
+    "  \u{1b}[30;43m                         APPLICATION IN PRODUCTION.                         \u{1b}[39;49m  \n",
+    "  \u{1b}[30;43m                                                                            \u{1b}[39;49m  \n",
+    "\n",
+    "\u{1b}[32m  \u{1b}[39m\u{1b}[39;1mDo you really wish to run this command?\u{1b}[39;22m (yes/no) [\u{1b}[33mno\u{1b}[39m]\n",
+    "\u{1b}[1m❯ \u{1b}[22m\n",
+    "  \u{1b}[30;43m WARN \u{1b}[39;49m Command canceled.  \n",
+    "\n",
+);
+
+/// v10.0.0 and v10.16.1 in a terminal, answered `n` (the harness' own last
+/// line, `[sim exit 1]`, left out).
+const CONFIRM_STOP_L10_0_TERMINAL_NO: &str = concat!(
+    "\r\n",
+    "  \u{1b}[30;43m                                                                            \u{1b}[39;49m  \r\n",
+    "  \u{1b}[30;43m                         APPLICATION IN PRODUCTION.                         \u{1b}[39;49m  \r\n",
+    "  \u{1b}[30;43m                                                                            \u{1b}[39;49m  \r\n",
+    "\r\n",
+    "\u{1b}[32m  \u{1b}[39m\u{1b}[39;1mDo you really wish to run this command?\u{1b}[39;22m (yes/no) [\u{1b}[33mno\u{1b}[39m]\r\n",
+    "\u{1b}[1m❯ \u{1b}[22mn\r\n",
+    "\r\n",
+    "\r\n",
+    "  \u{1b}[30;43m WARN \u{1b}[39;49m Command canceled.  \r\n",
+    "\r\n",
+);
+
+/// v10.17.0 to v10.24.0 with `-n`: `cancelled`, and no blank line between the
+/// warning and the cancel line.
+const CONFIRM_STOP_L10_17_NO_INTERACTION: &str = concat!(
+    "\n",
+    "                                                                                \n",
+    "                           APPLICATION IN PRODUCTION.                           \n",
+    "                                                                                \n",
+    "   WARN  Command cancelled.  \n",
+    "\n",
+);
+
+const CONFIRM_STOPS_BEFORE_LARAVEL_10_25: [(&str, &str); 5] = [
+    (
+        "10.0 to 10.16, piped, Symfony's question",
+        CONFIRM_STOP_L10_0_PIPED,
+    ),
+    (
+        "10.0 to 10.16, -n, canceled with one l",
+        CONFIRM_STOP_L10_0_NO_INTERACTION,
+    ),
+    ("10.0 to 10.16, --ansi", CONFIRM_STOP_L10_0_ANSI),
+    (
+        "10.0 to 10.16, terminal, answer n",
+        CONFIRM_STOP_L10_0_TERMINAL_NO,
+    ),
+    (
+        "10.17 to 10.24, -n, no blank line",
+        CONFIRM_STOP_L10_17_NO_INTERACTION,
+    ),
+];
+
+#[test]
+fn laravel_10_stopping_at_the_production_confirmation_before_10_25_is_an_error_on_the_warning_s_line()
+ {
+    // Derived (see the block comment above), not real runs. The warning is
+    // on line 3 in every form.
+    for (form, output) in CONFIRM_STOPS_BEFORE_LARAVEL_10_25 {
+        let pretend =
+            read_pretend(output).unwrap_or_else(|| panic!("{form}: not Laravel's output"));
+        assert!(pretend.migrations.is_empty(), "{form}");
+        assert!(
+            pretend.unreadable.is_empty(),
+            "{form}: {:?}",
+            pretend.unreadable
+        );
+        assert_eq!(
+            pretend.error,
+            Some(LaravelError {
+                line: 3,
+                migration: None,
+                message: CONFIRM_STOP_MESSAGE.into(),
+            }),
+            "{form}"
+        );
+    }
+}

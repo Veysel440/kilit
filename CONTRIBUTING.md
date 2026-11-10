@@ -9,6 +9,7 @@ the code follows.
 - [Before a pull request](#before-a-pull-request)
 - [Rules of the code](#rules-of-the-code)
 - [Project layout](#project-layout)
+- [Releases](#releases)
 - [License of contributions](#license-of-contributions)
 
 ## Adding a measurement
@@ -91,6 +92,35 @@ compose.yaml         the MySQL servers the lab runs against
 ```
 
 How the parts work together is in [the architecture notes](docs/architecture.md).
+
+## Releases
+
+A release is a tag on a commit of `main`. The steps, in order:
+
+1. Set the version in `[workspace.package]` of `Cargo.toml`, and update
+   `Cargo.lock` for it.
+2. Set the default of the `version` input in `action.yml` to the same version.
+3. Add the entry `## [<version>] - <date>` to `CHANGELOG.md`. The release notes
+   are the lines after that heading, up to the next line that starts with `## `,
+   so the file has no link definitions, only inline links.
+4. Set the `VERSION=` line in the README's installation commands and every
+   `Veysel440/kilit@v<version>` in `README.md` and `docs/`. One test checks
+   that all of these agree.
+5. Commit on `main` and wait for CI to pass.
+6. Push the tag `v<version>` on a commit of `main`. The release workflow stops
+   if the tag differs from the workspace version, if `CHANGELOG.md` has no
+   single, non-empty entry for it, or if the commit is not on `main`.
+7. The workflow builds and tests the five archives, smoke-tests them, installs
+   them with the Action, writes `SHA256SUMS`, attests the build provenance of
+   the archives and creates a draft release with six files and the changelog
+   entry as notes.
+8. Read the draft, then publish it. Publishing starts the "Published release"
+   workflow, which installs the release with the Action of its tag on five
+   runners.
+
+A push to `main` that changes `release.yml`, `action.yml` or `action.sh`, and a
+manual run of the workflow, build everything and keep the archives as workflow
+artifacts, without a release.
 
 ## License of contributions
 

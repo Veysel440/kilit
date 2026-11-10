@@ -36,6 +36,17 @@
 //!
 //! An error in a migration's PHP syntax stops Laravel before it prints
 //! anything else, so the error screen is the whole output.
+//!
+//! When it takes the application for one in production (`APP_ENV` is
+//! `production` or not set) and `--force` is not given, Laravel asks before
+//! it does anything. Without a terminal to answer, or with the answer no, it
+//! prints its warning and stops; nothing ran:
+//!
+//! ```text
+//!                            APPLICATION IN PRODUCTION.
+//!
+//!    WARN  Command cancelled.
+//! ```
 
 use crate::parse::parse;
 use crate::statement::Statement;
@@ -188,11 +199,42 @@ pub fn read_pretend(text: &str) -> Option<Pretend> {
 #[derive(Clone, Copy)]
 struct ErrorScreen<'a> {
     /// The first line: the exception's class, such as `RuntimeException`,
-    /// or Symfony's `In <file> line <line>:`.
+    /// Symfony's `In <file> line <line>:`, or the production warning.
     title: usize,
     /// The file the exception was thrown in, from `at <file>:<line>` or
-    /// `In <file> line <line>:`.
-    file: &'a str,
+    /// `In <file> line <line>:`. `None` when Laravel stopped at its
+    /// production confirmation.
+    file: Option<&'a str>,
+}
+
+/// The warning Laravel prints in a box before it asks to go on in
+/// production. A terminal narrower than the box cuts it short.
+const PRODUCTION_WARNING: &str = "APPLICATION IN PRODUCTION.";
+
+/// The line Laravel prints when the answer to its production confirmation
+/// is no: `WARN  Command cancelled.`, with one space in the shorter form;
+/// `Command canceled.` before Laravel 10.17.
+fn is_cancelled(line: &str) -> bool {
+    line.strip_prefix("WARN")
+        .filter(|rest| rest.starts_with(char::is_whitespace))
+        .is_some_and(|rest| {
+            let rest = rest.trim_start();
+            rest == "Command cancelled." || rest == "Command canceled."
+        })
+}
+
+/// Laravel's stop at its production confirmation: the warning, the
+/// question when a terminal asks it, and `WARN  Command cancelled.`. It
+/// starts at the warning; without one, at the cancel line.
+fn confirmation_stop(lines: &[String], cancelled: usize) -> usize {
+    lines[..cancelled]
+        .iter()
+        .rposition(|line| {
+            is_from_laravel(line)
+                || (!line.is_empty() && PRODUCTION_WARNING.starts_with(line.as_str()))
+        })
+        .filter(|&i| !is_from_laravel(&lines[i]))
+        .unwrap_or(cancelled)
 }
 
 /// Laravel's error screen. With nunomaduro/collision, which new Laravel
@@ -216,11 +258,23 @@ fn error_screen(lines: &[String]) -> Option<ErrorScreen<'_>> {
     let followed_by_blank = |i: usize| lines.get(i + 1).is_some_and(|line| line.is_empty());
     (0..lines.len()).find_map(|i| {
         if let Some(file) = symfony_header(&lines[i]) {
-            return followed_by_blank(i).then_some(ErrorScreen { title: i, file });
+            return followed_by_blank(i).then_some(ErrorScreen {
+                title: i,
+                file: Some(file),
+            });
         }
         if is_class_name(&lines[i]) && (i == 0 || lines[i - 1].is_empty()) && followed_by_blank(i) {
             let file = lines[i + 2..].iter().find_map(|line| thrown_in(line))?;
-            return Some(ErrorScreen { title: i, file });
+            return Some(ErrorScreen {
+                title: i,
+                file: Some(file),
+            });
+        }
+        if is_cancelled(&lines[i]) {
+            return Some(ErrorScreen {
+                title: confirmation_stop(lines, i),
+                file: None,
+            });
         }
         None
     })
@@ -265,6 +319,22 @@ fn php_file<'a>(file: &'a str, number: &str) -> Option<&'a str> {
 /// before any migration, and only the file names it.
 fn stopped(migrations: &mut Vec<LaravelMigration>, screen: &ErrorScreen) -> LaravelError {
     let line = screen.title + 1;
+    let Some(file) = screen.file else {
+        let stop = "Laravel stopped at its confirmation for an application in production \
+                    (APP_ENV is production or not set) and cancelled the command";
+        let message = match migrations.last() {
+            Some(last) => format!(
+                "{stop} after {}; the migrations after it were not seen",
+                last.name
+            ),
+            None => format!("{stop}; no statement was seen"),
+        };
+        return LaravelError {
+            line,
+            migration: None,
+            message,
+        };
+    };
     if migrations
         .last()
         .is_some_and(|migration| migration.statements.is_empty())
@@ -291,7 +361,7 @@ fn stopped(migrations: &mut Vec<LaravelMigration>, screen: &ErrorScreen) -> Lara
             ),
         };
     }
-    let file = screen.file.rsplit(['/', '\\']).next().unwrap_or_default();
+    let file = file.rsplit(['/', '\\']).next().unwrap_or_default();
     let migration = file
         .strip_suffix(".php")
         .filter(|name| is_migration_file_name(name))
@@ -1010,6 +1080,178 @@ In 2026_02_01_000041_first_alter_orders_table.php line 15:
         ] {
             assert!(!only_reads(sql), "{sql}");
         }
+    }
+
+    /// `php artisan migrate --pretend > pretend.txt` on Laravel 12.71 with
+    /// `APP_ENV` not set: the production confirmation, no terminal to answer.
+    const CANCELLED: &str = "
+                                                                                
+                           APPLICATION IN PRODUCTION.                           
+                                                                                
+
+   WARN  Command cancelled.  
+
+";
+
+    const CANCELLED_MESSAGE: &str = "Laravel stopped at its confirmation for an application \
+         in production (APP_ENV is production or not set) and cancelled the command; \
+         no statement was seen";
+
+    #[test]
+    fn the_production_confirmation_is_laravel_stopping() {
+        let pretend = read_pretend(CANCELLED).unwrap();
+        assert!(pretend.migrations.is_empty());
+        assert!(pretend.unreadable.is_empty());
+        assert_eq!(
+            pretend.error,
+            Some(LaravelError {
+                line: 3,
+                migration: None,
+                message: CANCELLED_MESSAGE.into(),
+            })
+        );
+    }
+
+    #[test]
+    fn the_shorter_production_confirmation_is_read_the_same() {
+        // Laravel 13.40 when it detects certain environment variables.
+        let pretend =
+            read_pretend("\n APPLICATION IN PRODUCTION. \n \n\n WARN Command cancelled. \n\n")
+                .unwrap();
+        assert!(pretend.unreadable.is_empty());
+        assert_eq!(pretend.error.unwrap().line, 2);
+    }
+
+    #[test]
+    fn a_production_warning_cut_by_a_narrow_terminal_still_starts_the_stop() {
+        // COLUMNS=10 on Laravel 12.71.
+        let pretend = read_pretend(
+            "\n          \n  APPLIC  \n          \n\n   WARN  Command cancelled.  \n\n",
+        )
+        .unwrap();
+        assert!(pretend.unreadable.is_empty());
+        assert_eq!(pretend.error.unwrap().line, 3);
+    }
+
+    #[test]
+    fn nothing_of_the_question_in_a_terminal_is_read() {
+        // Laravel 12.71 in an 80-column terminal, answered with Enter: the
+        // warning in color, the question drawn twice, then the cancel line.
+        let pretend = read_pretend(
+            "\r\n  \u{1b}[30;43m                         APPLICATION IN PRODUCTION.                         \u{1b}[39;49m  \r\n\
+             \u{1b}[?25l\r\n\
+             \u{1b}[90m ┌\u{1b}[39m \u{1b}[36mAre you sure you want to run this command?\u{1b}[39m \u{1b}[90m──┐\u{1b}[39m\r\n\
+             \u{1b}[90m │\u{1b}[39m \u{1b}[2m○ Yes /\u{1b}[22m \u{1b}[32m●\u{1b}[39m No \u{1b}[90m│\u{1b}[39m\r\n\
+             \u{1b}[90m └──┘\u{1b}[39m\r\n\r\n\
+             \u{1b}[1G\u{1b}[5A\u{1b}[J\r\n\
+             \u{1b}[90m │\u{1b}[39m No \u{1b}[90m│\u{1b}[39m\r\n\r\n\
+             \u{1b}[?25h  \u{1b}[30;43m WARN \u{1b}[39;49m Command cancelled.  \r\n\r\n",
+        )
+        .unwrap();
+        assert!(pretend.unreadable.is_empty());
+        assert_eq!(pretend.error.unwrap().line, 2);
+    }
+
+    #[test]
+    fn the_spelling_before_laravel_10_17_is_the_stop_too() {
+        // Laravel 10.0 to 10.16, stdin not a terminal: Symfony prints its
+        // question, reads nothing and takes the default no.
+        let pretend = read_pretend(
+            "
+                                                                                
+                           APPLICATION IN PRODUCTION.                           
+                                                                                
+
+  Do you really wish to run this command? (yes/no) [no]
+❯ 
+   WARN  Command canceled.  
+
+",
+        )
+        .unwrap();
+        assert!(pretend.unreadable.is_empty());
+        let error = pretend.error.unwrap();
+        assert_eq!(error.line, 3);
+        assert_eq!(error.message, CANCELLED_MESSAGE);
+    }
+
+    #[test]
+    fn a_cancel_line_without_the_warning_is_the_stop() {
+        let pretend = read_pretend("\n   WARN  Command cancelled.  \n").unwrap();
+        assert_eq!(pretend.error.unwrap().line, 2);
+    }
+
+    #[test]
+    fn the_answer_yes_goes_on_with_the_migrations() {
+        // Answered yes in a terminal: the warning and the question stay
+        // lines kilit does not know, and the migration is read.
+        let pretend = read_pretend(
+            "
+                           APPLICATION IN PRODUCTION.                           
+
+ ┌ Are you sure you want to run this command? ─┐
+ │ Yes                                         │
+ └─────────────────────────────────────────────┘
+
+   INFO  Running migrations.
+
+  2025_03_01_000000_widen_orders_amount ......................................
+  ⇂ alter table `orders` modify `amount` bigint unsigned not null
+",
+        )
+        .unwrap();
+        assert_eq!(pretend.error, None);
+        assert_eq!(sql(&pretend.migrations[0]).len(), 1);
+        assert_eq!(
+            pretend
+                .unreadable
+                .iter()
+                .map(|line| line.line)
+                .collect::<Vec<_>>(),
+            [2, 4, 5, 6]
+        );
+    }
+
+    #[test]
+    fn other_warnings_are_not_the_stop() {
+        for line in [
+            "   WARN  The database 'laravel' does not exist on the 'mysql' connection.  ",
+            "   WARN  Command cancelled. Again.",
+            "   WARNING  Command cancelled.",
+        ] {
+            let text = format!("{line}\n\n   INFO  Nothing to migrate.\n");
+            let pretend = read_pretend(&text).unwrap();
+            assert_eq!(pretend.error, None, "{line}");
+            assert_eq!(pretend.unreadable.len(), 1, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_cancel_after_a_migration_names_the_migration_before_it() {
+        let pretend = read_pretend(
+            "
+   INFO  Running migrations.
+
+  2026_02_01_000041_first_alter_orders_table .................................
+  ⇂ alter table `orders` add `qty` int null
+                           APPLICATION IN PRODUCTION.                           
+
+   WARN  Command cancelled.  
+",
+        )
+        .unwrap();
+        assert_eq!(sql(&pretend.migrations[0]).len(), 1);
+        assert!(pretend.unreadable.is_empty());
+        let error = pretend.error.unwrap();
+        assert_eq!(error.line, 6);
+        assert!(
+            error.message.ends_with(
+                "cancelled the command after 2026_02_01_000041_first_alter_orders_table; \
+                 the migrations after it were not seen"
+            ),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

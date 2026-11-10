@@ -13,7 +13,7 @@ inputs:
       The kilit release to install, such as 0.1.0: digits and dots only. The
       default is the release this version of the action belongs to.
     required: false
-    default: "0.0.0"
+    default: "0.1.0"
 
 runs:
   using: composite

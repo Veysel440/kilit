@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "kilit"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clap",
  "kilit-core",
@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "kilit-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -498,7 +498,7 @@ dependencies = [
 
 [[package]]
 name = "kilit-lab"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "kilit-core",
  "mysql_async",

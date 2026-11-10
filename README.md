@@ -5,6 +5,7 @@
 **Know what MySQL will do with your migration before you deploy it.**
 
 [![CI](https://github.com/Veysel440/kilit/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Veysel440/kilit/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Veysel440/kilit)](https://github.com/Veysel440/kilit/releases)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success)](Cargo.toml)
@@ -142,9 +143,60 @@ measurement: [architecture](docs/architecture.md).
 
 ## Installation
 
-Build from source with [Rust](https://rustup.rs) 1.88 or newer. Checking a
-migration needs no database. There are no prebuilt binaries and no package on
-crates.io.
+Each [release](https://github.com/Veysel440/kilit/releases) has an archive for
+five targets, a `SHA256SUMS` file and build provenance attestations. Checking a
+migration needs no database.
+
+| Target | For |
+| --- | --- |
+| `x86_64-unknown-linux-musl` | Linux on x86_64, statically linked |
+| `aarch64-unknown-linux-musl` | Linux on aarch64, statically linked |
+| `aarch64-apple-darwin` | macOS on Apple silicon |
+| `x86_64-apple-darwin` | macOS on Intel |
+| `x86_64-pc-windows-msvc` | Windows on x86_64 |
+
+Each archive holds a folder `kilit-<version>-<target>` with the binary,
+`LICENSE-MIT`, `LICENSE-APACHE` and this README. On Linux or macOS, pick your
+target, then download, check and unpack it:
+
+```sh
+VERSION=0.1.0
+TARGET=x86_64-unknown-linux-musl   # or another target from the table
+curl -fsSLO "https://github.com/Veysel440/kilit/releases/download/v$VERSION/kilit-$VERSION-$TARGET.tar.gz"
+curl -fsSLO "https://github.com/Veysel440/kilit/releases/download/v$VERSION/SHA256SUMS"
+grep " kilit-$VERSION-$TARGET.tar.gz\$" SHA256SUMS | sha256sum -c -   # macOS: shasum -a 256 -c -
+tar -xzf "kilit-$VERSION-$TARGET.tar.gz"
+mkdir -p ~/.local/bin
+install -m 755 "kilit-$VERSION-$TARGET/kilit" ~/.local/bin/kilit        # any directory on your PATH
+kilit --version
+```
+
+`~/.local/bin` is not on the `PATH` by default on macOS, nor on some Linux
+setups. Add it to your `PATH`, or install into another directory that is.
+
+On Windows, download `kilit-0.1.0-x86_64-pc-windows-msvc.zip` and `SHA256SUMS`
+from the Releases page, check the zip in PowerShell (it prints `True` when the
+checksum matches), unpack it, and put `kilit.exe` in a folder on your `PATH`:
+
+```powershell
+(Get-FileHash .\kilit-0.1.0-x86_64-pc-windows-msvc.zip).Hash -eq ((Select-String -SimpleMatch 'kilit-0.1.0-x86_64-pc-windows-msvc.zip' SHA256SUMS).Line -split '\s+')[0]
+```
+
+The attestation says that GitHub Actions built the archive from this
+repository. Check it with the [GitHub CLI](https://cli.github.com) 2.67.0 or
+newer; older versions could report success when no attestation matched:
+
+```sh
+gh attestation verify "kilit-$VERSION-$TARGET.tar.gz" --repo Veysel440/kilit
+```
+
+An archive downloaded in a browser on macOS is quarantined, and macOS refuses
+to open the binary. Clear the mark on the archive before you unpack it:
+`xattr -d com.apple.quarantine kilit-0.1.0-aarch64-apple-darwin.tar.gz`.
+Archives downloaded with `curl` carry no mark.
+
+To build from source instead, you need [Rust](https://rustup.rs) 1.88 or newer.
+There is no package on crates.io.
 
 ```sh
 git clone https://github.com/Veysel440/kilit.git
@@ -201,9 +253,26 @@ flowchart LR
     check --> s3["3: only unknown statements were counted<br/>needs unknown in --fail-on"]
 ```
 
-The job needs a Rust toolchain to build kilit: `cargo install --locked --path
-crates/kilit` from a checkout of this repository. `migrate --pretend` must run
-against a database that already has production's migrations applied, because
+In a GitHub Actions job, the Action installs kilit from the release:
+
+```yaml
+- uses: Veysel440/kilit@v0.1.0
+- shell: bash
+  run: php artisan migrate --pretend | kilit check --format github --server mysql-8.4 --schema database/schema/mysql-schema.sql
+```
+
+To pin the Action to the commit the tag points at, write `uses:
+Veysel440/kilit@<commit sha> # v0.1.0`. Find the commit with `gh api
+repos/Veysel440/kilit/commits/v0.1.0 --jq .sha`. A complete workflow for a
+Laravel pull request, with its database service, is in
+[the Action's page](docs/github-action.md).
+
+Pass `--server` with the series of production's server (`mysql-8.4` above).
+Laravel's schema dump has no `-- Server version` line, so kilit cannot warn
+when the server differs; [the Action's page](docs/github-action.md) explains
+why.
+
+`migrate --pretend` must run against a database that already has production's migrations applied, because
 its `migrations` table decides which migrations are pending. On a fresh
 database it prints every migration, `CREATE TABLE` statements included, and
 kilit takes the later `ALTER`s for changes to new tables and exits 0. Load

@@ -92,6 +92,26 @@ name, as in `migrations/b.txt: Laravel stopped with an error in <migration>;
 `laravel-error`, the input's name in `file` and no tables, before the
 `metadata-lock` warning. See [the JSON notes](json-output.md#warnings).
 
+### The confirmation in production
+
+When Laravel takes the app for one in production (`APP_ENV` is `production` or
+not set) and `--force` is not given, `migrate --pretend` asks for confirmation.
+With no terminal to answer, as in CI, or with the answer no, it prints the
+"APPLICATION IN PRODUCTION." box and "Command cancelled.", exits with 1 and
+runs nothing. kilit reads this as Laravel stopping, like the error screen:
+`Laravel stopped at its confirmation for an application in production
+(APP_ENV is production or not set) and cancelled the command; no statement was
+seen`. The exit status is 2 also without `--strict`, the JSON entry is the same
+`laravel-error` warning, and `--format github` prints an error annotation.
+Nothing of the box or the question is read. With the answer yes, Laravel goes
+on with the migrations, and the box and question lines are lines kilit does not
+understand (exit status 2). `--force`, or `APP_ENV=local` or `testing`, prints
+no box. Laravel 10.0 to 10.16 spell it "Command canceled." and, with no
+terminal, print the question "Do you really wish to run this command?" between
+the box and that line; kilit reads both spellings as the same stop. From
+Laravel 10.17 the text is "Command cancelled.". [The GitHub Action page](github-action.md) sets `APP_ENV: testing` for
+this reason.
+
 ## Reads under `--pretend`
 
 Under `--pretend` every read returns nothing. A migration such as
