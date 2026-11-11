@@ -91,8 +91,9 @@ struct CheckArgs {
     files: Vec<PathBuf>,
 
     /// The tables before the migration, as `php artisan schema:dump` or
-    /// `mysqldump --no-data` writes them. Without it kilit cannot judge
-    /// MODIFY and CHANGE
+    /// `mysqldump --no-data` writes them. Without it kilit does not know the
+    /// tables the migration does not create, and gives no answer a table
+    /// could change
     #[arg(long, value_name = "FILE")]
     schema: Option<PathBuf>,
 

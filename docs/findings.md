@@ -1,7 +1,7 @@
 # Measured behavior
 
 Every row on this page is one kind of change that kilit-lab ran on real MySQL
-servers: 8.0.46 and 8.4.13. The lab ran each of the 275 scenarios in
+servers: 8.0.46 and 8.4.13. The lab ran each of the 281 scenarios in
 [`scenarios/`](../scenarios/) on both servers, in six variants, and kept the
 result in [`matrix/`](../matrix/). The scenarios are grouped into 81 case ids:
 35 for InnoDB, 12 for MyISAM, 26 for row formats and 8 for `old_alter_table`.
@@ -47,6 +47,40 @@ Some situations cannot be seen in a schema: the rows a table holds, or the 64
 instant column changes a table has had since it was last rebuilt. kilit prints
 them as notes under the answer, not as the answer. The rows for them are here
 because the lab measured them.
+
+A row describes a table kilit knows: one in the `--schema` file or created by
+the input. On a table kilit does not know (no `--schema`, a table the dump
+lacks, or a table kilit lost track of), kilit looks at every situation the
+table may be in: the plain InnoDB DYNAMIC table, the situations in the table
+below (a FULLTEXT index, an indexed column, a foreign key on either side, a
+`TEXT` or `BLOB` column, the primary key, a generated column or CHECK that
+uses the column, the row size), and the engine and row format cases where the
+lab measured the change. Then:
+
+1. A failure that comes from the statement alone is the answer: error 1674 for
+   a nondeterministic default (`UUID()`, `RAND()`, `UUID_SHORT()`,
+   `SYSDATE()`, `USER()`) and error 1101 for a quoted default on a `TEXT`,
+   `BLOB`, `JSON` or `GEOMETRY` column named in the statement.
+2. If one situation has no measured answer, the statement is `UNKNOWN`.
+3. If every situation gives the same word, that word is the answer, except
+   "writes continue": another engine or row format that nobody measured may
+   apply, so that word is never kept.
+4. If no situation lets writes continue, the answer is "writes wait" (or
+   "fails" when all fail). The algorithm and the rebuild depend on the table,
+   and the notes list each situation with its measured answer.
+5. Otherwise the statement is `UNKNOWN`, with the likely answer in the reason.
+
+Today only `ADD FULLTEXT` reaches rule 4: it makes writes wait on every table
+it may be (`add-fulltext-index`, `add-second-fulltext-index`,
+`myisam-add-fulltext-index`, `myisam-add-fulltext-index-text` and the three
+row format cases), so a run without `--schema` exits 1 for it. A forced
+`ALGORITHM=INSTANT`, `ALGORITHM=INPLACE, LOCK=NONE` or `LOCK=NONE` fails, and
+`ALGORITHM=COPY` is `UNKNOWN`. `ADD FOREIGN KEY` stays `UNKNOWN` by rule 2.
+A table that an earlier statement dropped or renamed away is `UNKNOWN` for
+every statement (MySQL gives error 1146), and so is any `DROP INDEX`. A Lost
+table with a known MyISAM engine or a non-DYNAMIC row format, or after
+`old_alter_table` or `innodb_default_row_format` is named, stays `UNKNOWN`
+too.
 
 The text report ends the line `measured as <case> (N lab scenarios)`. N counts
 the scenarios behind the answer: the case's, or the exception's when an
@@ -128,6 +162,8 @@ about it for each statement.
 | Add a FULLTEXT index<br>`$table->fullText('note')` | INPLACE, rebuilds the table | **wait** | `add-fulltext-index` |
 | ↳ when the table already has one | INPLACE | **wait** | `add-fulltext-index`, exception: FULLTEXT index |
 | Drop an index<br>`$table->dropIndex('orders_amount_index')` | INPLACE | continue | `drop-index` |
+| ↳ of the table's only FULLTEXT index, or of a UNIQUE index on one column | INPLACE | continue | `drop-index` (`drop-fulltext-index`, `drop-unique-index`) |
+| ↳ of one of several FULLTEXT indexes, of a UNIQUE index on several columns, or of a UNIQUE index of NOT NULL columns on a table without a primary key | UNKNOWN | – | none |
 | ↳ when the table has no index of that name | UNKNOWN: MySQL gives error 1091, but kilit's table may be out of date | – | none (`drop-index-missing`) |
 | ↳ when a foreign key needs it<br>`$table->dropIndex('orders_user_id_foreign')` before `$table->dropForeign(['user_id'])` | fails, error 1553 | – | `drop-index`, exception: only index of a foreign key |
 | Add a foreign key<br>`$table->foreign('user_id')->references('id')->on('users')` | COPY, copies every row | **wait** | `add-foreign-key` |
@@ -146,9 +182,13 @@ about it for each statement.
 | ↳ when its expression has a string, a function call, `IN`, `BETWEEN` or `LIKE` or no column, or kilit sees a missing, AUTO_INCREMENT, generated or foreign key column, or a CHECK name the database has | UNKNOWN | – | none |
 | ↳ with `NOT ENFORCED`<br>`ADD CONSTRAINT … CHECK (…) NOT ENFORCED` (raw SQL), under the same conditions | INSTANT | continue | `add-not-enforced-check-constraint` |
 | Drop a CHECK constraint<br>`DROP CONSTRAINT …` or `DROP CHECK …` (raw SQL) | INSTANT | continue | `drop-check-constraint` |
-| ↳ when the name belongs to a foreign key or an index, does not exist, or is shared by a CHECK and another constraint | UNKNOWN | – | none |
+| ↳ `DROP CHECK …` of a name the table does not have | UNKNOWN: MySQL gives error 3821, but kilit's table may be out of date | – | `drop-check-constraint`, exception: no CHECK of that name (`drop-check-missing`) |
+| ↳ `DROP CONSTRAINT …` of a name the table does not have | UNKNOWN: MySQL gives error 3940, but kilit's table may be out of date | – | `drop-check-constraint`, exception: no constraint of that name (`drop-constraint-missing`) |
+| ↳ when the name belongs to a foreign key or an index, or is shared by a CHECK and another constraint | UNKNOWN | – | none |
 | Make a CHECK constraint not enforced<br>`ALTER CHECK … NOT ENFORCED` or `ALTER CONSTRAINT … NOT ENFORCED` (raw SQL) | INSTANT | continue | `alter-check-constraint` |
 | ↳ with `ENFORCED` on a CHECK that is already enforced | INSTANT | continue | `alter-check-constraint` |
+| ↳ `ALTER CHECK …` of a name the table does not have | UNKNOWN: MySQL gives error 3821, but kilit's table may be out of date | – | `alter-check-constraint`, exception: no CHECK of that name (`alter-check-missing`) |
+| ↳ `ALTER CONSTRAINT …` of a name the table does not have | UNKNOWN: MySQL gives error 3940, but kilit's table may be out of date | – | `alter-check-constraint`, exception: no constraint of that name (`alter-constraint-missing`) |
 | Enforce a CHECK constraint again<br>`ALTER CHECK … ENFORCED` or `ALTER CONSTRAINT … ENFORCED` (raw SQL) | COPY, copies every row | **wait** | `enforce-check-constraint` |
 | ↳ when a row breaks it | fails, error 3819 | – | `enforce-check-constraint`, exception: row breaks it |
 | Set the table comment<br>`$table->comment('Orders placed by users')` | INPLACE | continue | `set-table-comment` |
@@ -279,7 +319,8 @@ the same result on both. Laravel writes `engine = MyISAM` only in
 | Add a unique index<br>`$table->unique('amount')` | COPY, copies every row | **wait** | `myisam-add-unique-index` |
 | ↳ when values repeat | fails, error 1062 | – | `myisam-add-unique-index`, exception: duplicate values |
 | Add an index or a unique index on a key longer than 1000 bytes⁷<br>`$table->string('code', 251)->nullable()->index()` | fails, error 1071 | – | `myisam-add-key-too-long` |
-| Add a FULLTEXT index<br>`$table->fullText('note')` | COPY, copies every row | **wait** | `myisam-add-fulltext-index` |
+| Add a FULLTEXT index on one `VARCHAR` column<br>`$table->fullText('note')` | COPY, copies every row | **wait** | `myisam-add-fulltext-index` |
+| ↳ on one `TEXT` column<br>`$table->fullText('body')` | COPY, copies every row | **wait** | `myisam-add-fulltext-index-text` |
 | Drop an index<br>`$table->dropIndex('orders_amount_index')` | COPY, copies every row | **wait** | `myisam-drop-index` |
 | Add a foreign key⁶<br>`$table->foreign('user_id')->references('id')->on('users')` | COPY, copies every row | **wait** | `myisam-add-foreign-key` |
 | ↳ when an `INT` column points at a `BIGINT UNSIGNED` one, or the parent column has no index | COPY, copies every row | **wait** | `myisam-add-foreign-key` |
@@ -303,7 +344,8 @@ reads go on and writes wait.
 
 kilit answers `UNKNOWN`, with the reason, for every other change to a MyISAM
 table: a type change other than `INT` to `BIGINT`, an index of several columns,
-with a prefix or `DESC`, a key on other types or character sets, an expression
+with a prefix or `DESC`, a key on other types or character sets, a FULLTEXT
+index other than on one `VARCHAR` or `TEXT` column, an expression
 default, a generated column, and a foreign key whose index name the statement
 chooses. A foreign key from an InnoDB table to a MyISAM table is `UNKNOWN`
 too.
@@ -334,11 +376,18 @@ ON`. `KEY_BLOCK_SIZE=8` without a `ROW_FORMAT` makes the table COMPRESSED, as
 | Every change of the first two rows after `SET old_alter_table = ON`<br>`ALTER TABLE orders ADD COLUMN …` | COPY, copies every row | **wait** | `old-alter-table-*` cases of the same changes |
 | ↳ with `LOCK=NONE` | fails, error 1846 | – | the forced variant of the same case |
 | ↳ with an `ALGORITHM` other than `DEFAULT` | as with `old_alter_table` off | as there | the forced variant of the same case |
+| Add a FULLTEXT index on one `TEXT` column, on a COMPRESSED, COMPACT or REDUNDANT table<br>`$table->fullText('body')` | INPLACE, rebuilds the table | **wait** | `compressed-add-fulltext-index`, `compact-add-fulltext-index`, `redundant-add-fulltext-index` |
+| ↳ with `ALGORITHM=INSTANT` or `LOCK=NONE` | fails, error 1846 | – | the forced variant of the same case |
 | Anything else, or a row format and `old_alter_table` together | UNKNOWN | – | none |
 
 An index key on a COMPACT or REDUNDANT table may be 767 bytes: in `utf8mb4`,
 `VARCHAR(191)` is 764 bytes and is accepted, `VARCHAR(192)` is 768 and fails.
 kilit counts bytes for integer columns and `utf8mb4` `VARCHAR` columns only.
+
+A FULLTEXT index is measured on one `TEXT` column only (not `TINYTEXT`,
+`MEDIUMTEXT` or `LONGTEXT`, not `CHARACTER SET binary`, and the character set
+must be known); a second FULLTEXT index, two columns or other types are
+`UNKNOWN` on these tables.
 
 `KEY_BLOCK_SIZE` is measured at 8 only; 1, 2, 4 and 16 are `UNKNOWN`. A
 `KEY_BLOCK_SIZE` next to `ROW_FORMAT=DYNAMIC`, `COMPACT` or `REDUNDANT` is

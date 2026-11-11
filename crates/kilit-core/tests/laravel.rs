@@ -208,6 +208,7 @@ fn foreign_key_constrained() {
             referenced_columns: vec!["id".into()],
             on_delete: Some(ForeignKeyAction::Cascade),
             on_update: None,
+            former_names: Vec::new(),
         })]
     );
 }
@@ -322,12 +323,19 @@ fn foreign_key_checks() {
 }
 
 #[test]
-fn rename_index_is_not_readable_yet() {
-    // $table->renameIndex('a', 'b'); sqlparser 0.63 cannot read RENAME INDEX.
+fn rename_index_is_read_as_an_alter_of_orders() {
+    // $table->renameIndex('a', 'b'); B1c reads RENAME INDEX, so the table it
+    // renames an index of stays known.
     assert!(matches!(
         kind("alter table `orders` rename index `a` to `b`"),
-        StatementKind::Unparsed { .. }
+        StatementKind::Alter(_)
     ));
+    assert_eq!(
+        alter("alter table `orders` rename key `a` to `b`")
+            .operations
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -347,7 +355,7 @@ fn rename_column() {
 // Laravel 13.40.0 prints it where it detects an automated environment, a
 // shorter form. The schema calls are in the comments.
 
-use kilit_core::{Knowledge, Prediction, Schema, Verdict, check, read_pretend};
+use kilit_core::{Knowledge, Prediction, Schema, Shared, Verdict, check, read_pretend};
 
 const USERS: &str = "create table `users` (`id` bigint unsigned not null auto_increment, \
     `name` varchar(255) collate utf8mb4_unicode_ci not null, primary key (`id`)) \
@@ -383,6 +391,10 @@ fn answers(server: &str, schema: &str, output: &str) -> Vec<String> {
             Prediction::Measured { verdict, .. } => verdict.to_string(),
             Prediction::Unknown { .. } => "unknown".to_owned(),
             Prediction::NotChecked { .. } => NOT_CHECKED.to_owned(),
+            Prediction::DependsOnTable { shared, .. } => match shared {
+                Shared::WritesWait => "depends on the table: writes wait".to_owned(),
+                Shared::Fails => "depends on the table: fails".to_owned(),
+            },
         })
         .collect()
 }
@@ -3501,7 +3513,7 @@ fn unknown_reasons(server: &str, schema: &str, output: &str) -> Vec<Option<Strin
     check(&statements, &Schema::from_sql(schema), results)
         .into_iter()
         .map(|finding| match finding.prediction {
-            Prediction::Unknown { reason } => Some(reason),
+            Prediction::Unknown { reason, .. } => Some(reason),
             _ => None,
         })
         .collect()
@@ -3584,11 +3596,12 @@ fn laravel_s_use_current_and_use_current_on_update_keep_their_answers() {
             );
         }
     }
-    // Laravel 10 and 11: no default at all, a plain new column.
+    // Laravel 10 and 11: no default at all, a NOT NULL date column. B1c,
+    // The lab has not measured that shape, so it is unknown.
     for server in ["mysql-8.0.46", "mysql-8.4.13"] {
         assert_eq!(
             answers(server, ORDERS, STEP13A_DATE_USE_CURRENT_L10),
-            [NOT_CHECKED, INSTANT],
+            [NOT_CHECKED, "unknown"],
             "date on Laravel 10 on {server}"
         );
     }
@@ -4509,13 +4522,16 @@ fn laravel_12_and_13_text_json_and_blob_defaults_fail_with_1101_where_mysql_refu
         ("Laravel 13, short form", B1B_TABLE_DEFAULTS_SHORT),
     ] {
         for (tables, schema) in [("no table", ""), ("the table", B1B_ORDERS_WITH_NOTE)] {
+            // The expression default is a copy on a table
+            // kilit knows and unknown on one it does not.
+            let expression = if schema.is_empty() { "unknown" } else { COPY };
             assert_eq!(
                 b1b_answers(schema, output),
                 [
                     B1B_FAILS_1101, // a text not null default ''
                     B1B_FAILS_1101, // b text null default 'x'
                     B1B_FAILS_1101, // c json null default '[]'
-                    COPY,           // d json not null default ('[]'): an expression
+                    expression,     // d json not null default ('[]'): an expression
                     B1B_FAILS_1101, // modify note text not null default ''
                     B1B_FAILS_1101, // e blob not null default ''
                     B1B_FAILS_1101, // f longtext not null default ''
@@ -4548,7 +4564,8 @@ fn laravel_json_defaults_written_as_a_literal_fail_and_as_an_expression_copy() {
     // j5 json not null default (JSON_ARRAY()): not an answer of MySQL's
     // success list.
     assert_ne!(answers[0], INSTANT);
-    assert_eq!(answers[1], COPY, "t6 text not null default ('')");
+    // A copy only on a plain table, and there is none here.
+    assert_eq!(answers[1], "unknown", "t6 text not null default ('')");
     assert_eq!(answers[2], B1B_FAILS_1101, "j7 json not null default '[]'");
 }
 
@@ -5126,7 +5143,7 @@ fn unit3d_s_lines_with_words_such_as_table_and_columns_stay_printed_text() {
 // page has mangled that line's mark, the line is a statement kilit cannot
 // read (it may change data), not text. The inputs are Laravel outputs as a
 // Windows console in code page 1252 shows them (the mark `⇂` as `â‡‚`). By
-// hand on MySQL, `insert ignore` filled the table and the ADD UNIQUE after it
+// hand on MySQL 8.0.46 and 8.4.13, `insert ignore` filled the table and the ADD UNIQUE after it
 // gave 1062, so the output must not be taken as fully read.
 
 /// Statement lines with the text a migration printed before them.
@@ -5205,4 +5222,146 @@ fn plain_text_printed_before_a_statement_line_stays_text() {
     let pretend = b1b_read(&output);
     assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
     assert_eq!(pretend.migrations[0].printed.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Step B1c: no measured answer on a table kilit does not know.
+//
+// The statements are what Laravel 10 to 13 print for the call named in each
+// comment (the MySQL grammar is the same in all four majors for these); the
+// expectations come from the lab, from hand tests on MySQL 8.0.46 and 8.4.13
+// and from the decisions of the step.
+
+/// `orders` as mysqldump writes it, with a plain and a FULLTEXT index: a
+/// column added to it is a copy.
+const B1C_ORDERS_WITH_FULLTEXT: &str = "create table `orders` (\
+    `id` bigint unsigned not null auto_increment, `note` text, \
+    `amount` int not null default '0', primary key (`id`), \
+    key `ix_amount` (`amount`), fulltext key `ft_note` (`note`)) \
+    engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;\n";
+
+const B1C_NAME: &str = "2026_11_11_100000_change_orders_table";
+
+#[test]
+fn laravel_columns_and_indexes_on_a_table_without_a_schema_are_unknown_in_both_forms() {
+    // $table->string('coupon')->nullable(); $table->integer('qty');
+    // $table->dropColumn('legacy_flag'); $table->renameColumn('note', 'memo');
+    // $table->index('amount'); $table->integer('qty')->default(0)
+    let statements = [
+        "alter table `orders` add `coupon` varchar(255) null",
+        "alter table `orders` add `qty` int not null",
+        "alter table `orders` drop `legacy_flag`",
+        "alter table `orders` rename column `note` to `memo`",
+        "alter table `orders` add index `orders_amount_index`(`amount`)",
+    ];
+    for (form, output) in [
+        ("long", long_form(&[(B1C_NAME, &statements)])),
+        ("short", short_form(&[(B1C_NAME, &statements)])),
+    ] {
+        assert_eq!(b1b_answers("", &output), ["unknown"; 5], "{form}");
+    }
+}
+
+#[test]
+fn the_same_laravel_statements_keep_the_lab_answers_on_a_table_the_schema_has() {
+    // Regression: with the table the answers are the lab's (the index is on the
+    // column the first statement adds).
+    let statements = [
+        "alter table `orders` add `coupon` varchar(255) null",
+        "alter table `orders` add index `orders_coupon_index`(`coupon`)",
+    ];
+    for (form, output) in [
+        ("long", long_form(&[(B1C_NAME, &statements)])),
+        ("short", short_form(&[(B1C_NAME, &statements)])),
+    ] {
+        assert_eq!(b1b_answers(ORDERS, &output), [INSTANT, INPLACE], "{form}");
+    }
+}
+
+#[test]
+fn laravel_renaming_an_index_keeps_the_table_known_for_the_next_statement() {
+    // $table->renameIndex('ix_amount', 'ix_total'); then
+    // $table->string('coupon')->nullable(); on a table with a FULLTEXT index.
+    let statements = [
+        "alter table `orders` rename index `ix_amount` to `ix_total`",
+        "alter table `orders` add `coupon` varchar(255) null",
+    ];
+    for (form, output) in [
+        ("long", long_form(&[(B1C_NAME, &statements)])),
+        ("short", short_form(&[(B1C_NAME, &statements)])),
+    ] {
+        assert_eq!(
+            b1b_answers(B1C_ORDERS_WITH_FULLTEXT, &output),
+            ["unknown", COPY],
+            "{form}"
+        );
+    }
+}
+
+#[test]
+fn laravel_adding_a_column_to_a_schema_qualified_table_is_unknown_even_without_a_schema_file() {
+    // Schema::connection(...)->table('shop.orders', ...): Laravel wraps each
+    // part. kilit does not know which database `shop` is.
+    let statements = ["alter table `shop`.`orders` add `coupon` varchar(255) null"];
+    for (form, output) in [
+        ("long", long_form(&[(B1C_NAME, &statements)])),
+        ("short", short_form(&[(B1C_NAME, &statements)])),
+    ] {
+        assert_eq!(b1b_answers(ORDERS, &output), ["unknown"], "{form}");
+    }
+}
+
+#[test]
+fn a_laravel_table_created_in_the_migrations_stays_known_without_a_schema() {
+    // Schema::create('tags', ...) then Schema::table('tags', ...): the answer
+    // is the lab's, as before.
+    let create = "create table `tags` (`id` bigint unsigned not null auto_increment primary key, \
+                  `name` varchar(255) not null) default character set utf8mb4 \
+                  collate 'utf8mb4_unicode_ci'";
+    let statements = [create, "alter table `tags` add `slug` varchar(255) null"];
+    for (form, output) in [
+        ("long", long_form(&[(B1C_NAME, &statements)])),
+        ("short", short_form(&[(B1C_NAME, &statements)])),
+    ] {
+        assert_eq!(b1b_answers("", &output), [NOT_CHECKED, INSTANT], "{form}");
+    }
+}
+
+#[test]
+fn laravel_s_full_text_index_on_a_table_without_a_schema_makes_writes_wait_in_both_forms() {
+    // $table->fullText('note'); the same grammar in Laravel 10 to 13. The lab
+    // measured every table it may be (plain, MyISAM, COMPRESSED, COMPACT,
+    // REDUNDANT) and each one makes writes wait.
+    let statements = ["alter table `orders` add fulltext `orders_note_fulltext`(`note`)"];
+    for (form, output) in [
+        ("long", long_form(&[(B1C_NAME, &statements)])),
+        ("short", short_form(&[(B1C_NAME, &statements)])),
+    ] {
+        assert_eq!(
+            b1b_answers("", &output),
+            ["depends on the table: writes wait"],
+            "{form}"
+        );
+    }
+}
+
+#[test]
+fn laravel_s_full_text_index_keeps_the_lab_answer_on_a_table_the_schema_has() {
+    // Regression: add-fulltext-index, INPLACE with a rebuild, writes wait.
+    let statements = ["alter table `orders` add fulltext `orders_note_fulltext`(`note`)"];
+    for (form, output) in [
+        ("long", long_form(&[(B1C_NAME, &statements)])),
+        ("short", short_form(&[(B1C_NAME, &statements)])),
+    ] {
+        assert_eq!(
+            b1b_answers(
+                "create table `orders` (`id` bigint unsigned not null auto_increment, \
+                 `note` varchar(50) default null, primary key (`id`)) \
+                 engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;\n",
+                &output
+            ),
+            ["INPLACE, rebuilds the table, writes wait"],
+            "{form}"
+        );
+    }
 }

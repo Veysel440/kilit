@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use std::borrow::Cow;
 
-use crate::check::{Finding, LetterCase, Prediction};
+use crate::check::{Finding, LetterCase, Prediction, Shared};
 use crate::results::{Verdict, Writes};
 use crate::schema::{folded, with_table_renamed};
 use crate::statement::{Operation, Statement, StatementKind};
@@ -58,6 +58,12 @@ pub fn impacts(statements: &[Statement], findings: &[Finding]) -> Vec<Impact> {
                 Writes::Blocked => Impact::WritesWait,
                 Writes::Unknown => Impact::Unknown,
             },
+            Prediction::DependsOnTable {
+                shared: Shared::Fails,
+                ..
+            } => Impact::Fails,
+            Prediction::DependsOnTable { .. } if on_new_table => Impact::NewTable,
+            Prediction::DependsOnTable { .. } => Impact::WritesWait,
             Prediction::Unknown { .. } => Impact::Unknown,
             Prediction::NotChecked { .. } => Impact::NotChecked,
         })

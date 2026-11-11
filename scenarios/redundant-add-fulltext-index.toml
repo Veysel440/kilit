@@ -1,0 +1,6 @@
+title = "Add a FULLTEXT index on a TEXT column to a REDUNDANT table"
+row_format = "REDUNDANT"
+setup = [
+    "ALTER TABLE orders ADD COLUMN body TEXT NULL",
+]
+operation = "ADD FULLTEXT INDEX ft_orders_body (body)"

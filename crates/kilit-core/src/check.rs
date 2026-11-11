@@ -18,10 +18,10 @@ use std::borrow::Cow;
 use crate::knowledge::ServerResults;
 use crate::modify::{Change, changes};
 use crate::parse::REJECTED_BY;
-use crate::results::{Server, Variant, Verdict};
+use crate::results::{Server, Variant, Verdict, Writes};
 use crate::row;
 use crate::schema::{
-    CheckTarget, ConstraintKind, GoneHow, InAnotherCase, Role, Schema, TableState,
+    CheckTarget, ConstraintKind, Gone, GoneHow, InAnotherCase, Role, Schema, TableState,
     creates_temporary, has_descending, names_foreign_key_index, same_in_any_case,
     with_table_renamed,
 };
@@ -48,6 +48,39 @@ pub struct Finding {
     /// one. The statement is on no new table; how kilit follows it says
     /// which setting the migration goes on with.
     pub letter_case: Option<LetterCase>,
+    /// What kilit knew of the table the statement is on (see [`table_of`])
+    /// right before the statement.
+    pub table_state: Option<TableSeen>,
+}
+
+/// What kilit knows of a table at a statement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableSeen {
+    /// From the `--schema` dump, or from a statement before.
+    Known,
+    /// kilit lost track of it at a statement it could not follow.
+    Lost,
+    /// No `--schema` and no statement before shows it.
+    Unseen,
+}
+
+/// The one table `statement` is on, as written; `None` for a statement on
+/// no table or on several.
+pub fn table_of(statement: &Statement) -> Option<&str> {
+    match &statement.kind {
+        StatementKind::Alter(alter) => Some(&alter.table),
+        StatementKind::CreateTable { table, .. } => Some(&table.name),
+        StatementKind::DropTable { tables } => match tables.as_slice() {
+            [table] => Some(table),
+            _ => None,
+        },
+        StatementKind::RenameTable { renames } => match renames.as_slice() {
+            [rename] => Some(&rename.from),
+            _ => None,
+        },
+        StatementKind::Unparsed { table, .. } => table.as_deref(),
+        StatementKind::Set { .. } | StatementKind::Other => None,
+    }
 }
 
 /// How kilit follows a statement that names a table in another letter case:
@@ -86,9 +119,42 @@ pub enum Prediction {
         notes: Vec<String>,
     },
     /// kilit cannot tell, and says why. Never treat this as safe.
-    Unknown { reason: String },
+    Unknown {
+        reason: String,
+        /// What kilit knows that may help: on a table it does not know,
+        /// each measured situation that would change the likely answer.
+        notes: Vec<String>,
+    },
     /// Not something kilit checks: a new table, a data change, a setting.
     NotChecked { reason: String },
+    /// On a table kilit does not know, every answer the lab measured for
+    /// the tables it may be makes writes wait, or every one fails: kilit says
+    /// that, and the algorithm and the rebuild depend on the table. See
+    /// [`Shared`].
+    DependsOnTable {
+        /// The case of the change on a plain InnoDB table.
+        case: &'static str,
+        /// What every measured answer shares.
+        shared: Shared,
+        /// The scenarios of that case.
+        evidence: Vec<&'static str>,
+        /// Why kilit does not know the table, and the plain table's answer.
+        reason: String,
+        /// Each answer the table could give, and what kilit cannot see.
+        notes: Vec<String>,
+    },
+}
+
+/// What every answer the lab measured for a table kilit does not know
+/// shares. Writes continuing is never one: a safe answer needs every engine
+/// and row format measured, and such a table may have one the lab never
+/// measured (MEMORY, KEY_BLOCK_SIZE=4, ...).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shared {
+    /// No answer lets writes continue: each one waits, or fails.
+    WritesWait,
+    /// Every answer fails, with an error that depends on the table.
+    Fails,
 }
 
 /// A kind of change, with the lab scenarios that measured it.
@@ -156,6 +222,11 @@ pub enum Condition {
     /// may be out of date, so on a known table the drop is unknown, with the
     /// measurement in the reason, and the table stays known.
     NoSuchName,
+    /// The statement names the CHECK constraint with `DROP CONSTRAINT` or
+    /// `ALTER CONSTRAINT`, not `DROP CHECK` or `ALTER CHECK`: MySQL refuses
+    /// a name the table does not have with another error then. The
+    /// statement shows it, whatever kilit knows of the table.
+    ConstraintClause,
     /// The column whose default the statement sets is TEXT, BLOB or JSON,
     /// and the default a quoted literal, which MySQL refuses (error 1101).
     BlobDefault,
@@ -194,7 +265,7 @@ const VALUE_OUT_OF_RANGE: &str =
     "if a value does not fit the new type (in strict SQL mode, the default)";
 const VALUE_TOO_LONG: &str =
     "if a value is longer than the new length (in strict SQL mode, the default)";
-const NULL_IN_A_ROW: &str = "if a row holds NULL";
+const NULL_IN_A_ROW: &str = "if a row holds NULL (in strict SQL mode, the default)";
 const DUPLICATE_VALUES: &str = "if the columns hold duplicate values";
 const ORPHAN_ROW: &str = "if a row points to a parent row that does not exist";
 const ORPHAN_ROW_KEPT: &str =
@@ -703,6 +774,8 @@ const DROP_INDEX: Case = Case {
     id: "drop-index",
     scenarios: &[
         "drop-index",
+        "drop-fulltext-index",
+        "drop-unique-index",
         // The index of a foreign key, after dropping the key.
         "drop-index-after-dropping-its-foreign-key",
         // An index of a foreign key, when something else serves the key.
@@ -867,7 +940,18 @@ const DROP_CHECK_CONSTRAINT: Case = Case {
         "drop-check-two-column",
         "drop-check-not-enforced",
     ],
-    exceptions: &[],
+    exceptions: &[
+        Exception {
+            scenarios: &["drop-check-missing"],
+            when: "if the table has no CHECK constraint of the name",
+            conditions: &[Condition::NoSuchName],
+        },
+        Exception {
+            scenarios: &["drop-constraint-missing"],
+            when: "if DROP CONSTRAINT names no constraint of the table",
+            conditions: &[Condition::NoSuchName, Condition::ConstraintClause],
+        },
+    ],
 };
 
 /// `ALTER CHECK` or `ALTER CONSTRAINT` of a CHECK constraint, `NOT
@@ -883,7 +967,18 @@ const ALTER_CHECK_CONSTRAINT: Case = Case {
         "alter-constraint-not-enforced-again",
         "alter-constraint-enforced-again",
     ],
-    exceptions: &[],
+    exceptions: &[
+        Exception {
+            scenarios: &["alter-check-missing"],
+            when: "if the table has no CHECK constraint of the name",
+            conditions: &[Condition::NoSuchName],
+        },
+        Exception {
+            scenarios: &["alter-constraint-missing"],
+            when: "if ALTER CONSTRAINT names no constraint of the table",
+            conditions: &[Condition::NoSuchName, Condition::ConstraintClause],
+        },
+    ],
 };
 
 /// `ALTER CHECK` or `ALTER CONSTRAINT ... ENFORCED` of a NOT ENFORCED CHECK
@@ -1025,7 +1120,10 @@ const MYISAM_ADD_KEY_TOO_LONG: Case = Case {
 
 const MYISAM_ADD_FULLTEXT_INDEX: Case = Case {
     id: "myisam-add-fulltext-index",
-    scenarios: &["myisam-add-fulltext-index"],
+    scenarios: &[
+        "myisam-add-fulltext-index",
+        "myisam-add-fulltext-index-text",
+    ],
     exceptions: &[],
 };
 
@@ -1162,6 +1260,15 @@ const COMPRESSED_DROP_INDEX: Case = Case {
     exceptions: &[],
 };
 
+/// A FULLTEXT index on one TEXT column: on COMPRESSED, COMPACT and
+/// REDUNDANT tables alike, MySQL rebuilds the table in place and writes
+/// wait, as on a DYNAMIC one.
+const COMPRESSED_ADD_FULLTEXT_INDEX: Case = Case {
+    id: "compressed-add-fulltext-index",
+    scenarios: &["compressed-add-fulltext-index"],
+    exceptions: &[],
+};
+
 const COMPACT_ADD_COLUMN: Case = Case {
     id: "compact-add-column",
     scenarios: &["compact-add-nullable-column"],
@@ -1221,6 +1328,12 @@ const COMPACT_ADD_KEY_TOO_LONG: Case = Case {
         "compact-add-unique-index-key-over-limit",
         "compact-add-unique-index",
     ],
+    exceptions: &[],
+};
+
+const COMPACT_ADD_FULLTEXT_INDEX: Case = Case {
+    id: "compact-add-fulltext-index",
+    scenarios: &["compact-add-fulltext-index"],
     exceptions: &[],
 };
 
@@ -1286,8 +1399,14 @@ const REDUNDANT_ADD_KEY_TOO_LONG: Case = Case {
     exceptions: &[],
 };
 
+const REDUNDANT_ADD_FULLTEXT_INDEX: Case = Case {
+    id: "redundant-add-fulltext-index",
+    scenarios: &["redundant-add-fulltext-index"],
+    exceptions: &[],
+};
+
 /// Every case of a table with a row format other than DYNAMIC.
-pub const ROW_FORMAT_CASES: [&Case; 26] = [
+pub const ROW_FORMAT_CASES: [&Case; 29] = [
     &COMPRESSED_ADD_COLUMN,
     &COMPRESSED_DROP_COLUMN,
     &COMPRESSED_RENAME_COLUMN,
@@ -1296,6 +1415,7 @@ pub const ROW_FORMAT_CASES: [&Case; 26] = [
     &COMPRESSED_ADD_INDEX,
     &COMPRESSED_ADD_UNIQUE_INDEX,
     &COMPRESSED_DROP_INDEX,
+    &COMPRESSED_ADD_FULLTEXT_INDEX,
     &COMPACT_ADD_COLUMN,
     &COMPACT_DROP_COLUMN,
     &COMPACT_RENAME_COLUMN,
@@ -1305,6 +1425,7 @@ pub const ROW_FORMAT_CASES: [&Case; 26] = [
     &COMPACT_ADD_UNIQUE_INDEX,
     &COMPACT_DROP_INDEX,
     &COMPACT_ADD_KEY_TOO_LONG,
+    &COMPACT_ADD_FULLTEXT_INDEX,
     &REDUNDANT_ADD_COLUMN,
     &REDUNDANT_DROP_COLUMN,
     &REDUNDANT_RENAME_COLUMN,
@@ -1314,6 +1435,7 @@ pub const ROW_FORMAT_CASES: [&Case; 26] = [
     &REDUNDANT_ADD_UNIQUE_INDEX,
     &REDUNDANT_DROP_INDEX,
     &REDUNDANT_ADD_KEY_TOO_LONG,
+    &REDUNDANT_ADD_FULLTEXT_INDEX,
 ];
 
 /// Without an `ALGORITHM` clause, or with `ALGORITHM=DEFAULT`, a session
@@ -1402,7 +1524,7 @@ struct Measured {
     /// Where the InnoDB case's own measurements come from, for a note:
     /// `on a DYNAMIC table`.
     instead: &'static str,
-    cases: [(&'static str, &'static Case); 8],
+    cases: &'static [(&'static str, &'static Case)],
     /// The most bytes an index key holds.
     key_bytes: u64,
     /// The case of a longer key, if the lab measured one.
@@ -1414,7 +1536,7 @@ struct Measured {
 const ON_COMPRESSED: Measured = Measured {
     name: "on a COMPRESSED table",
     instead: "on a DYNAMIC table",
-    cases: [
+    cases: &[
         ("add-column", &COMPRESSED_ADD_COLUMN),
         ("drop-column", &COMPRESSED_DROP_COLUMN),
         ("rename-column", &COMPRESSED_RENAME_COLUMN),
@@ -1423,6 +1545,7 @@ const ON_COMPRESSED: Measured = Measured {
         ("add-index", &COMPRESSED_ADD_INDEX),
         ("add-unique-index", &COMPRESSED_ADD_UNIQUE_INDEX),
         ("drop-index", &COMPRESSED_DROP_INDEX),
+        ("add-fulltext-index", &COMPRESSED_ADD_FULLTEXT_INDEX),
     ],
     key_bytes: MAX_INDEX_BYTES,
     key_too_long: None,
@@ -1432,7 +1555,7 @@ const ON_COMPRESSED: Measured = Measured {
 const ON_COMPACT: Measured = Measured {
     name: "on a COMPACT table",
     instead: "on a DYNAMIC table",
-    cases: [
+    cases: &[
         ("add-column", &COMPACT_ADD_COLUMN),
         ("drop-column", &COMPACT_DROP_COLUMN),
         ("rename-column", &COMPACT_RENAME_COLUMN),
@@ -1441,6 +1564,7 @@ const ON_COMPACT: Measured = Measured {
         ("add-index", &COMPACT_ADD_INDEX),
         ("add-unique-index", &COMPACT_ADD_UNIQUE_INDEX),
         ("drop-index", &COMPACT_DROP_INDEX),
+        ("add-fulltext-index", &COMPACT_ADD_FULLTEXT_INDEX),
     ],
     key_bytes: 767,
     key_too_long: Some(&COMPACT_ADD_KEY_TOO_LONG),
@@ -1450,7 +1574,7 @@ const ON_COMPACT: Measured = Measured {
 const ON_REDUNDANT: Measured = Measured {
     name: "on a REDUNDANT table",
     instead: "on a DYNAMIC table",
-    cases: [
+    cases: &[
         ("add-column", &REDUNDANT_ADD_COLUMN),
         ("drop-column", &REDUNDANT_DROP_COLUMN),
         ("rename-column", &REDUNDANT_RENAME_COLUMN),
@@ -1459,6 +1583,7 @@ const ON_REDUNDANT: Measured = Measured {
         ("add-index", &REDUNDANT_ADD_INDEX),
         ("add-unique-index", &REDUNDANT_ADD_UNIQUE_INDEX),
         ("drop-index", &REDUNDANT_DROP_INDEX),
+        ("add-fulltext-index", &REDUNDANT_ADD_FULLTEXT_INDEX),
     ],
     key_bytes: 767,
     key_too_long: Some(&REDUNDANT_ADD_KEY_TOO_LONG),
@@ -1468,7 +1593,7 @@ const ON_REDUNDANT: Measured = Measured {
 const WITH_OLD_ALTER_TABLE: Measured = Measured {
     name: "with old_alter_table ON",
     instead: "with it OFF",
-    cases: [
+    cases: &[
         ("add-column", &OLD_ALTER_TABLE_ADD_COLUMN),
         ("drop-column", &OLD_ALTER_TABLE_DROP_COLUMN),
         ("rename-column", &OLD_ALTER_TABLE_RENAME_COLUMN),
@@ -1519,8 +1644,22 @@ pub fn check_sessions(
     schema: &Schema,
     results: &ServerResults,
 ) -> Vec<Finding> {
+    check_files(sessions, &[], schema, results)
+}
+
+/// Like [`check_sessions`], with the name of each session's input file as
+/// given, which a reason uses for a statement of an earlier file.
+pub fn check_files(
+    sessions: &[&[Statement]],
+    file_names: &[&str],
+    schema: &Schema,
+    results: &ServerResults,
+) -> Vec<Finding> {
     let mut schema = schema.clone();
-    let mut session = Session::default();
+    let mut session = Session {
+        file_names: file_names.iter().map(|name| (*name).to_owned()).collect(),
+        ..Session::default()
+    };
     let mut agreements = Agreements::default();
     let mut findings = Vec::with_capacity(sessions.iter().map(|statements| statements.len()).sum());
     for (at, statements) in sessions.iter().enumerate() {
@@ -1530,6 +1669,11 @@ pub fn check_sessions(
         }
         for statement in *statements {
             agreements.server_dependent = false;
+            let table_state = table_of(statement).map(|name| match schema.table(name) {
+                TableState::Known(_) => TableSeen::Known,
+                TableState::Lost { .. } => TableSeen::Lost,
+                TableState::Missing => TableSeen::Unseen,
+            });
             let in_another_case = schema.in_another_case(statement);
             let (prediction, letter_case) = check_one(
                 statement,
@@ -1545,6 +1689,7 @@ pub fn check_sessions(
                 prediction,
                 server_dependent: agreements.server_dependent,
                 letter_case,
+                table_state,
             });
         }
     }
@@ -1726,20 +1871,181 @@ fn check_one<'r>(
     // the setting the migration goes on with.
     match (&letter_case, goes_on) {
         (Some(LetterCase::Unclear), _) => schema.follow_in_another_case(statement),
-        (_, Some((followed, goes_on))) => go_on(schema, &followed, &goes_on),
-        (_, None) => go_on(schema, statement, &prediction),
+        (_, Some((followed, goes_on))) => go_on(schema, &followed, &goes_on, session),
+        (_, None) => go_on(schema, statement, &prediction, session),
     }
-    (prediction, letter_case)
+    (created_fulltext_index(statement, prediction), letter_case)
+}
+
+/// A `CREATE FULLTEXT INDEX`, which kilit answers and follows as the `ALTER
+/// TABLE ... ADD FULLTEXT` MySQL runs it as (by hand on MySQL 8.0.46 and
+/// 8.4.13, the two leave the same table and are refused alike): the lab
+/// has not measured the statement itself, so the answer becomes the
+/// reason's, after the tables follow it, a refusal leaving them as they
+/// were.
+fn created_fulltext_index(statement: &Statement, prediction: Prediction) -> Prediction {
+    if !crate::parse::creates_fulltext_index(&statement.sql) {
+        return prediction;
+    }
+    match prediction {
+        Prediction::Measured {
+            case,
+            verdict,
+            notes,
+            ..
+        } => Prediction::Unknown {
+            reason: format!(
+                "CREATE FULLTEXT INDEX has not been measured itself; MySQL runs it as ALTER \
+                 TABLE ... ADD FULLTEXT, by hand on MySQL 8.0.46 and 8.4.13, and the lab \
+                 measured that: {} ({case})",
+                brief(&verdict)
+            ),
+            notes,
+        },
+        Prediction::DependsOnTable { reason, notes, .. } => Prediction::Unknown {
+            reason: format!(
+                "{reason}; CREATE FULLTEXT INDEX itself has not been measured: MySQL runs it as \
+                 ALTER TABLE ... ADD FULLTEXT, by hand on MySQL 8.0.46 and 8.4.13"
+            ),
+            notes,
+        },
+        other => other,
+    }
 }
 
 /// Moves the tables past `statement`, which kilit answered `prediction`,
 /// unless MySQL may refuse it for the table's keys.
-fn go_on(schema: &mut Schema, statement: &Statement, prediction: &Prediction) {
+fn go_on(schema: &mut Schema, statement: &Statement, prediction: &Prediction, session: &Session) {
     if let Some((table, reason, engine, unclear)) = options_kilit_cannot_follow(statement, schema) {
         schema.lose_table(&table, reason, engine, unclear);
+    } else if let Some(rewritten) = rewritten(statement, schema, session) {
+        match rewritten {
+            // MySQL refuses the statement: the tables stay as they were.
+            Rewritten::Refused => {}
+            Rewritten::Lost {
+                table,
+                reason,
+                engine,
+            } => {
+                schema.apply(statement);
+                schema.lose_table(&table, reason, engine, false);
+            }
+        }
     } else {
         follow(schema, statement, prediction);
     }
+}
+
+/// Whether `column` may be longer than its type holds in some character
+/// set: a VARCHAR of more than 65,535 / 4 characters, or a column too long
+/// in any. A quick look before the table's character set is looked up.
+fn may_be_too_long(column: &Column) -> bool {
+    match column.data_type {
+        DataType::VarChar { length } => length > row::MAX_ROW_BYTES / 4,
+        _ => row::too_long_kind(None, column).is_some(),
+    }
+}
+
+/// What MySQL makes of a statement kilit would otherwise follow as written.
+enum Rewritten {
+    /// MySQL refuses it.
+    Refused,
+    /// MySQL may run something else: kilit stops trusting the table.
+    Lost {
+        table: String,
+        reason: String,
+        engine: Option<Engine>,
+    },
+}
+
+/// A column longer than its type holds, in ADD, MODIFY, CHANGE or CREATE
+/// TABLE (see [`row::TooLong`]): MySQL refuses a CHAR or BINARY one in
+/// every SQL mode, so the tables stay as they were. It refuses a VARCHAR or
+/// VARBINARY one in strict mode, and in the others makes it a TEXT or BLOB
+/// type, which kilit does not follow. kilit takes the mode as strict only
+/// when the input sets a strict sql_mode earlier in the same session: the
+/// server's own may not be, and a framework may set one the input does not
+/// show (Laravel's `'strict' => false` sets a non-strict one, and `migrate
+/// --pretend` does not print it). A refused CREATE TABLE is taken as lost
+/// too: kilit gives that table no answer either way.
+fn rewritten(statement: &Statement, schema: &Schema, session: &Session) -> Option<Rewritten> {
+    // Without a dump, a table no statement before shows may be there: MySQL
+    // then keeps it as it is, and creates nothing. One a statement before
+    // dropped or renamed is not there.
+    if let StatementKind::CreateTable {
+        table,
+        if_not_exists: true,
+    } = &statement.kind
+        && !schema.is_from_dump()
+        && schema.table(&table.name) == TableState::Missing
+        && schema
+            .gone(&table.name)
+            .is_none_or(|gone| gone.how == GoneHow::MaybeDropped)
+    {
+        return Some(Rewritten::Lost {
+            table: table.name.clone(),
+            reason: format!(
+                "line {}: CREATE TABLE IF NOT EXISTS keeps a table of the name that no --schema \
+                 shows, if there is one",
+                statement.line
+            ),
+            engine: None,
+        });
+    }
+    let (name, table, columns): (&str, Option<&Table>, Vec<&Column>) = match &statement.kind {
+        StatementKind::Alter(alter) => {
+            let columns: Vec<&Column> = alter
+                .operations
+                .iter()
+                .filter_map(|operation| match operation {
+                    Operation::AddColumn { column, .. }
+                    | Operation::ModifyColumn { column, .. }
+                    | Operation::ChangeColumn { column, .. } => Some(column),
+                    _ => None,
+                })
+                .filter(|column| may_be_too_long(column))
+                .collect();
+            if columns.is_empty() {
+                return None;
+            }
+            let table = match schema.table(&alter.table) {
+                TableState::Known(table) => Some(table),
+                _ => None,
+            };
+            (&alter.table, table, columns)
+        }
+        StatementKind::CreateTable { table, .. } => {
+            (&table.name, Some(table), table.columns.iter().collect())
+        }
+        _ => return None,
+    };
+    let (column, kind) = columns
+        .into_iter()
+        .find_map(|column| Some((column, row::too_long_kind(table, column)?)))?;
+    let line = statement.line;
+    let strict = session.sql_mode == SqlMode::Strict;
+    let creates = matches!(statement.kind, StatementKind::CreateTable { .. });
+    if !creates && (kind == row::TooLong::InEveryMode || strict) {
+        return Some(Rewritten::Refused);
+    }
+    let reason = if kind == row::TooLong::InEveryMode || strict {
+        format!(
+            "line {line}: MySQL refuses to create it, as {} is longer than its type holds",
+            column.name
+        )
+    } else {
+        format!(
+            "line {line}: {} is longer than its type holds, and unless the sql_mode is \
+             strict MySQL makes it a TEXT or BLOB type; the input sets no strict sql_mode \
+             before it",
+            column.name
+        )
+    };
+    Some(Rewritten::Lost {
+        table: name.to_owned(),
+        reason,
+        engine: table.and_then(|table| table.engine.clone()),
+    })
 }
 
 /// Under which setting of lower_case_table_names the migration goes on
@@ -1926,7 +2232,7 @@ fn predict_kind<'r>(
             {
                 notes.push(ASSUMES_OLD_ALTER_TABLE_IN_A_NEW_SESSION.to_owned());
             }
-            prediction
+            on_unknown_table(alter, session, schema, prediction)
         }
         StatementKind::Set { variables } => {
             session.apply(variables, statement.line, may_be_refused);
@@ -1949,6 +2255,390 @@ fn predict_kind<'r>(
         StatementKind::Other => not_checked("not a schema change"),
         StatementKind::Unparsed { error, .. } => unknown(error.as_str()),
     }
+}
+
+/// The cases whose failure comes from the statement alone, whatever the
+/// table: kilit gives it on a table it does not know too. Every other
+/// failure, and every other answer, depends on the table somewhere.
+/// - add-column-binlog-unsafe-default: a nondeterministic expression
+///   default (error 1674);
+/// - add-column-blob-literal-default and modify-column-blob-literal-default:
+///   a quoted default on the TEXT, BLOB, JSON or GEOMETRY column the
+///   statement writes (error 1101).
+const FAILS_FROM_THE_STATEMENT: [&Case; 3] = [
+    &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT,
+    &ADD_COLUMN_BLOB_LITERAL_DEFAULT,
+    &MODIFY_COLUMN_BLOB_LITERAL_DEFAULT,
+];
+
+/// An answer on a table kilit does not know: one it lost track of, one no
+/// `--schema` showed, or one an earlier statement dropped or renamed while
+/// no dump was given, and the parent of a new foreign key in each of these.
+/// The table may have what changes the answer (a FULLTEXT index, a foreign
+/// key, another engine or row format, a longer row ...), so the measured
+/// answer becomes the reason's likely answer and only a failure that comes
+/// from the statement alone stays: see [`FAILS_FROM_THE_STATEMENT`]. With a
+/// dump, a table it does not have is unknown before any case: see
+/// [`not_in_dump`].
+fn on_unknown_table(
+    alter: &Alter,
+    session: &Session,
+    schema: &Schema,
+    prediction: Prediction,
+) -> Prediction {
+    let Prediction::Measured {
+        case,
+        verdict,
+        evidence,
+        notes,
+    } = prediction
+    else {
+        return prediction;
+    };
+    let Some(why) = unknown_table(alter, session, schema) else {
+        return Prediction::Measured {
+            case,
+            verdict,
+            evidence,
+            notes,
+        };
+    };
+    if matches!(verdict, Verdict::Fails { .. })
+        && FAILS_FROM_THE_STATEMENT
+            .iter()
+            .any(|statement_alone| statement_alone.id == case)
+    {
+        return Prediction::Measured {
+            case,
+            verdict,
+            evidence,
+            notes,
+        };
+    }
+    Prediction::Unknown {
+        reason: format!(
+            "{why}; on a plain InnoDB table the lab measured {} ({case})",
+            brief(&verdict)
+        ),
+        notes,
+    }
+}
+
+/// Why kilit does not know the table of `alter`, or the parent of the
+/// foreign key it adds; `None` when it knows both.
+fn unknown_table(alter: &Alter, session: &Session, schema: &Schema) -> Option<String> {
+    let parents = alter
+        .operations
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::AddForeignKey(key) => Some(key.referenced_table.as_str()),
+            _ => None,
+        });
+    let mut tables = std::iter::once(alter.table.as_str()).chain(parents);
+    tables.find_map(|name| {
+        let why = why_unknown(name, session, schema)?;
+        Some(if name == alter.table {
+            why
+        } else {
+            format!("the foreign key points at {name}: {why}")
+        })
+    })
+}
+
+/// Why kilit does not know the table `name`, as [`unknown_table`] says it;
+/// `None` when it knows it, or when a dump decides (see [`not_in_dump`]).
+fn why_unknown(name: &str, session: &Session, schema: &Schema) -> Option<String> {
+    match schema.table(name) {
+        TableState::Known(_) => None,
+        TableState::Lost { reason, .. } => Some(format!("kilit lost track of {name} ({reason})")),
+        TableState::Missing => match schema.gone(name) {
+            Some(_) if schema.is_from_dump() => None,
+            Some(gone) => Some(format!(
+                "{name}, {}, and no statement after it creates it again",
+                gone_by(gone, session)
+            )),
+            // With a dump, B1b's rule: see `not_in_dump`.
+            None if schema.is_from_dump() => None,
+            None => Some(format!(
+                "no --schema was given, so kilit does not know {name}"
+            )),
+        },
+    }
+}
+
+/// One word for what an answer means for the application.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Word {
+    Fails,
+    Waits,
+    Continues,
+    Unknown,
+}
+
+fn word(verdict: &Verdict) -> Word {
+    match verdict {
+        Verdict::Fails { .. } => Word::Fails,
+        Verdict::Runs { writes, .. } => match writes {
+            Writes::Blocked => Word::Waits,
+            Writes::Allowed => Word::Continues,
+            Writes::Unknown => Word::Unknown,
+        },
+    }
+}
+
+/// The engines and row formats the lab measured apart from InnoDB's
+/// DYNAMIC, each with the case of `innodb` it measured there, if any.
+fn measured_apart_from_dynamic(innodb: &str) -> [(&'static str, Option<&'static Case>); 4] {
+    let row_format = |measured: &Measured| {
+        measured
+            .cases
+            .iter()
+            .find(|(id, _)| *id == innodb)
+            .map(|(_, case)| *case)
+    };
+    [
+        (
+            "MyISAM",
+            ON_MYISAM
+                .iter()
+                .find(|(id, ..)| *id == innodb)
+                .map(|(_, case, _)| *case),
+        ),
+        (
+            "COMPRESSED (ROW_FORMAT=COMPRESSED, or KEY_BLOCK_SIZE=8)",
+            row_format(&ON_COMPRESSED),
+        ),
+        ("COMPACT", row_format(&ON_COMPACT)),
+        ("REDUNDANT", row_format(&ON_REDUNDANT)),
+    ]
+}
+
+/// Decision 1 on a table kilit does not know, after `answer` gave `base`
+/// as if it were the lab's plain InnoDB table. The table could give each
+/// of these answers: the base one; each exception of the case the table
+/// decides; the case measured on MyISAM and on the COMPRESSED, COMPACT and
+/// REDUNDANT row formats; for a new index, the refusals of a missing
+/// column (1072) and a taken name (1061), by hand on MySQL 8.0.46 and
+/// 8.4.13; and every path kilit cannot see (a note of `classified`'s
+/// other than an assumption or a row situation, or a case the lab has not
+/// measured on one of those engines and row formats), whose answer is
+/// unknown. The first rule that matches decides:
+/// 1. a failure that comes from the statement alone is the answer (see
+///    [`FAILS_FROM_THE_STATEMENT`]);
+/// 2. any answer is unknown: unknown;
+/// 3. every answer has the same impact: that impact, but writes continuing
+///    needs every engine and row format measured, which a table kilit does
+///    not know may not have, so it is never kept;
+/// 4. no answer lets writes continue: writes wait;
+/// 5. else unknown.
+///
+/// Combinations the lab did not measure on another engine or row format
+/// (a second FULLTEXT index on a COMPRESSED table, ...) and engines and
+/// row formats it never measured count against writes continuing only.
+/// A table a statement before dropped or renamed is not there, and MySQL
+/// refuses the statement (1146, by hand on both servers): no answer of
+/// these is the table's, so it stays unknown. So does a DROP INDEX, which
+/// has shapes the lab has not measured on a table kilit knows (see
+/// [`check_dropped_index`]). `base` comes back as it is for
+/// [`on_unknown_table`] to keep (rule 1) or turn into an unknown one
+/// (rules 2 and 5); `classified` is how many of its notes are classify's.
+#[allow(clippy::too_many_arguments)]
+fn on_a_table_kilit_does_not_know<'r>(
+    alter: &Alter,
+    case: &'static Case,
+    operation: &Operation,
+    situation: &Situation<'_>,
+    variant: Variant,
+    results: &'r ServerResults,
+    agreements: &mut Agreements<'r>,
+    classified: usize,
+    base: Prediction,
+) -> Prediction {
+    let Prediction::Measured {
+        case: id,
+        verdict,
+        evidence,
+        notes: answered,
+    } = &base
+    else {
+        return base;
+    };
+    let classified = &answered[..classified.min(answered.len())];
+    let base_word = word(verdict);
+    // Rule 1, and the answers no rule past 2 keeps: an exception that
+    // decided on its own, or writes continuing.
+    if matches!(base_word, Word::Continues | Word::Unknown)
+        || evidence.as_slice() != case.scenarios
+        || (base_word == Word::Fails
+            && FAILS_FROM_THE_STATEMENT
+                .iter()
+                .any(|statement_alone| statement_alone.id == *id))
+    {
+        return base;
+    }
+    // A path kilit cannot see on such a table: rule 2.
+    if matches!(operation, Operation::DropIndex { .. })
+        || classified
+            .iter()
+            .any(|note| !note.starts_with("assumes ") && !depends_on_rows(note))
+    {
+        return base;
+    }
+    let Some(why) = why_unknown(&alter.table, situation.session, situation.schema) else {
+        return base;
+    };
+    if situation.schema.gone(&alter.table).is_some() {
+        return base;
+    }
+    let mut notes: Vec<String> = classified.to_vec();
+    let mut answers = vec![base_word];
+    let mut said = Vec::new();
+    for (at, exception) in case.exceptions.iter().enumerate() {
+        if !matches!(holds(exception, situation), Applies::Maybe) {
+            continue;
+        }
+        let other = agreements.agreed(case, Group::Exception(at), variant, results);
+        let scenarios = scenario_list(exception.scenarios);
+        if exception.conditions.contains(&Condition::Hidden) {
+            // The rows or the history: a note on every table.
+            if let Ok(other) = other {
+                notes.push(if other == *verdict {
+                    format!("{}: same result ({scenarios})", exception.when)
+                } else {
+                    format!("{}: {} ({scenarios})", exception.when, brief(&other))
+                });
+            }
+            continue;
+        }
+        let Ok(other) = other else {
+            return base;
+        };
+        answers.push(word(&other));
+        said.push(format!(
+            "{}: {} ({scenarios})",
+            exception.when,
+            brief(&other)
+        ));
+    }
+    for (name, measured) in measured_apart_from_dynamic(case.id) {
+        let Some(measured) = measured else {
+            return base;
+        };
+        let Ok(other) = agreements.agreed(measured, Group::Case, variant, results) else {
+            return base;
+        };
+        answers.push(word(&other));
+        said.push(format!(
+            "if the table is {name}: {} ({})",
+            brief(&other),
+            scenario_list(measured.scenarios)
+        ));
+        for (at, exception) in measured.exceptions.iter().enumerate() {
+            if exception.conditions.contains(&Condition::Hidden) {
+                continue;
+            }
+            let Ok(other) = agreements.agreed(measured, Group::Exception(at), variant, results)
+            else {
+                return base;
+            };
+            answers.push(word(&other));
+            said.push(format!(
+                "if the table is {name} and {}: {} ({})",
+                exception.when.trim_start_matches("if "),
+                brief(&other),
+                scenario_list(exception.scenarios)
+            ));
+        }
+    }
+    if let Operation::AddIndex(index) = operation {
+        for column in index.columns.iter().filter_map(|entry| entry_column(entry)) {
+            answers.push(Word::Fails);
+            said.push(format!(
+                "if the table has no column {column}: fails with error 1072 (by hand on MySQL \
+                 8.0.46 and 8.4.13)"
+            ));
+        }
+        if let Some(name) = &index.name {
+            answers.push(Word::Fails);
+            said.push(format!(
+                "if the table has an index named {name} already: fails with error 1061 (by hand \
+                 on MySQL 8.0.46 and 8.4.13)"
+            ));
+        }
+    }
+    if answers.contains(&Word::Unknown) {
+        return base;
+    }
+    let (shared, every) = if answers.iter().all(|answer| *answer == Word::Fails) {
+        (Shared::Fails, "fails")
+    } else if answers.iter().all(|answer| *answer == Word::Waits) {
+        (Shared::WritesWait, "makes writes wait")
+    } else if !answers.contains(&Word::Continues) {
+        (Shared::WritesWait, "makes writes wait or fails")
+    } else {
+        return base;
+    };
+    notes.extend(said);
+    notes.push(
+        "on another engine, row format or KEY_BLOCK_SIZE, or one of these in a shape the lab \
+         did not measure there: not measured"
+            .to_owned(),
+    );
+    Prediction::DependsOnTable {
+        case: id,
+        shared,
+        evidence: evidence.clone(),
+        reason: format!(
+            "{why}; every answer the lab measured, or a hand test showed, for the tables it may \
+             be {every}: on a plain InnoDB table {} ({id})",
+            brief(verdict)
+        ),
+        notes,
+    }
+}
+
+/// Which statement took a table away: "which the statement on line 4
+/// drops".
+fn gone_by(gone: &Gone, session: &Session) -> String {
+    let statement = match (gone.earlier_file, session.file_of(gone)) {
+        (true, Some(file)) => format!("the statement on line {} of {file}", gone.line),
+        (true, None) => format!(
+            "the statement on line {} of an earlier input file",
+            gone.line
+        ),
+        (false, _) => format!("the statement on line {}", gone.line),
+    };
+    match &gone.how {
+        GoneHow::Dropped => format!("which {statement} drops"),
+        GoneHow::MaybeDropped => format!(
+            "which kilit takes as dropped by {statement} (MySQL may have dropped only a \
+             temporary table of that name)"
+        ),
+        GoneHow::Renamed { to } => format!("which {statement} renames to {to}"),
+    }
+}
+
+/// A name with a database, `shop.orders`, where kilit has a table of the
+/// name alone, `orders`: kilit does not know which database the statements
+/// run in, so it cannot tell whether the two are one table. With a dump or
+/// without one.
+fn qualified_name(name: &str, table: TableState<'_>, schema: &Schema) -> Option<String> {
+    if table != TableState::Missing {
+        return None;
+    }
+    let (database, short) = name.rsplit_once('.')?;
+    if schema.table(short) == TableState::Missing {
+        return None;
+    }
+    let has = if schema.dump_has(short) {
+        "the schema dump has a table"
+    } else {
+        "kilit has a table"
+    };
+    Some(format!(
+        "{name} names the database {database}, and {has} {short}: kilit does not know the \
+         database the statements run in, so it cannot tell whether {name} is {short}"
+    ))
 }
 
 /// An `ALTER TABLE` of table options that MySQL may refuse for the keys of
@@ -2066,6 +2756,9 @@ fn follow(schema: &mut Schema, statement: &Statement, prediction: &Prediction) {
         Prediction::Measured {
             verdict: Verdict::Fails { .. },
             ..
+        } | Prediction::DependsOnTable {
+            shared: Shared::Fails,
+            ..
         }
     );
     if !fails {
@@ -2082,6 +2775,7 @@ fn not_checked(reason: impl Into<String>) -> Prediction {
 fn unknown(reason: impl Into<String>) -> Prediction {
     Prediction::Unknown {
         reason: reason.into(),
+        notes: Vec::new(),
     }
 }
 
@@ -2128,6 +2822,8 @@ struct Session {
     /// A session before this one set these settings in its own scope; this
     /// one starts from the MySQL default again, and has not set them yet.
     earlier_session: EarlierSession,
+    /// The name of each session's input file, as given, when known.
+    file_names: Vec<String>,
 }
 
 /// What a session leaves to the sessions after it: a value set globally
@@ -2351,6 +3047,12 @@ impl Session {
     /// A new session starts: each followed setting takes its MySQL default
     /// again, or is unknown when an earlier session set it globally. What
     /// kilit saw named anywhere earlier stays seen.
+    /// The input file of the statement that took a table away, when the
+    /// files have names.
+    fn file_of(&self, gone: &Gone) -> Option<&str> {
+        self.file_names.get(gone.session).map(String::as_str)
+    }
+
     fn starts_again(&mut self) {
         let later = self.later_sessions;
         let earlier = EarlierSession {
@@ -2611,21 +3313,24 @@ fn predict<'r>(
         }
     };
     let table = schema.table(&alter.table);
-    if let Some(reason) = not_in_dump(&alter.table, table, schema) {
+    if let Some(reason) = qualified_name(&alter.table, table, schema) {
+        return unknown(reason);
+    }
+    if let Some(reason) = not_in_dump(&alter.table, table, schema, session) {
         return unknown(format!("the statement is on {reason}"));
     }
-    if let Operation::AddForeignKey(key) = operation
-        && matches!(
+    if let Operation::AddForeignKey(key) = operation {
+        let parent = schema.table(&key.referenced_table);
+        if let Some(reason) = qualified_name(&key.referenced_table, parent, schema) {
+            return unknown(format!("the foreign key points at {reason}"));
+        }
+        if matches!(
             session.foreign_key_checks,
             Setting::On | Setting::ServerDefault
-        )
-        && let Some(reason) = not_in_dump(
-            &key.referenced_table,
-            schema.table(&key.referenced_table),
-            schema,
-        )
-    {
-        return unknown(format!("the foreign key points at {reason}"));
+        ) && let Some(reason) = not_in_dump(&key.referenced_table, parent, schema, session)
+        {
+            return unknown(format!("the foreign key points at {reason}"));
+        }
     }
     match session.old_alter_table {
         OldAlterTable::Unknown(line) => {
@@ -2692,6 +3397,7 @@ fn predict<'r>(
     let Classified {
         case,
         notes,
+        unmeasured,
         column,
         row,
     } = match classify(operation, sql, session, table, schema, results) {
@@ -2731,61 +3437,63 @@ fn predict<'r>(
             Operation::SetColumnDefault { default, .. } => Some(default),
             _ => None,
         },
+        constraint_clause: matches!(
+            operation,
+            Operation::DropConstraint { .. }
+                | Operation::AlterCheck {
+                    constraint: true,
+                    ..
+                }
+        ),
         row: &row,
         session,
         schema,
     };
-    match (myisam, measured) {
+    let prediction = match (myisam, measured) {
         (Some(table), _) => on_myisam(
             operation, sql, case, table, &situation, variant, results, agreements, notes,
         ),
         (None, Some(measured)) => measured_apart(
             measured, operation, sql, case, &situation, variant, results, agreements, notes,
         ),
-        (None, None) => answer(case, &situation, variant, results, agreements, notes),
+        (None, None) => {
+            // The notes `answer` starts from are classify's.
+            let classified = notes.len();
+            let base = answer(case, &situation, variant, results, agreements, notes);
+            if matches!(table, TableState::Known(_)) {
+                base
+            } else {
+                on_a_table_kilit_does_not_know(
+                    alter, case, operation, &situation, variant, results, agreements, classified,
+                    base,
+                )
+            }
+        }
+    };
+    match (unmeasured, &prediction) {
+        (Some(reason), Prediction::Measured { .. } | Prediction::DependsOnTable { .. }) => {
+            unknown(reason)
+        }
+        _ => prediction,
     }
 }
 
 /// Why kilit does not answer for the table `name`, when its tables come
 /// from a dump and kilit has no table of that name at this statement.
-fn not_in_dump(name: &str, table: TableState<'_>, schema: &Schema) -> Option<String> {
+fn not_in_dump(
+    name: &str,
+    table: TableState<'_>,
+    schema: &Schema,
+    session: &Session,
+) -> Option<String> {
     if table != TableState::Missing || !schema.is_from_dump() {
         return None;
     }
-    // `shop.orders` next to a table `orders`.
-    if let Some((database, short)) = name.rsplit_once('.')
-        && schema.table(short) != TableState::Missing
-    {
-        let has = if schema.dump_has(short) {
-            "the schema dump has"
-        } else {
-            "kilit has a table"
-        };
-        return Some(format!(
-            "{name}: {has} {short}, and kilit does not know which database {database}.{short} \
-             is in"
-        ));
-    }
     if let Some(gone) = schema.gone(name) {
-        let statement = if gone.earlier_file {
-            format!(
-                "the statement on line {} of an earlier input file",
-                gone.line
-            )
-        } else {
-            format!("the statement on line {}", gone.line)
-        };
-        let what = match &gone.how {
-            GoneHow::Dropped => format!("which {statement} drops"),
-            GoneHow::MaybeDropped => format!(
-                "which kilit takes as dropped by {statement} (MySQL may have dropped only a \
-                 temporary table of that name)"
-            ),
-            GoneHow::Renamed { to } => format!("which {statement} renames to {to}"),
-        };
         return Some(format!(
-            "{name}, {what}, and no statement after it creates it again: MySQL refuses the \
-             statement if {name} does not exist"
+            "{name}, {}, and no statement after it creates it again: MySQL refuses the \
+             statement if {name} does not exist",
+            gone_by(gone, session)
         ));
     }
     Some(format!(
@@ -3193,6 +3901,16 @@ fn measured_case(
             notes.push(ASSUMES_STRICT_SQL_MODE.to_owned());
             Ok(too_long)
         }
+        ("add-fulltext-index", Operation::AddIndex(index)) => {
+            let table = table()?;
+            let [entry] = index.columns.as_slice() else {
+                return not_measured("a FULLTEXT index of several columns");
+            };
+            match table.column(entry) {
+                Some(column) if is_plain_text(table, column) => Ok(case),
+                _ => not_measured("a FULLTEXT index on anything but one TEXT column"),
+            }
+        }
         ("drop-index", Operation::DropIndex { name }) => {
             let plain = table()?.indexes.iter().any(|index| {
                 index.kind == IndexKind::Plain
@@ -3399,9 +4117,12 @@ fn myisam_case(
             let [entry] = index.columns.as_slice() else {
                 return not_measured("a FULLTEXT index of several columns");
             };
-            match table.column(entry).map(|column| &column.data_type) {
-                Some(DataType::VarChar { .. }) => Ok(&MYISAM_ADD_FULLTEXT_INDEX),
-                _ => not_measured("a FULLTEXT index on anything but one VARCHAR column"),
+            match table.column(entry) {
+                Some(column) if matches!(column.data_type, DataType::VarChar { .. }) => {
+                    Ok(&MYISAM_ADD_FULLTEXT_INDEX)
+                }
+                Some(column) if is_plain_text(table, column) => Ok(&MYISAM_ADD_FULLTEXT_INDEX),
+                _ => not_measured("a FULLTEXT index on anything but one VARCHAR or TEXT column"),
             }
         }
         ("drop-index", Operation::DropIndex { name }) => {
@@ -3718,6 +4439,8 @@ struct Situation<'a> {
     dropped_foreign_key: Option<&'a str>,
     /// The default the statement sets with `SET DEFAULT`.
     default: Option<&'a str>,
+    /// The statement writes `DROP CONSTRAINT` or `ALTER CONSTRAINT`.
+    constraint_clause: bool,
     /// What kilit counted of the row the change leaves.
     row: &'a RowSize,
     session: &'a Session,
@@ -3760,6 +4483,13 @@ fn holds(exception: &Exception, situation: &Situation<'_>) -> Applies {
 }
 
 fn applies(condition: Condition, situation: &Situation<'_>) -> Applies {
+    if condition == Condition::ConstraintClause {
+        return if situation.constraint_clause {
+            Applies::Yes(Vec::new())
+        } else {
+            Applies::No
+        };
+    }
     let TableState::Known(table) = situation.table else {
         return match condition {
             Condition::NewForeignKey(problem) => new_foreign_key(problem, situation),
@@ -3787,7 +4517,7 @@ fn applies(condition: Condition, situation: &Situation<'_>) -> Applies {
             _ => Applies::No,
         },
         (Condition::BlobDefault, Some(column)) => blob_default(table, column, situation),
-        (Condition::Hidden, _)
+        (Condition::Hidden | Condition::ConstraintClause, _)
         | (
             Condition::PrimaryKeyAlone | Condition::PrimaryKeySecondOfTwo | Condition::BlobDefault,
             None,
@@ -3848,10 +4578,10 @@ fn applies(condition: Condition, situation: &Situation<'_>) -> Applies {
                     )),
                 };
             }
-            match referenced_by(situation.schema, table, column) {
-                Some((other, key)) => Applies::Unmeasured(format!(
-                    "{column} is referenced by the foreign key {key} on {other}, and the lab \
-                     has not measured changing a referenced column"
+            match referenced(situation.schema, table, column) {
+                Some(referenced) => Applies::Unmeasured(format!(
+                    "{column} {referenced}, and the lab has not measured changing a referenced \
+                     column"
                 )),
                 None => Applies::No,
             }
@@ -3874,6 +4604,17 @@ fn kept_fulltext_index<'a>(table: &'a Table, dropped: Option<&str>) -> Option<&'
 
 /// The column an index entry names: `email` in `email` or `email(10)`.
 /// An expression such as `(lower(email))` names none.
+/// Whether a column is TEXT itself, the type the lab measured FULLTEXT
+/// indexes on apart from VARCHAR: not TINYTEXT, MEDIUMTEXT or LONGTEXT, and
+/// not in the binary character set, which makes it a BLOB (MySQL refuses a
+/// FULLTEXT index on it, error 1283), or one kilit does not know.
+fn is_plain_text(table: &Table, column: &Column) -> bool {
+    column.data_type.to_string().eq_ignore_ascii_case("TEXT")
+        && table
+            .text_settings(column)
+            .is_ok_and(|settings| settings.charset.name != "binary")
+}
+
 fn entry_column(entry: &str) -> Option<&str> {
     if is_expression(entry) {
         return None;
@@ -3893,6 +4634,25 @@ fn uses_column(expression: &str, column: &str) -> bool {
 }
 
 /// A foreign key on another table that points at `table.column`.
+/// Whether a foreign key of another table points at `column` of `table`,
+/// in words: one of a table kilit holds, or, for an indexed column, one of
+/// a table kilit does not know (a key needs an index on the columns it
+/// points at).
+fn referenced(schema: &Schema, table: &Table, column: &str) -> Option<String> {
+    if let Some((other, key)) = referenced_by(schema, table, column) {
+        return Some(format!("is referenced by the foreign key {key} on {other}"));
+    }
+    let indexed = table.in_primary_key(column)
+        || table
+            .indexes
+            .iter()
+            .any(|index| index.columns.iter().any(|entry| same_column(entry, column)));
+    (indexed && schema.unseen_key_may_point_at(&table.name)).then(|| {
+        "may be referenced by a foreign key of a table kilit does not know or lost track of"
+            .to_owned()
+    })
+}
+
 fn referenced_by(schema: &Schema, table: &Table, column: &str) -> Option<(String, String)> {
     schema.tables().find_map(|other| {
         other
@@ -4052,7 +4812,7 @@ fn foreign_key_seen(
     }
     // MySQL makes an index on the child's columns, which has its own limit
     // and comes before everything else below, as does this action.
-    let mut bytes = 0;
+    let mut bytes: u64 = 0;
     for &(column, _) in &pairs {
         if let Some(length) = declared_length(&column.data_type) {
             let per_character = if column.data_type.is_text() {
@@ -4060,13 +4820,14 @@ fn foreign_key_seen(
             } else {
                 1
             };
-            bytes += length * per_character;
+            bytes = bytes.saturating_add(length.saturating_mul(per_character));
         }
     }
     if bytes > MAX_INDEX_BYTES {
         return Err(format!(
-            "the foreign key {name} takes up to {bytes} bytes in an index of {}, and the lab has \
-             not measured a key past the index limit of {MAX_INDEX_BYTES}",
+            "the foreign key {name} takes up to {} in an index of {}, and the lab has not \
+             measured a key past the index limit of {MAX_INDEX_BYTES}",
+            row::bytes(bytes),
             child.name
         ));
     }
@@ -4503,11 +5264,15 @@ fn can_serve_a_key(index: &Index) -> bool {
 /// Whether MySQL may have made the index itself for the foreign key: it
 /// names such an index after the key, or after the key's first column when
 /// the key has no name of its own. No schema shows where an index came from.
+/// A `RENAME TABLE` renames the key but not the index, which keeps the
+/// key's old name: by hand on MySQL 8.0.46 and 8.4.13, MySQL still drops it
+/// without a word when another index can serve the key.
 fn may_be_automatic(index: &Index, key: &ForeignKey) -> bool {
     index.name.as_deref().is_some_and(|name| {
         key.name
-            .as_deref()
-            .is_some_and(|key| key.eq_ignore_ascii_case(name))
+            .iter()
+            .chain(&key.former_names)
+            .any(|key| key.eq_ignore_ascii_case(name))
             || key
                 .columns
                 .first()
@@ -4551,9 +5316,9 @@ fn row_size(
     replaced: Option<&str>,
     column: &Column,
 ) -> Result<RowSize, String> {
-    // MySQL refuses such a column in strict SQL mode (error 1074) and
-    // makes it TEXT in the others: it is no row too long. Some are too long
-    // in any character set.
+    // MySQL refuses such a column (error 1074), or makes it a TEXT or BLOB
+    // type: it is no row too long (see `row::TooLong`). Some are too long in
+    // any character set.
     let TableState::Known(table) = table else {
         if let Some(reason) = row::too_long(None, column) {
             return Err(reason);
@@ -4575,9 +5340,9 @@ fn row_size(
     };
     if counts.row > row::MAX_ROW_BYTES {
         return Ok(RowSize::TooLarge(format!(
-            "the row of {} would take {} bytes, past the {} MySQL allows",
+            "the row of {} would take {}, past the {} MySQL allows",
             table.name,
-            counts.row,
+            row::bytes(counts.row),
             row::MAX_ROW_BYTES
         )));
     }
@@ -4649,11 +5414,12 @@ fn check_page_row(table: &Table, counts: row::Counts) -> Result<(), String> {
     };
     if bytes > limit {
         return Err(format!(
-            "the record of {} would take {bytes} bytes in an InnoDB page, past the {limit} its \
+            "the record of {} would take {} in an InnoDB page, past the {limit} its \
              row format allows as the lab counted it, the larger count where MySQL 8.0.46 and \
              8.4.13 differ: MySQL fails with error 1118, or may add the column in place on a \
              table with rows",
-            table.name
+            table.name,
+            row::bytes(bytes)
         ));
     }
     Ok(())
@@ -4796,6 +5562,13 @@ fn only_index_of_foreign_key(table: &Table, name: &str, situation: &Situation<'_
             })
         })
         .flatten();
+    if pointing_here.is_none() && situation.schema.unseen_key_may_point_at(&table.name) {
+        return Applies::Unmeasured(format!(
+            "a foreign key of a table kilit does not know or lost track of may point at {}, \
+             and {not_measured}",
+            table.name
+        ));
+    }
     if let Some((other, key)) = pointing_here {
         return Applies::Unmeasured(format!(
             "{name} serves the foreign key {key} on {other}, which points at this table, and \
@@ -5127,10 +5900,8 @@ fn beside_a_check(table: &Table, column: &str, schema: &Schema) -> Option<String
         let key = key.name.as_deref().unwrap_or_default();
         return Some(format!("{column} is in the foreign key {key}"));
     }
-    if let Some((other, key)) = referenced_by(schema, table, column) {
-        return Some(format!(
-            "{column} is referenced by the foreign key {key} on {other}"
-        ));
+    if let Some(referenced) = referenced(schema, table, column) {
+        return Some(format!("{column} {referenced}"));
     }
     if let Some(index) = table.fulltext_index() {
         let index = index.name.as_deref().unwrap_or_default();
@@ -5281,13 +6052,23 @@ fn dropped_constraint(name: &str, table: TableState<'_>) -> Result<&'static Case
     };
     let kind = match table.constraints_named(name).as_slice() {
         [ConstraintKind::Check] => return Ok(&DROP_CHECK_CONSTRAINT),
+        [] if table.foreign_keys.iter().any(|key| key.name.is_none()) => {
+            return Err(format!(
+                "{} has a foreign key kilit holds without the name MySQL gave it, which may be \
+                 {name}, and dropping a foreign key with DROP CONSTRAINT has not been measured \
+                 yet",
+                table.name
+            ));
+        }
         [ConstraintKind::ForeignKey] => "a foreign key",
         [ConstraintKind::UniqueIndex] => "a unique index",
         [ConstraintKind::PrimaryKey] => "the primary key",
         [] => {
             return Err(format!(
-                "{} has no constraint {name}, as far as kilit can tell; MySQL does not count a \
-                 plain index as one",
+                "{} has no constraint {name} that kilit knows of (MySQL does not count a plain \
+                 index as one). If it has none, MySQL fails with error 3940 \
+                 (drop-constraint-missing); kilit does not answer that from its tables alone, \
+                 which may be out of date",
                 table.name
             ));
         }
@@ -5308,33 +6089,36 @@ fn dropped_constraint(name: &str, table: TableState<'_>) -> Result<&'static Case
 /// CONSTRAINT`) names. MySQL takes these clauses for a CHECK constraint
 /// only: by hand, MySQL 8.0.46 and 8.4.13 refuse each of them for a foreign
 /// key, a unique index, the primary key or another index.
-fn named_check<'t>(clause: &str, name: &str, table: TableState<'t>) -> Result<&'t Check, String> {
-    let table = match table {
-        TableState::Known(table) => table,
-        TableState::Lost { reason, .. } => {
-            return Err(format!(
-                "kilit lost track of this table ({reason}), so it cannot tell whether {name} \
-                 is one of its CHECK constraints"
-            ));
-        }
-        TableState::Missing => {
-            return Err(format!(
-                "kilit does not know this table, so it cannot tell whether {name} is one of \
-                 its CHECK constraints"
-            ));
-        }
+/// `None` on a table kilit does not know, which gets the case's answer as
+/// the likely one: see [`on_unknown_table`].
+fn named_check<'t>(
+    clause: &str,
+    name: &str,
+    table: TableState<'t>,
+) -> Result<Option<&'t Check>, String> {
+    let TableState::Known(table) = table else {
+        return Ok(None);
     };
     match table.check_target(name) {
-        CheckTarget::Check(at) => Ok(&table.checks[at]),
+        CheckTarget::Check(at) => Ok(Some(&table.checks[at])),
         CheckTarget::NotACheck(what) => Err(format!(
             "{name} is {} of {}, not a CHECK constraint, and {REJECTED_BY} {clause} for it",
             what.join(" and "),
             table.name
         )),
-        CheckTarget::Nothing => Err(format!(
-            "{} has no CHECK constraint {name}, as far as kilit can tell",
-            table.name
-        )),
+        CheckTarget::Nothing => {
+            let (error, scenario) = match clause {
+                "DROP CHECK" => (3821, "drop-check-missing"),
+                "ALTER CHECK" => (3821, "alter-check-missing"),
+                _ => (3940, "alter-constraint-missing"),
+            };
+            Err(format!(
+                "{} has no CHECK constraint {name} that kilit knows of. If it has none, MySQL \
+                 fails with error {error} ({scenario}); kilit does not answer that from its \
+                 tables alone, which may be out of date",
+                table.name
+            ))
+        }
         CheckTarget::Several => Err(format!(
             "{} has a CHECK constraint {name} and another constraint or index of that name, \
              and {clause} has not been measured then",
@@ -5467,6 +6251,9 @@ fn check_json_columns(
 struct Classified {
     case: &'static Case,
     notes: Vec<String>,
+    /// A shape the lab has not measured, which makes the answer unknown
+    /// unless a more telling reason does first.
+    unmeasured: Option<String>,
     /// The column the change is about, as the table has it now.
     column: Option<String>,
     /// The row the change leaves, as far as kilit counted it.
@@ -5485,9 +6272,11 @@ fn classify(
     let mut notes = Vec::new();
     let mut subject = None;
     let mut row = RowSize::Fits;
+    let mut unmeasured = None;
     let case = match operation {
         Operation::AddColumn { column, .. } => {
             check_new_column(column)?;
+            check_date_without_default(column)?;
             row = row_size(table, None, column)?;
             match expression_default(column.default.as_deref()) {
                 None => match refused_default(column, session, Refused::Add, &mut notes)? {
@@ -5539,6 +6328,28 @@ fn classify(
             subject = Some(from.clone());
             &RENAME_COLUMN
         }
+        Operation::DropColumnDefault { column } => {
+            if let TableState::Known(table) = table
+                && table.column(column).is_none()
+            {
+                return Err(format!(
+                    "{} has no column {column} that kilit knows, and MySQL refuses ALTER COLUMN \
+                     ... DROP DEFAULT of such a column (error 1054, by hand on MySQL 8.0.46 and \
+                     8.4.13)",
+                    table.name
+                ));
+            }
+            return Err("dropping a column's default has not been measured yet".into());
+        }
+        Operation::RenameIndex { from, to } => {
+            if let TableState::Known(table) = table {
+                check_renamed_index(table, from, to)?;
+            }
+            return Err("renaming an index has not been measured yet".into());
+        }
+        Operation::SetAutoIncrement { .. } => {
+            return Err("setting AUTO_INCREMENT has not been measured yet".into());
+        }
         Operation::SetColumnDefault { column, default } => {
             // Measured with a literal, on a column that had no default.
             if let Some(default) = expression_default(Some(default)) {
@@ -5569,11 +6380,13 @@ fn classify(
         }
         Operation::ModifyColumn { column, position } => {
             check_new_definition(column)?;
+            check_modified_shape(table, &column.name, column, position.as_ref())?;
             subject = Some(column.name.clone());
             if let Some(case) = refused_default(column, session, Refused::Modify, &mut notes)? {
                 return Ok(Classified {
                     case,
                     notes,
+                    unmeasured: None,
                     column: subject,
                     row: RowSize::Fits,
                 });
@@ -5595,6 +6408,7 @@ fn classify(
             position,
         } => {
             check_new_definition(column)?;
+            check_modified_shape(table, old_name, column, position.as_ref())?;
             if !old_name.eq_ignore_ascii_case(&column.name)
                 && let TableState::Known(table) = table
                 && let Some(user) = generated_column_naming(table, old_name)
@@ -5620,6 +6434,7 @@ fn classify(
                 return Ok(Classified {
                     case,
                     notes,
+                    unmeasured: None,
                     column: subject,
                     row: RowSize::Fits,
                 });
@@ -5639,19 +6454,39 @@ fn classify(
             check_functional_index(index, table)?;
             &ADD_FUNCTIONAL_INDEX
         }
-        Operation::AddIndex(index) => match index.kind {
-            IndexKind::Plain => {
-                check_json_columns(index, table, &mut notes)?;
-                &ADD_INDEX
+        Operation::AddIndex(index) => {
+            if let TableState::Known(table) = table {
+                unmeasured = check_new_index(table, index).err();
             }
-            IndexKind::Unique => {
-                check_json_columns(index, table, &mut notes)?;
-                &ADD_UNIQUE_INDEX
+            match index.kind {
+                IndexKind::Plain => {
+                    check_json_columns(index, table, &mut notes)?;
+                    &ADD_INDEX
+                }
+                IndexKind::Unique => {
+                    check_json_columns(index, table, &mut notes)?;
+                    &ADD_UNIQUE_INDEX
+                }
+                // MySQL refuses some on a table kilit knows: that reason first.
+                // Otherwise it is answered as the ALTER TABLE it runs as, and
+                // made unknown after the tables follow it: see
+                // `created_fulltext_index`.
+                IndexKind::Fulltext if crate::parse::creates_fulltext_index(sql) => {
+                    if let Some(reason) = unmeasured.take() {
+                        return Err(reason);
+                    }
+                    &ADD_FULLTEXT_INDEX
+                }
+                IndexKind::Fulltext => &ADD_FULLTEXT_INDEX,
+                IndexKind::Spatial => return Err(SPATIAL_NOT_MEASURED.into()),
             }
-            IndexKind::Fulltext => &ADD_FULLTEXT_INDEX,
-            IndexKind::Spatial => return Err(SPATIAL_NOT_MEASURED.into()),
-        },
-        Operation::DropIndex { .. } => &DROP_INDEX,
+        }
+        Operation::DropIndex { name } => {
+            if let TableState::Known(table) = table {
+                unmeasured = check_dropped_index(table, name).err();
+            }
+            &DROP_INDEX
+        }
         Operation::AddForeignKey(key) => {
             if !matches!(table, TableState::Known(_))
                 || !matches!(schema.table(&key.referenced_table), TableState::Known(_))
@@ -5713,11 +6548,18 @@ fn classify(
             } else {
                 "ALTER CHECK"
             };
-            let check = named_check(clause, name, table)?;
-            if *enforced && !check.enforced {
-                &ENFORCE_CHECK_CONSTRAINT
-            } else {
-                &ALTER_CHECK_CONSTRAINT
+            match named_check(clause, name, table)? {
+                Some(check) if *enforced && !check.enforced => &ENFORCE_CHECK_CONSTRAINT,
+                Some(_) => &ALTER_CHECK_CONSTRAINT,
+                // NOT ENFORCED is measured from either state.
+                None if !*enforced => &ALTER_CHECK_CONSTRAINT,
+                None => {
+                    return Err(format!(
+                        "kilit does not know the table, so it cannot tell whether the CHECK \
+                         constraint {name} is enforced now: ENFORCED reads every row only if \
+                         it is not"
+                    ));
+                }
             }
         }
         Operation::AddPrimaryKey { .. } | Operation::DropPrimaryKey => {
@@ -5738,9 +6580,316 @@ fn classify(
     Ok(Classified {
         case,
         notes,
+        unmeasured,
         column: subject,
         row,
     })
+}
+
+/// A new NOT NULL DATE, DATETIME or TIMESTAMP column without a default:
+/// MySQL fills the rows with a zero date, which the default sql_mode
+/// refuses, and the lab has not measured it.
+fn check_date_without_default(column: &Column) -> Result<(), String> {
+    let DataType::Other(written) = &column.data_type else {
+        return Ok(());
+    };
+    let name = written
+        .split('(')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_uppercase();
+    if matches!(name.as_str(), "DATE" | "DATETIME" | "TIMESTAMP")
+        && column.nullable == Some(false)
+        && column.default.is_none()
+        && column.generated.is_none()
+    {
+        return Err(format!(
+            "a NOT NULL {name} column without a default has not been measured yet"
+        ));
+    }
+    Ok(())
+}
+
+/// A MODIFY or CHANGE of a shape the lab has not measured: one that puts
+/// the column after itself, or makes a primary key column nullable.
+fn check_modified_shape(
+    table: TableState<'_>,
+    old_name: &str,
+    column: &Column,
+    position: Option<&Position>,
+) -> Result<(), String> {
+    if let Some(Position::After(after)) = position
+        && (same_column(after, old_name) || same_column(after, &column.name))
+    {
+        return Err(format!(
+            "putting {old_name} AFTER itself has not been measured yet"
+        ));
+    }
+    if let TableState::Known(table) = table
+        && column.nullable == Some(true)
+        && table
+            .primary_key
+            .iter()
+            .any(|entry| same_column(entry.split('(').next().unwrap_or(entry), old_name))
+    {
+        return Err(format!(
+            "making the primary key column {old_name} nullable has not been measured yet"
+        ));
+    }
+    Ok(())
+}
+
+/// A new index the lab has not measured on a table kilit knows: a name the
+/// table has, a column it does not have (MySQL refuses both: error 1061
+/// and 1072, by hand on MySQL 8.0.46 and 8.4.13), a prefix longer than its
+/// VARCHAR column (error 1089 on both, by hand), and a key whose bytes
+/// kilit counts past InnoDB's limit of 3072.
+fn check_new_index(table: &Table, index: &Index) -> Result<(), String> {
+    if let Some(name) = &index.name
+        && let Some(other) = table
+            .indexes
+            .iter()
+            .find(|other| other.name.as_deref().is_some_and(|n| same_column(n, name)))
+    {
+        return Err(format!(
+            "{} has an index {} already, and MySQL refuses a second index of the name (error \
+             1061, by hand on MySQL 8.0.46 and 8.4.13)",
+            table.name,
+            other.name.as_deref().unwrap_or_default()
+        ));
+    }
+    let mut bytes: Option<u64> = Some(0);
+    for entry in &index.columns {
+        if is_expression(entry) {
+            bytes = None;
+            continue;
+        }
+        let name = entry.split('(').next().unwrap_or(entry).trim();
+        // The parser cuts a name that starts with a digit, such as `2e`, at
+        // the digits: such a key part says nothing kilit can check.
+        if name.starts_with(|c: char| c.is_ascii_digit()) {
+            bytes = None;
+            continue;
+        }
+        let Some(found) = table.column(name) else {
+            return Err(format!(
+                "{} has no column {name} that kilit knows, and MySQL refuses an index on such \
+                 a column (error 1072, by hand on MySQL 8.0.46 and 8.4.13)",
+                table.name
+            ));
+        };
+        if has_prefix(entry) {
+            let more = prefix_bytes(table, found, entry)?;
+            bytes = match (bytes, more) {
+                (Some(total), Some(more)) => Some(total.saturating_add(more)),
+                _ => None,
+            };
+            continue;
+        }
+        bytes = match (bytes, innodb_key_part_bytes(table, found)) {
+            (Some(total), Some(more)) => Some(total.saturating_add(more)),
+            _ => None,
+        };
+    }
+    // A FULLTEXT or spatial index has no such limit.
+    let innodb_dynamic = matches!(index.kind, IndexKind::Plain | IndexKind::Unique)
+        && matches!(table.engine, None | Some(Engine::InnoDb))
+        && matches!(
+            table.row_format,
+            None | Some(RowFormat::Default | RowFormat::Dynamic)
+        )
+        && table.key_block_size.is_none();
+    if innodb_dynamic && let Some(total) = bytes.filter(|total| *total > INNODB_KEY_BYTES) {
+        return Err(format!(
+            "the key takes {}, past the {INNODB_KEY_BYTES} bytes of an InnoDB key, which the \
+             lab has not measured",
+            row::bytes(total)
+        ));
+    }
+    Ok(())
+}
+
+/// The bytes a whole column takes in an InnoDB key: an integer its size, a
+/// CHAR or VARCHAR its length in its character set's widest characters, a
+/// BINARY or VARBINARY its length; `None` for any other type, or a
+/// character set kilit cannot tell.
+fn innodb_key_part_bytes(table: &Table, column: &Column) -> Option<u64> {
+    let per_character = || {
+        table
+            .text_settings(column)
+            .ok()
+            .map(|settings| settings.charset.max_bytes)
+    };
+    match &column.data_type {
+        DataType::Integer { size, .. } => Some(match size {
+            IntegerSize::Tiny => 1,
+            IntegerSize::Small => 2,
+            IntegerSize::Medium => 3,
+            IntegerSize::Int => 4,
+            IntegerSize::Big => 8,
+        }),
+        DataType::VarChar { length } => Some(length.saturating_mul(per_character()?)),
+        DataType::Text(written) | DataType::Other(written) => {
+            let written = written.trim().to_ascii_uppercase();
+            let (base, rest) = written.split_once('(')?;
+            let length: u64 = rest.strip_suffix(')')?.trim().parse().ok()?;
+            match base.trim() {
+                "CHAR" | "CHARACTER" => Some(length.saturating_mul(per_character()?)),
+                "BINARY" | "VARBINARY" => Some(length),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// The bytes a key part on a prefix of `column` takes, such as `note(10)`;
+/// `None` when kilit cannot count them. A prefix longer than a VARCHAR
+/// column is refused (error 1089 on MySQL 8.0.46 and 8.4.13, by hand); one
+/// on a column of another length, or of a type without one, has not been
+/// measured.
+fn prefix_bytes(table: &Table, column: &Column, entry: &str) -> Result<Option<u64>, String> {
+    let Some(prefix) = entry
+        .split_once('(')
+        .and_then(|(_, rest)| rest.trim_end_matches(')').trim().parse::<u64>().ok())
+    else {
+        return Ok(None);
+    };
+    let name = &column.name;
+    let per_character = || {
+        table
+            .text_settings(column)
+            .ok()
+            .map(|settings| prefix.saturating_mul(settings.charset.max_bytes))
+    };
+    let (base, length) = match &column.data_type {
+        DataType::VarChar { length } if prefix > *length => {
+            return Err(format!(
+                "the prefix {entry} is longer than {name}, a VARCHAR({length}), and \
+                 {REJECTED_BY} it (error 1089)"
+            ));
+        }
+        DataType::VarChar { .. } => return Ok(per_character()),
+        DataType::Integer { .. } => {
+            return Err(format!(
+                "a prefix of the integer column {name} has not been measured yet"
+            ));
+        }
+        DataType::Text(written) | DataType::Other(written) => {
+            let written = written.trim().to_ascii_uppercase();
+            let (base, rest) = written.split_once('(').unwrap_or((written.as_str(), ""));
+            let length = rest.trim_end_matches(')').trim().parse::<u64>().ok();
+            (base.trim().to_owned(), length)
+        }
+    };
+    let (text, has_length) = match base.as_str() {
+        "CHAR" | "CHARACTER" => (true, true),
+        "TINYTEXT" | "TEXT" | "MEDIUMTEXT" | "LONGTEXT" => (true, false),
+        "BINARY" | "VARBINARY" => (false, true),
+        "TINYBLOB" | "BLOB" | "MEDIUMBLOB" | "LONGBLOB" => (false, false),
+        _ => {
+            return Err(format!(
+                "a prefix of {name}, a {base} column, has not been measured yet"
+            ));
+        }
+    };
+    if has_length && length.is_none_or(|length| prefix > length) {
+        return Err(format!(
+            "the prefix {entry} is longer than {name}, a {base} column, which has not been \
+             measured yet"
+        ));
+    }
+    Ok(if text { per_character() } else { Some(prefix) })
+}
+
+/// The most bytes of a key on an InnoDB table of the DYNAMIC row format.
+const INNODB_KEY_BYTES: u64 = 3072;
+
+/// A `RENAME INDEX` MySQL refuses on a table kilit knows, by hand on MySQL
+/// 8.0.46 and 8.4.13: PRIMARY (error 1280), an index the table does not
+/// have (1176), or a name another index has in any letter case (1061).
+fn check_renamed_index(table: &Table, from: &str, to: &str) -> Result<(), String> {
+    let by_hand = "by hand on MySQL 8.0.46 and 8.4.13";
+    if same_column(from, "PRIMARY") || same_column(to, "PRIMARY") {
+        return Err(format!(
+            "MySQL refuses RENAME INDEX of or to PRIMARY (error 1280, {by_hand})"
+        ));
+    }
+    let named = |name: &str| {
+        table
+            .indexes
+            .iter()
+            .position(|index| index.name.as_deref().is_some_and(|n| same_column(n, name)))
+    };
+    let Some(at) = named(from) else {
+        if table.indexes.iter().any(|index| index.name.is_none()) {
+            return Ok(());
+        }
+        return Err(format!(
+            "{} has no index {from} that kilit knows, and MySQL refuses RENAME INDEX of such \
+             an index (error 1176, {by_hand})",
+            table.name
+        ));
+    };
+    if named(to).is_some_and(|other| other != at) {
+        return Err(format!(
+            "{} has an index {to} already, and MySQL refuses RENAME INDEX to its name (error \
+             1061, {by_hand})",
+            table.name
+        ));
+    }
+    Ok(())
+}
+
+/// A `DROP INDEX` of a shape the lab has not measured on a table kilit
+/// knows: one of several FULLTEXT indexes, or a UNIQUE index of several
+/// columns. The lab measured a table's only FULLTEXT index and a UNIQUE
+/// index of one column (drop-fulltext-index, drop-unique-index).
+fn check_dropped_index(table: &Table, name: &str) -> Result<(), String> {
+    let Some(index) = table
+        .indexes
+        .iter()
+        .find(|index| index.name.as_deref().is_some_and(|n| same_column(n, name)))
+    else {
+        return Ok(());
+    };
+    // Without a primary key, InnoDB keys the rows on a UNIQUE index of NOT
+    // NULL columns: dropping it changes the primary key.
+    if index.kind == IndexKind::Unique
+        && table.primary_key.is_empty()
+        && index.columns.iter().all(|entry| {
+            !has_prefix(entry)
+                && table
+                    .column(entry)
+                    .is_some_and(|column| !table.is_nullable(column))
+        })
+    {
+        return Err(format!(
+            "{} has no primary key, and its UNIQUE index {name} of NOT NULL columns may be the \
+             one InnoDB keys the rows on; dropping it has not been measured yet",
+            table.name
+        ));
+    }
+    match index.kind {
+        IndexKind::Fulltext
+            if table
+                .indexes
+                .iter()
+                .filter(|index| index.kind == IndexKind::Fulltext)
+                .count()
+                > 1 =>
+        {
+            Err(format!(
+                "{} has several FULLTEXT indexes, and dropping one of them has not been \
+                 measured yet",
+                table.name
+            ))
+        }
+        IndexKind::Unique if index.columns.len() > 1 => Err(format!(
+            "dropping the UNIQUE index {name} of several columns has not been measured yet"
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// What kilit cannot see about a new foreign key unless it knows both
@@ -6258,13 +7407,9 @@ fn check_dropped_column(
     }
     // MySQL keeps an index on the columns a foreign key points at, so only
     // an indexed column needs the look through every table.
-    if let Some((other, key)) = indexed
-        .then(|| referenced_by(schema, table, column))
-        .flatten()
-    {
+    if let Some(referenced) = indexed.then(|| referenced(schema, table, column)).flatten() {
         return Err(format!(
-            "{column} is referenced by the foreign key {key} on {other}, and \
-             {DROPPING_NOT_MEASURED}"
+            "{column} {referenced}, and {DROPPING_NOT_MEASURED}"
         ));
     }
     if let Some(reason) = functional.or(unmeasured) {
@@ -6519,8 +7664,42 @@ mod tests {
 
     fn reason(prediction: Prediction) -> String {
         match prediction {
-            Prediction::Unknown { reason } => reason,
+            Prediction::Unknown { reason, .. } => reason,
             other => panic!("expected unknown, got {other:?}"),
+        }
+    }
+
+    /// On a table kilit does not know: the case and answer the reason gives
+    /// as likely, and the notes.
+    fn likely(prediction: Prediction) -> (String, String, Vec<String>) {
+        match prediction {
+            Prediction::Unknown { reason, notes } => {
+                let Some((_, measured)) = reason.split_once("the lab measured ") else {
+                    panic!("no likely answer in: {reason}");
+                };
+                let (answer, case) = measured.rsplit_once(" (").unwrap();
+                (
+                    case.trim_end_matches(')').to_owned(),
+                    answer.to_owned(),
+                    notes,
+                )
+            }
+            other => panic!("expected unknown with a likely answer, got {other:?}"),
+        }
+    }
+
+    /// The case, what every answer shares, the reason and the notes of an
+    /// answer that depends on the table.
+    fn depends(prediction: Prediction) -> (&'static str, Shared, String, Vec<String>) {
+        match prediction {
+            Prediction::DependsOnTable {
+                case,
+                shared,
+                reason,
+                notes,
+                ..
+            } => (case, shared, reason, notes),
+            other => panic!("expected an answer that depends on the table, got {other:?}"),
         }
     }
 
@@ -6765,19 +7944,12 @@ mod tests {
     }
 
     #[test]
-    fn a_new_column_is_instant() {
-        let Prediction::Measured {
-            case,
-            verdict,
-            evidence,
-            notes,
-        } = only("ALTER TABLE orders ADD coupon VARCHAR(255) NULL AFTER amount")
-        else {
-            panic!("expected a measured prediction");
-        };
+    fn a_new_column_on_a_table_kilit_does_not_know_is_unknown_and_likely_instant() {
+        let (case, answer, notes) = likely(only(
+            "ALTER TABLE orders ADD coupon VARCHAR(255) NULL AFTER amount",
+        ));
         assert_eq!(case, "add-column");
-        assert_eq!(verdict.to_string(), "INSTANT, no rebuild, writes continue");
-        assert_eq!(evidence.len(), ADD_COLUMN.scenarios.len());
+        assert_eq!(answer, "INSTANT, no rebuild, writes continue");
         // kilit does not know the table, so the exceptions are notes, and
         // so is the limit of a record in a page.
         assert_eq!(notes.len(), ADD_COLUMN.exceptions.len() + 1);
@@ -6794,12 +7966,12 @@ mod tests {
              SET FOREIGN_KEY_CHECKS=1;
              ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users (id);",
         );
-        let cases: Vec<&str> = predictions
+        // Without the tables each one is only likely.
+        let cases: Vec<String> = predictions
             .iter()
             .map(|prediction| match prediction {
-                Prediction::Measured { case, .. } => case,
-                Prediction::NotChecked { .. } => "not checked",
-                Prediction::Unknown { .. } => "unknown",
+                Prediction::NotChecked { .. } => "not checked".to_owned(),
+                other => likely(other.clone()).0,
             })
             .collect();
         assert_eq!(
@@ -6814,8 +7986,10 @@ mod tests {
         );
         // Only the first one had to assume the server's default.
         let assumes = |prediction: &Prediction| {
-            matches!(prediction, Prediction::Measured { notes, .. }
-                if notes.iter().any(|note| note.starts_with("assumes foreign_key_checks")))
+            likely(prediction.clone())
+                .2
+                .iter()
+                .any(|note| note.starts_with("assumes foreign_key_checks"))
         };
         assert!(assumes(&predictions[0]));
         assert!(!assumes(&predictions[4]));
@@ -6830,13 +8004,10 @@ mod tests {
              SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS;
              ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users (id);",
         );
-        assert!(matches!(
-            predictions[1],
-            Prediction::Measured {
-                case: "add-foreign-key-checks-off",
-                ..
-            }
-        ));
+        assert_eq!(
+            likely(predictions[1].clone()).0,
+            "add-foreign-key-checks-off"
+        );
         assert!(reason(predictions.remove(3)).contains("does not understand"));
     }
 
@@ -6857,7 +8028,7 @@ mod tests {
             let mut predictions = predictions(&format!(
                 "{set};\n{ADD_ORDERS_USER};\nSET foreign_key_checks = 1;\n{ADD_ORDERS_USER};"
             ));
-            assert_eq!(case_id(&predictions.pop().unwrap()), "add-foreign-key");
+            assert_eq!(likely(predictions.pop().unwrap()).0, "add-foreign-key");
             assert_eq!(
                 reason(predictions.remove(1)),
                 "line 1 sets foreign_key_checks to DEFAULT, which the lab has not measured",
@@ -7255,9 +8426,10 @@ mod tests {
     #[test]
     fn forced_variants_use_the_lab_run_for_that_variant() {
         // Forcing INPLACE on a new column: accepted, but the table is rebuilt.
-        let Prediction::Measured { verdict, .. } =
-            only("ALTER TABLE orders ADD coupon VARCHAR(255) NULL, ALGORITHM=INPLACE")
-        else {
+        let Prediction::Measured { verdict, .. } = on_shop(
+            "",
+            "ALTER TABLE orders ADD coupon VARCHAR(255) NULL, ALGORITHM=INPLACE",
+        ) else {
             panic!("expected a measured prediction");
         };
         assert_eq!(
@@ -7623,7 +8795,6 @@ mod tests {
         // cannot read them, so it no longer knows which indexes orders has:
         // the FULLTEXT index is a note, as on a table it does not know.
         for unreadable in [
-            "CREATE FULLTEXT INDEX ft_note ON orders (note)",
             "CREATE UNIQUE INDEX u_invisible ON orders (email) INVISIBLE",
             "CREATE INDEX i_block ON orders (amount) KEY_BLOCK_SIZE=8",
         ] {
@@ -7635,9 +8806,9 @@ mod tests {
                 reason(predictions[0].clone()).starts_with("kilit could not read this statement"),
                 "{unreadable}"
             );
-            let (case, verdict, notes) = measured(predictions[1].clone());
+            let (case, verdict, notes) = likely(predictions[1].clone());
             assert_eq!(
-                (case, verdict.as_str()),
+                (case.as_str(), verdict.as_str()),
                 ("add-column", "INSTANT, no rebuild, writes continue"),
                 "{unreadable}"
             );
@@ -7665,9 +8836,9 @@ mod tests {
              ALTER TABLE orders DROP COLUMN amount;",
         );
         assert!(reason(predictions[1].clone()).starts_with("kilit could not read this statement"));
-        let (case, verdict, notes) = measured(predictions[2].clone());
+        let (case, verdict, notes) = likely(predictions[2].clone());
         assert_eq!(
-            (case, verdict.as_str()),
+            (case.as_str(), verdict.as_str()),
             ("drop-column", "INSTANT, no rebuild, writes continue")
         );
         assert!(
@@ -7703,6 +8874,384 @@ mod tests {
             note VARCHAR(50) NULL
         ) DEFAULT CHARSET=utf8mb4;";
 
+    // Step B1c: what kilit says on a table it does not know, the five
+    // statements it now follows, columns longer than their type, and the
+    // shapes the lab has not measured on a table it knows.
+
+    const FULLTEXT_ON_NOTE: &str = "ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note);";
+    const ADD_C: &str = "ALTER TABLE orders ADD COLUMN c INT NULL";
+
+    #[test]
+    fn on_a_table_kilit_does_not_know_only_a_failure_from_the_statement_stays() {
+        // 1674 and 1101 come from the statement; anything else is likely.
+        for (sql, fails) in [
+            (
+                "ALTER TABLE orders ADD COLUMN t CHAR(36) NULL DEFAULT (UUID())",
+                true,
+            ),
+            (
+                "ALTER TABLE orders ADD COLUMN t TEXT NULL DEFAULT 'x'",
+                true,
+            ),
+            ("ALTER TABLE orders MODIFY t TEXT NULL DEFAULT 'x'", true),
+            ("ALTER TABLE orders ALTER COLUMN t SET DEFAULT 'x'", false),
+            ("ALTER TABLE orders RENAME COLUMN a TO b", false),
+            ("ALTER TABLE orders DROP COLUMN user_id", false),
+            (
+                "ALTER TABLE orders ADD INDEX i (note) , ALGORITHM=INSTANT",
+                false,
+            ),
+        ] {
+            let prediction = only(sql);
+            if fails {
+                assert!(said(&prediction).starts_with("fails with error"), "{sql}");
+            } else {
+                assert!(
+                    reason(prediction.clone()).contains("on a plain InnoDB table the lab measured"),
+                    "{sql}: {prediction:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_table_lost_or_dropped_without_a_dump_says_why_kilit_does_not_know_it() {
+        let lost = format!("{SHOP}\nALTER TABLE orders CONVERT TO CHARACTER SET latin1;");
+        let why = reason(predictions_with(&lost, ADD_C).remove(0));
+        assert!(
+            why.starts_with("kilit lost track of orders (line ")
+                && why.contains(": kilit could not read a statement on it); on a plain InnoDB"),
+            "{why}"
+        );
+        let dropped = predictions(&format!(
+            "CREATE TABLE orders (id INT PRIMARY KEY);\nDROP TABLE orders;\n{ADD_C};"
+        ))
+        .remove(2);
+        assert!(
+            reason(dropped.clone())
+                .starts_with("orders, which the statement on line 2 drops, and no statement"),
+            "{dropped:?}"
+        );
+    }
+
+    #[test]
+    fn an_earlier_input_file_is_named_as_given() {
+        let first = parse("CREATE TABLE orders (id INT PRIMARY KEY);\nDROP TABLE orders;");
+        let second = parse(ADD_C);
+        let dump = Schema::from_dump("CREATE TABLE users (id INT PRIMARY KEY);");
+        let findings = check_files(
+            &[&first, &second],
+            &["db/1_drop.sql", "db/2_add.sql"],
+            &dump,
+            results(),
+        );
+        assert!(
+            reason(findings[2].prediction.clone())
+                .contains("the statement on line 2 of db/1_drop.sql drops"),
+            "{:?}",
+            findings[2].prediction
+        );
+    }
+
+    #[test]
+    fn a_name_with_a_database_next_to_a_table_kilit_has_is_unknown_with_or_without_a_dump() {
+        let created = "CREATE TABLE orders (id INT PRIMARY KEY);";
+        let prediction =
+            predictions(&format!("{created}\nALTER TABLE shop.orders ADD c INT;")).remove(1);
+        assert_eq!(
+            reason(prediction),
+            "shop.orders names the database shop, and kilit has a table orders: kilit does not \
+             know the database the statements run in, so it cannot tell whether shop.orders is \
+             orders"
+        );
+        let dump = Schema::from_dump(created);
+        let finding = check(
+            &parse("ALTER TABLE shop.orders ADD c INT"),
+            &dump,
+            results(),
+        )
+        .remove(0);
+        assert!(reason(finding.prediction).starts_with(
+            "shop.orders names the database shop, and the schema dump has a table orders"
+        ));
+    }
+
+    #[test]
+    fn auto_increment_drop_default_and_engine_innodb_keep_the_table_known() {
+        for (statement, why) in [
+            (
+                "ALTER TABLE orders AUTO_INCREMENT = 5000",
+                "setting AUTO_INCREMENT has not been measured yet",
+            ),
+            (
+                "ALTER TABLE orders ALTER COLUMN note DROP DEFAULT",
+                "dropping a column's default has not been measured yet",
+            ),
+            (
+                "ALTER TABLE orders ENGINE = 'InnoDB'",
+                "changing a table's ENGINE has not been measured yet",
+            ),
+        ] {
+            let predictions = predictions_with(
+                &format!("{SHOP}\n{FULLTEXT_ON_NOTE}"),
+                &format!("{statement};\n{ADD_C};"),
+            );
+            assert_eq!(reason(predictions[0].clone()), why, "{statement}");
+            // The FULLTEXT index is still there, so the new column copies.
+            assert_eq!(case_of(predictions[1].clone()), "add-column", "{statement}");
+            assert_eq!(said(&predictions[1]), COPY_ANSWER, "{statement}");
+        }
+        assert!(
+            reason(on_shop(
+                "",
+                "ALTER TABLE orders ALTER COLUMN nope DROP DEFAULT"
+            ))
+            .contains("error 1054")
+        );
+    }
+
+    #[test]
+    fn a_column_without_its_default_has_none_after_drop_default() {
+        let mut schema = Schema::from_sql(&format!(
+            "{SHOP}\nALTER TABLE orders ALTER COLUMN amount SET DEFAULT 0;"
+        ));
+        schema.apply(&parse("ALTER TABLE orders ALTER COLUMN amount DROP DEFAULT").remove(0));
+        let TableState::Known(orders) = schema.table("orders") else {
+            panic!("orders should be known");
+        };
+        assert_eq!(orders.column("amount").unwrap().default, None);
+    }
+
+    #[test]
+    fn rename_index_renames_it_or_names_the_error_and_keeps_the_table() {
+        let setup = "ALTER TABLE orders ADD INDEX i_amount (amount);\n\
+                     ALTER TABLE orders ADD INDEX i_note (note);";
+        for (rename, error) in [
+            ("ALTER TABLE orders RENAME INDEX nope TO x", "1176"),
+            ("ALTER TABLE orders RENAME INDEX i_amount TO I_NOTE", "1061"),
+            (
+                "ALTER TABLE orders RENAME INDEX i_amount TO `PRIMARY`",
+                "1280",
+            ),
+        ] {
+            let predictions = predictions_with(
+                &format!("{SHOP}\n{setup}"),
+                &format!("{rename};\nALTER TABLE orders DROP INDEX i_amount;"),
+            );
+            assert!(reason(predictions[0].clone()).contains(error), "{rename}");
+            // The index kept its name.
+            assert_eq!(case_of(predictions[1].clone()), "drop-index", "{rename}");
+        }
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{setup}"),
+            "ALTER TABLE orders RENAME KEY i_amount TO by_amount;
+             ALTER TABLE orders DROP INDEX by_amount;
+             ALTER TABLE orders DROP INDEX i_amount;",
+        );
+        assert_eq!(
+            reason(predictions[0].clone()),
+            "renaming an index has not been measured yet"
+        );
+        assert_eq!(case_of(predictions[1].clone()), "drop-index");
+        assert!(reason(predictions[2].clone()).contains("error 1091"));
+    }
+
+    #[test]
+    fn create_fulltext_index_is_unknown_and_followed_as_the_alter_table_mysql_runs() {
+        let predictions = predictions_with(
+            SHOP,
+            &format!("CREATE FULLTEXT INDEX ft ON orders (note);\n{ADD_C};"),
+        );
+        assert!(reason(predictions[0].clone()).starts_with("CREATE FULLTEXT INDEX has not been"));
+        assert_eq!(said(&predictions[1]), COPY_ANSWER);
+        // A taken name or a missing column: MySQL refuses it, no index.
+        for create in [
+            "CREATE FULLTEXT INDEX amount_ix ON orders (nope)",
+            "CREATE FULLTEXT INDEX i_amount ON orders (note)",
+        ] {
+            let predictions = predictions_with(
+                &format!("{SHOP}\nALTER TABLE orders ADD INDEX i_amount (amount);"),
+                &format!("{create};\n{ADD_C};"),
+            );
+            let why = reason(predictions[0].clone());
+            assert!(
+                why.contains("1072") || why.contains("1061"),
+                "{create}: {why}"
+            );
+            assert_eq!(said(&predictions[1]), INSTANT_ANSWER, "{create}");
+        }
+    }
+
+    #[test]
+    fn a_column_longer_than_its_type_leaves_the_table_or_loses_it_as_mysql_takes_it() {
+        let next = "ALTER TABLE orders ADD COLUMN d INT NULL";
+        for (session, column, follows) in [
+            // Without a strict sql_mode set earlier in the input, the
+            // server's or a framework's may not be strict.
+            ("", "body VARCHAR(70000) NULL", "lost"),
+            (
+                "SET sql_mode = 'STRICT_ALL_TABLES';",
+                "body VARCHAR(70000) NULL",
+                "kept",
+            ),
+            (
+                "SET sql_mode = 'STRICT_TRANS_TABLES';",
+                "raw VARBINARY(70000) NULL",
+                "kept",
+            ),
+            ("", "raw VARBINARY(70000) NULL", "lost"),
+            ("", "code CHAR(300) NULL", "kept"),
+            ("SET sql_mode = '';", "body VARCHAR(70000) NULL", "lost"),
+            (
+                "SET sql_mode = 'NO_ENGINE_SUBSTITUTION';",
+                "raw VARBINARY(70000) NULL",
+                "lost",
+            ),
+            ("SET sql_mode = @saved;", "body VARCHAR(70000) NULL", "lost"),
+            ("SET sql_mode = '';", "code CHAR(300) NULL", "kept"),
+            ("SET sql_mode = '';", "bin BINARY(300) NULL", "kept"),
+        ] {
+            for change in ["ADD COLUMN", "MODIFY"] {
+                let sql = format!("{session}\nALTER TABLE orders {change} {column};\n{next};");
+                let last = predictions_with(SHOP, &sql).pop().unwrap();
+                match follows {
+                    "kept" => assert_eq!(said(&last), INSTANT_ANSWER, "{sql}"),
+                    _ => assert!(
+                        reason(last).starts_with("kilit lost track of orders"),
+                        "{sql}"
+                    ),
+                }
+            }
+        }
+        // A CREATE TABLE of such a column: MySQL refuses it, or changes it.
+        let last = predictions(
+            "CREATE TABLE t (id INT PRIMARY KEY, body VARCHAR(70000));\n\
+                                ALTER TABLE t ADD COLUMN d INT NULL;",
+        )
+        .pop()
+        .unwrap();
+        assert!(reason(last).starts_with("kilit lost track of t"));
+    }
+
+    #[test]
+    fn shapes_the_lab_has_not_measured_on_a_known_table_are_unknown() {
+        let setup = "ALTER TABLE orders ADD INDEX i_amount (amount);\n\
+                     ALTER TABLE orders ADD COLUMN body VARCHAR(1000) NULL;\n\
+                     ALTER TABLE orders ADD FULLTEXT INDEX ft_a (note);\n\
+                     ALTER TABLE orders ADD FULLTEXT INDEX ft_b (email);\n\
+                     ALTER TABLE orders ADD UNIQUE INDEX u_two (amount, note);";
+        for (sql, why) in [
+            (
+                "ALTER TABLE orders ADD COLUMN d DATE NOT NULL",
+                "NOT NULL DATE",
+            ),
+            (
+                "ALTER TABLE orders ADD COLUMN d DATETIME(6) NOT NULL",
+                "NOT NULL DATETIME",
+            ),
+            (
+                "ALTER TABLE orders ADD COLUMN d TIMESTAMP NOT NULL",
+                "NOT NULL TIMESTAMP",
+            ),
+            ("ALTER TABLE orders ADD INDEX i (nope)", "error 1072"),
+            (
+                "ALTER TABLE orders ADD UNIQUE INDEX I_AMOUNT (note)",
+                "error 1061",
+            ),
+            ("ALTER TABLE orders ADD INDEX i (body)", "4000 bytes"),
+            ("ALTER TABLE orders ADD INDEX i (note(51))", "error 1089"),
+            (
+                "ALTER TABLE orders DROP INDEX ft_a",
+                "several FULLTEXT indexes",
+            ),
+            (
+                "ALTER TABLE orders DROP INDEX u_two",
+                "UNIQUE index u_two of several",
+            ),
+            (
+                "ALTER TABLE orders MODIFY id BIGINT UNSIGNED NULL",
+                "primary key column id",
+            ),
+            (
+                "ALTER TABLE orders MODIFY note VARCHAR(60) NULL AFTER note",
+                "AFTER itself",
+            ),
+        ] {
+            let why_said = reason(on_shop(setup, sql));
+            assert!(why_said.contains(why), "{sql}: {why_said}");
+        }
+        // The controls keep their answers.
+        let body = "ALTER TABLE orders ADD COLUMN body VARCHAR(1000) NULL;";
+        for sql in [
+            "ALTER TABLE orders ADD COLUMN d TIME NOT NULL",
+            "ALTER TABLE orders ADD COLUMN d DATE NULL",
+            "ALTER TABLE orders ADD COLUMN d DATE NOT NULL DEFAULT '2020-01-01'",
+            "ALTER TABLE orders ADD INDEX i (note(50))",
+            "ALTER TABLE orders ADD INDEX i (body(768))",
+        ] {
+            assert!(
+                matches!(on_shop(body, sql), Prediction::Measured { .. }),
+                "{sql}: {:?}",
+                on_shop(body, sql)
+            );
+        }
+    }
+
+    #[test]
+    fn an_index_named_as_a_renamed_foreign_key_was_may_be_automatic() {
+        // By hand on MySQL 8.0.46 and 8.4.13: after RENAME TABLE the index
+        // keeps orders_ibfk_abc, and MySQL still drops it without a word
+        // when another index can serve the key.
+        let dump = "CREATE TABLE users (id BIGINT UNSIGNED NOT NULL PRIMARY KEY);
+            CREATE TABLE orders (id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+                user_id BIGINT UNSIGNED NOT NULL, KEY orders_ibfk_abc (user_id),
+                CONSTRAINT orders_ibfk_abc FOREIGN KEY (user_id) REFERENCES users (id));";
+        for rename in [
+            "RENAME TABLE orders TO purchases",
+            "ALTER TABLE orders RENAME TO purchases",
+        ] {
+            let last = predictions_with(
+                dump,
+                &format!(
+                    "{rename};\nALTER TABLE purchases ADD INDEX ix (user_id);\n\
+                     ALTER TABLE purchases DROP INDEX ix;"
+                ),
+            )
+            .pop()
+            .unwrap();
+            assert!(
+                reason(last.clone()).contains("the name MySQL gives the index it makes"),
+                "{rename}: {last:?}"
+            );
+        }
+        // Renamed by RENAME INDEX, it is MySQL's no longer: the measured answer.
+        let last = predictions_with(
+            dump,
+            "ALTER TABLE orders RENAME INDEX orders_ibfk_abc TO ix_renamed;
+             ALTER TABLE orders ADD INDEX ix (user_id);
+             ALTER TABLE orders DROP INDEX ix;",
+        )
+        .pop()
+        .unwrap();
+        assert_eq!(case_of(last), "drop-index");
+    }
+
+    #[test]
+    fn a_foreign_key_whose_bytes_overflow_is_unknown_not_a_failure() {
+        let schema = "CREATE TABLE users (id INT PRIMARY KEY,
+                          k VARCHAR(4611686018427387904) CHARACTER SET utf8mb4 NOT NULL, UNIQUE KEY (k));
+                      CREATE TABLE orders (id INT PRIMARY KEY,
+                          k VARCHAR(4611686018427387904) CHARACTER SET utf8mb4 NOT NULL);";
+        let why = reason(
+            predictions_with(
+                schema,
+                "ALTER TABLE orders ADD FOREIGN KEY (k) REFERENCES users (k)",
+            )
+            .remove(0),
+        );
+        assert!(why.contains("more bytes than kilit can count"), "{why}");
+    }
+
     /// The prediction for the last statement of `sql`, on [`SHOP`] as
     /// `setup` leaves it.
     fn on_shop(setup: &str, sql: &str) -> Prediction {
@@ -7715,8 +9264,11 @@ mod tests {
     fn said(prediction: &Prediction) -> String {
         match prediction {
             Prediction::Measured { verdict, .. } => verdict.to_string(),
-            Prediction::Unknown { reason } => format!("unknown: {reason}"),
+            Prediction::Unknown { reason, .. } => format!("unknown: {reason}"),
             Prediction::NotChecked { .. } => "not checked".to_owned(),
+            Prediction::DependsOnTable { shared, .. } => {
+                format!("depends on the table: {shared:?}")
+            }
         }
     }
 
@@ -7778,21 +9330,165 @@ mod tests {
     }
 
     #[test]
-    fn without_the_table_a_second_fulltext_index_is_a_note() {
-        let note = "if the table already has a FULLTEXT index: INPLACE, no rebuild, writes wait \
-                    (add-second-fulltext-index)";
-        let (_, verdict, notes) = measured(only("ALTER TABLE posts ADD FULLTEXT INDEX ft (body)"));
-        assert_eq!(verdict, "INPLACE, rebuilds the table, writes wait");
-        assert_eq!(notes, [note]);
-        // Nor on a table kilit lost track of.
+    fn without_the_table_a_fulltext_index_makes_writes_wait_with_each_answer_in_a_note() {
+        // Every engine and row format the lab measured, and a second
+        // FULLTEXT index, make writes wait; a missing column or a taken
+        // name fails. So writes wait, and the algorithm depends on the table.
+        let notes_for = |column: &str, name: &str| {
+            vec![
+                "if the table already has a FULLTEXT index: INPLACE, no rebuild, writes wait \
+                 (add-second-fulltext-index)"
+                    .to_owned(),
+                "if the table is MyISAM: COPY, copies every row, writes wait \
+                 (myisam-add-fulltext-index and myisam-add-fulltext-index-text)"
+                    .to_owned(),
+                "if the table is COMPRESSED (ROW_FORMAT=COMPRESSED, or KEY_BLOCK_SIZE=8): \
+                 INPLACE, rebuilds the table, writes wait (compressed-add-fulltext-index)"
+                    .to_owned(),
+                "if the table is COMPACT: INPLACE, rebuilds the table, writes wait \
+                 (compact-add-fulltext-index)"
+                    .to_owned(),
+                "if the table is REDUNDANT: INPLACE, rebuilds the table, writes wait \
+                 (redundant-add-fulltext-index)"
+                    .to_owned(),
+                format!(
+                    "if the table has no column {column}: fails with error 1072 (by hand on \
+                     MySQL 8.0.46 and 8.4.13)"
+                ),
+                format!(
+                    "if the table has an index named {name} already: fails with error 1061 (by \
+                     hand on MySQL 8.0.46 and 8.4.13)"
+                ),
+                "on another engine, row format or KEY_BLOCK_SIZE, or one of these in a shape the \
+                 lab did not measure there: not measured"
+                    .to_owned(),
+            ]
+        };
+        let (case, shared, reason, notes) =
+            depends(only("ALTER TABLE posts ADD FULLTEXT INDEX ft (body)"));
+        assert_eq!((case, shared), ("add-fulltext-index", Shared::WritesWait));
+        assert_eq!(
+            reason,
+            "no --schema was given, so kilit does not know posts; every answer the lab \
+             measured, or a hand test showed, for the tables it may be makes writes wait or \
+             fails: on a plain InnoDB table INPLACE, rebuilds the table, writes wait \
+             (add-fulltext-index)"
+        );
+        assert_eq!(notes, notes_for("body", "ft"));
+        // So on a table kilit lost track of.
         let predictions = predictions_with(
             SHOP,
             "ALTER TABLE orders CONVERT TO CHARACTER SET latin1;
              ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note);",
         );
-        let (_, verdict, notes) = measured(predictions[1].clone());
-        assert_eq!(verdict, "INPLACE, rebuilds the table, writes wait");
-        assert_eq!(notes, [note]);
+        let (_, shared, reason, notes) = depends(predictions[1].clone());
+        assert_eq!(shared, Shared::WritesWait);
+        assert!(reason.starts_with("kilit lost track of orders"), "{reason}");
+        assert_eq!(notes, notes_for("note", "ft_note"));
+    }
+
+    #[test]
+    fn a_fulltext_index_on_one_text_column_is_measured_on_every_engine_and_row_format() {
+        let fulltext = "ALTER TABLE posts ADD FULLTEXT INDEX ft (body)";
+        let table = |options: &str| {
+            format!(
+                "CREATE TABLE posts (id INT PRIMARY KEY, title VARCHAR(100), body TEXT, \
+                 tags MEDIUMTEXT, raw TEXT CHARACTER SET binary) DEFAULT CHARSET=utf8mb4 \
+                 {options};"
+            )
+        };
+        for (options, case, verdict) in [
+            (
+                "ENGINE=MyISAM",
+                "myisam-add-fulltext-index",
+                "COPY, copies every row, writes wait",
+            ),
+            (
+                "ROW_FORMAT=COMPRESSED",
+                "compressed-add-fulltext-index",
+                "INPLACE, rebuilds the table, writes wait",
+            ),
+            (
+                "KEY_BLOCK_SIZE=8",
+                "compressed-add-fulltext-index",
+                "INPLACE, rebuilds the table, writes wait",
+            ),
+            (
+                "ROW_FORMAT=COMPACT",
+                "compact-add-fulltext-index",
+                "INPLACE, rebuilds the table, writes wait",
+            ),
+            (
+                "ROW_FORMAT=REDUNDANT",
+                "redundant-add-fulltext-index",
+                "INPLACE, rebuilds the table, writes wait",
+            ),
+        ] {
+            let schema = table(options);
+            let (found, said, _) = measured(predictions_with(&schema, fulltext).remove(0));
+            assert_eq!((found, said.as_str()), (case, verdict), "{options}");
+            // A type the lab did not measure there, two columns, or a second
+            // FULLTEXT index stay unknown.
+            // A TEXT column in the binary character set is a BLOB, which
+            // MySQL refuses (error 1283, by hand on both servers).
+            for sql in [
+                "ALTER TABLE posts ADD FULLTEXT INDEX ft (tags)",
+                "ALTER TABLE posts ADD FULLTEXT INDEX ft (title, body)",
+                "ALTER TABLE posts ADD FULLTEXT INDEX ft (raw)",
+            ] {
+                let prediction = predictions_with(&schema, sql).remove(0);
+                assert!(
+                    matches!(prediction, Prediction::Unknown { .. }),
+                    "{options}: {sql}: {prediction:?}"
+                );
+            }
+            if case != "myisam-add-fulltext-index" {
+                let second = predictions_with(
+                    &schema,
+                    &format!("ALTER TABLE posts ADD FULLTEXT INDEX ft_title (title);\n{fulltext};"),
+                )
+                .remove(1);
+                assert!(
+                    matches!(second, Prediction::Unknown { .. }),
+                    "{options}: {second:?}"
+                );
+            }
+        }
+        // MyISAM's VARCHAR answer stays.
+        let (found, _, _) = measured(
+            predictions_with(
+                &table("ENGINE=MyISAM"),
+                "ALTER TABLE posts ADD FULLTEXT INDEX ft (title)",
+            )
+            .remove(0),
+        );
+        assert_eq!(found, "myisam-add-fulltext-index");
+    }
+
+    #[test]
+    fn without_the_table_answers_that_all_fail_fail_and_one_that_continues_is_unknown() {
+        // Rule 3: forced INSTANT fails on every engine and row format measured.
+        let (case, shared, why, _) = depends(only(
+            "ALTER TABLE posts ADD FULLTEXT INDEX ft (body), ALGORITHM=INSTANT",
+        ));
+        assert_eq!((case, shared), ("add-fulltext-index", Shared::Fails));
+        assert!(
+            why.contains("or a hand test showed, for the tables it may be fails"),
+            "{why}"
+        );
+        // A plain index lets writes continue on a plain table: writes
+        // continuing is never kept on a table kilit does not know.
+        let (case, _, _) = likely(only("ALTER TABLE posts ADD INDEX i (body)"));
+        assert_eq!(case, "add-index");
+        // Rule 2: a foreign key has shapes kilit cannot see without both
+        // tables, and is not measured on COMPACT or COMPRESSED tables.
+        let (case, _, _) = likely(only(
+            "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users (id)",
+        ));
+        assert_eq!(case, "add-foreign-key");
+        // A CREATE FULLTEXT INDEX is not measured itself.
+        let prediction = only("CREATE FULLTEXT INDEX ft ON posts (body)");
+        assert!(reason(prediction).contains("CREATE FULLTEXT INDEX itself has not been measured"),);
     }
 
     #[test]
@@ -8021,8 +9717,8 @@ mod tests {
     }
 
     #[test]
-    fn without_the_table_dropping_a_column_lists_what_was_measured() {
-        let (case, verdict, notes) = measured(only("ALTER TABLE orders DROP COLUMN amount"));
+    fn without_the_table_dropping_a_column_lists_what_was_likely() {
+        let (case, verdict, notes) = likely(only("ALTER TABLE orders DROP COLUMN amount"));
         assert_eq!(case, "drop-column");
         assert_eq!(verdict, "INSTANT, no rebuild, writes continue");
         assert_eq!(
@@ -8169,11 +9865,18 @@ mod tests {
             ),
         ] {
             let sql = format!("ALTER TABLE orders ADD COLUMN {column}");
-            // The same with and without the table: no exception to look for.
-            for prediction in [only(&sql), on_shop("", &sql)] {
-                let (found, said, notes) = measured(prediction);
-                assert_eq!(found, case, "{sql}");
-                assert!(said.starts_with(verdict), "{sql}: {said}");
+            let (found, said, notes) = measured(on_shop("", &sql));
+            assert_eq!(found, case, "{sql}");
+            assert!(said.starts_with(verdict), "{sql}: {said}");
+            assert_eq!(notes, [ASSUMES_BINARY_LOG], "{sql}");
+            // Without the table, 1674 comes from the statement alone; the
+            // copy is only likely: the row may grow too long.
+            let unseen = only(&sql);
+            if verdict.starts_with("fails") {
+                assert_eq!(measured(unseen).0, case, "{sql}");
+            } else {
+                let (found, said, notes) = likely(unseen);
+                assert_eq!((found.as_str(), said.as_str()), (case, verdict), "{sql}");
                 assert_eq!(notes, [ASSUMES_BINARY_LOG], "{sql}");
             }
         }
@@ -8257,7 +9960,7 @@ mod tests {
             ),
         ] {
             let sql = format!("ALTER TABLE orders ADD COLUMN c DATE NULL DEFAULT {written}");
-            assert_eq!(measured(only(&sql)).0, case, "{sql}");
+            assert_eq!(said_case(only(&sql)), case, "{sql}");
         }
         // The word DEFAULT in a comment or a name is not the default.
         let sql = "ALTER TABLE orders ADD COLUMN `default` VARCHAR(288) NOT NULL \
@@ -8289,7 +9992,7 @@ mod tests {
             ] {
                 let sql = format!("{set}\nALTER TABLE orders ADD COLUMN {column};");
                 let predictions = predictions(&sql);
-                let Prediction::Unknown { reason } = &predictions[1] else {
+                let Prediction::Unknown { reason, .. } = &predictions[1] else {
                     panic!("{sql}: {:?}", predictions[1]);
                 };
                 assert!(reason.contains("names binlog_format"), "{sql}: {reason}");
@@ -8298,17 +10001,20 @@ mod tests {
         // A literal default does not depend on it.
         let sql = "SET binlog_format = 'STATEMENT';\n\
                    ALTER TABLE orders ADD COLUMN c INT NULL DEFAULT 1;";
-        assert!(matches!(predictions(sql)[1], Prediction::Measured { .. }));
+        assert_eq!(likely(predictions(sql).remove(1)).0, "add-column");
     }
 
     #[test]
     fn the_binary_log_follows_the_session() {
         let uuid = "ALTER TABLE orders ADD COLUMN token CHAR(36) NOT NULL DEFAULT (UUID());";
         let now = "ALTER TABLE orders ADD COLUMN placed_at DATETIME NOT NULL DEFAULT (NOW());";
-        let told: Vec<String> = predictions(&format!(
-            "{uuid} SET sql_log_bin = 0; {uuid} {now} ALTER TABLE orders ADD coupon INT NULL;
+        let told: Vec<String> = predictions_with(
+            SHOP,
+            &format!(
+                "{uuid} SET sql_log_bin = 0; {uuid} {now} ALTER TABLE orders ADD coupon INT NULL;
              SET sql_log_bin = 1; {uuid} {now}"
-        ))
+            ),
+        )
         .iter()
         .map(said)
         .collect();
@@ -8391,9 +10097,9 @@ mod tests {
             "n INT NULL DEFAULT NULL",
         ] {
             let sql = format!("ALTER TABLE orders ADD COLUMN {column}");
-            let (case, said, notes) = measured(only(&sql));
+            let (case, said, notes) = likely(only(&sql));
             assert_eq!(
-                (case, said.as_str()),
+                (case.as_str(), said.as_str()),
                 ("add-column", "INSTANT, no rebuild, writes continue"),
                 "{sql}"
             );
@@ -8622,10 +10328,18 @@ mod tests {
                 "INPLACE, rebuilds the table, writes wait",
             ),
         ] {
-            for prediction in [only(sql), on_shop("", sql)] {
-                let (found, said, _) = measured(prediction);
-                assert_eq!((found, said.as_str()), (case, verdict), "{sql}");
+            let (found, said, _) = measured(on_shop("", sql));
+            assert_eq!((found, said.as_str()), (case, verdict), "{sql}");
+            // Without the table every measured answer of a FULLTEXT index
+            // makes writes wait or fails: rule 4.
+            if case == "add-fulltext-index" {
+                let (found, shared, reason, _) = depends(only(sql));
+                assert_eq!((found, shared), (case, Shared::WritesWait), "{sql}");
+                assert!(reason.ends_with(&format!("{verdict} ({case})")), "{reason}");
+                continue;
             }
+            let (found, said, _) = likely(only(sql));
+            assert_eq!((found.as_str(), said.as_str()), (case, verdict), "{sql}");
         }
     }
 
@@ -9131,7 +10845,6 @@ mod tests {
             "body(10)",
             "data(10)",
             "user_id, body(10)",
-            "missing",
         ] {
             let index = on_shop(
                 TEXT_COLUMNS,
@@ -9151,6 +10864,14 @@ mod tests {
                 "{columns}"
             );
         }
+        // A column the table does not have: MySQL refuses it (1072, by hand).
+        assert!(
+            reason(on_shop(
+                TEXT_COLUMNS,
+                "ALTER TABLE orders ADD INDEX i (missing)"
+            ))
+            .contains("error 1072")
+        );
         // FULLTEXT takes TEXT whole, and LOWER() of a VARCHAR column keeps
         // the answer of step 4.
         assert_eq!(
@@ -9197,10 +10918,10 @@ mod tests {
                 case.exceptions.last().unwrap().scenarios.len() - 1
             )
         };
-        let (_, verdict, notes) = measured(only("ALTER TABLE posts ADD INDEX i (body)"));
+        let (_, verdict, notes) = likely(only("ALTER TABLE posts ADD INDEX i (body)"));
         assert_eq!(verdict, "INPLACE, no rebuild, writes continue");
         assert_eq!(notes, [JSON_INDEX_UNSEEN.to_owned(), note(&ADD_INDEX)]);
-        let (_, verdict, notes) = measured(only("ALTER TABLE posts ADD UNIQUE INDEX i (body)"));
+        let (_, verdict, notes) = likely(only("ALTER TABLE posts ADD UNIQUE INDEX i (body)"));
         assert_eq!(verdict, "INPLACE, no rebuild, writes continue");
         assert_eq!(
             notes,
@@ -9218,7 +10939,7 @@ mod tests {
             "ALTER TABLE orders CONVERT TO CHARACTER SET latin1;
              ALTER TABLE orders ADD INDEX i (body);",
         );
-        let (_, verdict, notes) = measured(predictions[1].clone());
+        let (_, verdict, notes) = likely(predictions[1].clone());
         assert_eq!(verdict, "INPLACE, no rebuild, writes continue");
         assert_eq!(notes, [JSON_INDEX_UNSEEN.to_owned(), note(&ADD_INDEX)]);
     }
@@ -9299,7 +11020,7 @@ mod tests {
             "ALTER TABLE orders CONVERT TO CHARACTER SET latin1;
              ALTER TABLE orders DROP COLUMN user_id;",
         );
-        let (_, verdict, notes) = measured(predictions[1].clone());
+        let (_, verdict, notes) = likely(predictions[1].clone());
         assert_eq!(verdict, "INSTANT, no rebuild, writes continue");
         assert!(
             notes.contains(
@@ -9605,13 +11326,24 @@ mod tests {
     }
 
     #[test]
-    fn a_new_foreign_key_of_a_known_table_to_an_unseen_one_is_a_note_and_no_failure() {
+    fn a_new_foreign_key_of_a_known_table_to_an_unseen_one_is_unknown_with_notes_and_no_failure() {
         let predictions = predictions_with(
             "CREATE TABLE orders (id INT PRIMARY KEY, amount INT NOT NULL);",
             "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (amount) REFERENCES users (id)",
         );
-        assert_eq!(said(&predictions[0]), COPY_ANSWER);
-        let (_, _, notes) = measured(predictions[0].clone());
+        assert!(
+            reason(predictions[0].clone()).starts_with(
+                "the foreign key points at users: no --schema was given, so kilit does not know \
+                 users"
+            ),
+            "{:?}",
+            predictions[0]
+        );
+        let (case, answer, notes) = likely(predictions[0].clone());
+        assert_eq!(
+            (case.as_str(), answer.as_str()),
+            ("add-foreign-key", COPY_ANSWER)
+        );
         assert_eq!(notes.len(), 8, "{notes:?}");
         assert_eq!(notes[0], FOREIGN_KEY_UNSEEN);
     }
@@ -10011,7 +11743,9 @@ mod tests {
     #[test]
     fn without_the_table_error_1553_and_3108_are_notes() {
         // kilit never saw the table, or lost track of it.
-        let lost = format!("{SHOP}{OWN_INDEX}{FOREIGN_KEY}ALTER TABLE orders AUTO_INCREMENT = 5;");
+        let lost = format!(
+            "{SHOP}{OWN_INDEX}{FOREIGN_KEY}ALTER TABLE orders CONVERT TO CHARACTER SET latin1;"
+        );
         for schema in ["", lost.as_str()] {
             for (sql, case, verdict, note) in [
                 (
@@ -10036,7 +11770,7 @@ mod tests {
                      (rename-column-generated-source and rename-column-stored-generated-source)",
                 ),
             ] {
-                let (found, said, notes) = measured(predictions_with(schema, sql).pop().unwrap());
+                let (found, said, notes) = likely(predictions_with(schema, sql).pop().unwrap());
                 assert_eq!(found, case, "{sql}");
                 assert_eq!(said, verdict, "{sql}");
                 assert!(notes.iter().any(|n| n == note), "{sql}: {notes:?}");
@@ -10689,7 +12423,7 @@ mod tests {
     #[test]
     fn without_the_table_error_3959_is_a_note() {
         // kilit never saw the table, or lost track of it.
-        let lost = format!("{SHOP}{CHECK_TWO}ALTER TABLE orders AUTO_INCREMENT = 5;");
+        let lost = format!("{SHOP}{CHECK_TWO}ALTER TABLE orders CONVERT TO CHARACTER SET latin1;");
         for schema in ["", lost.as_str()] {
             for (sql, case, wanted) in [
                 (
@@ -10712,8 +12446,7 @@ mod tests {
                     ],
                 ),
             ] {
-                let (found, verdict, notes) =
-                    measured(predictions_with(schema, sql).pop().unwrap());
+                let (found, verdict, notes) = likely(predictions_with(schema, sql).pop().unwrap());
                 assert_eq!(found, case, "{sql}");
                 assert_eq!(verdict, INSTANT_ANSWER, "{sql}");
                 for note in wanted {
@@ -10782,8 +12515,10 @@ mod tests {
             said(&on_shop("", &format!("{add}, ALGORITHM=COPY"))),
             COPY_ANSWER
         );
-        // Without the table too: nothing in the answer depends on it.
-        assert_eq!(said(&only(add)), COPY_ANSWER);
+        // Without the table it is only likely: the table may lack the
+        // column, or have a constraint of the name, which the lab has not
+        // measured.
+        assert_eq!(likely(only(add)).1, COPY_ANSWER);
     }
 
     #[test]
@@ -10995,28 +12730,41 @@ mod tests {
     }
 
     #[test]
-    fn drop_constraint_of_a_name_kilit_cannot_place_loses_the_table() {
+    fn drop_constraint_of_a_name_kilit_cannot_place_loses_the_table_and_of_none_keeps_it() {
         // MySQL refuses all of them (errors 3940 and 3939, run by hand).
-        let lost = "ALTER TABLE orders MODIFY note VARCHAR(60) NULL";
-        for (setup, name, wanted) in [
-            (
-                "",
-                "nosuch",
-                "orders has no constraint nosuch, as far as kilit can tell; MySQL does not count \
-                 a plain index as one",
-            ),
+        let next = "ALTER TABLE orders MODIFY note VARCHAR(60) NULL";
+        let none = |name: &str| {
+            format!(
+                "orders has no constraint {name} that kilit knows of (MySQL does not count a \
+                 plain index as one). If it has none, MySQL fails with error 3940 \
+                 (drop-constraint-missing); kilit does not answer that from its tables alone, \
+                 which may be out of date"
+            )
+        };
+        // A name no constraint has: the table stays known (the lab: 3940).
+        for (setup, name) in [
+            ("", "nosuch"),
             (
                 "ALTER TABLE orders ADD INDEX i_amount (amount);",
                 "i_amount",
-                "orders has no constraint i_amount, as far as kilit can tell; MySQL does not \
-                 count a plain index as one",
             ),
             (
                 "ALTER TABLE orders ADD FULLTEXT INDEX f_note (note);",
                 "f_note",
-                "orders has no constraint f_note, as far as kilit can tell; MySQL does not count \
-                 a plain index as one",
             ),
+        ] {
+            let predictions = predictions_with(
+                &format!("{SHOP}\n{setup}"),
+                &format!("ALTER TABLE orders DROP CONSTRAINT {name};\n{next};"),
+            );
+            assert_eq!(reason(predictions[0].clone()), none(name), "{setup}");
+            assert!(
+                matches!(predictions[1], Prediction::Measured { .. }),
+                "{setup}: {:?}",
+                predictions[1]
+            );
+        }
+        for (setup, name, wanted) in [
             (
                 "ALTER TABLE orders ADD CONSTRAINT same FOREIGN KEY (user_id) REFERENCES users (id);
                  ALTER TABLE orders ADD CONSTRAINT same CHECK (amount > 0);",
@@ -11034,7 +12782,7 @@ mod tests {
         ] {
             let predictions = predictions_with(
                 &format!("{SHOP}\n{setup}"),
-                &format!("ALTER TABLE orders DROP CONSTRAINT {name};\n{lost};"),
+                &format!("ALTER TABLE orders DROP CONSTRAINT {name};\n{next};"),
             );
             assert_eq!(reason(predictions[0].clone()), wanted, "{setup}");
             assert!(
@@ -11051,7 +12799,7 @@ mod tests {
             "kilit does not know this table, so it cannot tell what kind of constraint \
              chk_amount is"
         );
-        let lost = format!("{SHOP}ALTER TABLE orders AUTO_INCREMENT = 5;");
+        let lost = format!("{SHOP}ALTER TABLE orders CONVERT TO CHARACTER SET latin1;");
         assert!(
             reason(predictions_with(&lost, "ALTER TABLE orders DROP CONSTRAINT c").remove(0))
                 .starts_with("kilit lost track of this table")
@@ -11186,10 +12934,13 @@ mod tests {
                  8.4.13 do not accept ALTER CONSTRAINT for it",
                 false,
             ),
+            // MySQL refuses it (the lab: 3821), and the table stays known.
             (
                 "ALTER TABLE orders DROP CHECK nosuch",
-                "orders has no CHECK constraint nosuch, as far as kilit can tell",
-                true,
+                "orders has no CHECK constraint nosuch that kilit knows of. If it has none, \
+                 MySQL fails with error 3821 (drop-check-missing); kilit does not answer that \
+                 from its tables alone, which may be out of date",
+                false,
             ),
         ] {
             let predictions = predictions_with(
@@ -11204,10 +12955,26 @@ mod tests {
                 "{sql}: {notes:?}"
             );
         }
-        assert_eq!(
-            reason(predictions_with("", "ALTER TABLE orders DROP CHECK chk_amount")[0].clone()),
-            "kilit does not know this table, so it cannot tell whether chk_amount is one of its \
-             CHECK constraints"
+        // Without the table, the drop of a CHECK constraint is only likely,
+        // and the name the table may not have is a note.
+        let unseen = predictions_with("", "ALTER TABLE orders DROP CHECK chk_amount").remove(0);
+        assert!(
+            reason(unseen.clone()).starts_with("no --schema was given, so kilit does not know"),
+            "{unseen:?}"
+        );
+        let (case, _, notes) = likely(unseen);
+        assert_eq!(case, "drop-check-constraint");
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("fails with error 3821 (drop-check-missing)")),
+            "{notes:?}"
+        );
+        assert!(
+            !notes
+                .iter()
+                .any(|note| note.contains("drop-constraint-missing")),
+            "{notes:?}"
         );
     }
 
@@ -11484,6 +13251,16 @@ mod tests {
         measured(prediction).0
     }
 
+    /// The case of a measured prediction, or the likely one on a table
+    /// kilit does not know: a failure from the statement alone stays
+    /// measured there.
+    fn said_case(prediction: Prediction) -> String {
+        match prediction {
+            Prediction::Measured { case, .. } => case.to_owned(),
+            unknown => likely(unknown).0,
+        }
+    }
+
     #[test]
     fn tables_of_other_engines_get_no_answer() {
         for engine in ["MEMORY", "ARCHIVE", "BLACKHOLE"] {
@@ -11515,21 +13292,23 @@ mod tests {
     }
 
     #[test]
-    fn a_lost_table_keeps_the_innodb_answer_only_when_it_was_innodb() {
+    fn a_lost_table_gets_the_innodb_answer_as_its_likely_one_only_when_it_was_innodb() {
         let add = "ALTER TABLE orders ADD COLUMN c INT NULL";
         let innodb = MYISAM_ORDERS.replace("ENGINE=MyISAM", "ENGINE=InnoDB");
         assert_eq!(
-            case_of(last_with(
+            likely(last_with(
                 MYISAM_ORDERS,
                 &format!("ALTER TABLE orders ENGINE=InnoDB, AUTO_INCREMENT=5; {add}")
-            )),
+            ))
+            .0,
             "add-column"
         );
         assert_eq!(
-            case_of(last_with(
+            likely(last_with(
                 &innodb,
                 &format!("ALTER TABLE orders ENGINE=InnoDB, AUTO_INCREMENT=5; {add}")
-            )),
+            ))
+            .0,
             "add-column"
         );
         for (schema, before) in [
@@ -11546,7 +13325,7 @@ mod tests {
             assert!(reason.contains("MyISAM"), "{reason}");
         }
         // A table kilit never knew stays InnoDB.
-        assert_eq!(case_of(only(add)), "add-column");
+        assert_eq!(likely(only(add)).0, "add-column");
     }
 
     #[test]
@@ -12082,7 +13861,8 @@ mod tests {
                     "{options} {setup}"
                 );
             } else {
-                assert_eq!(case_id(&prediction), "add-column", "{options} {setup}");
+                // Lost, so the InnoDB DYNAMIC answer is only the likely one.
+                assert_eq!(likely(prediction).0, "add-column", "{options} {setup}");
             }
         }
     }

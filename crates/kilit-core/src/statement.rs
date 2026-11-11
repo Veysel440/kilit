@@ -238,10 +238,25 @@ pub enum Operation {
         column: String,
         default: String,
     },
+    /// `ALTER COLUMN c DROP DEFAULT`: the column has no default after it.
+    DropColumnDefault {
+        column: String,
+    },
     /// `RENAME COLUMN a TO b`: only the name changes.
     RenameColumn {
         from: String,
         to: String,
+    },
+    /// `RENAME INDEX a TO b` or `RENAME KEY a TO b`: only the index's name
+    /// changes.
+    RenameIndex {
+        from: String,
+        to: String,
+    },
+    /// `AUTO_INCREMENT = n`: the next value MySQL gives the table's
+    /// AUTO_INCREMENT column, which kilit does not follow.
+    SetAutoIncrement {
+        value: String,
     },
     AddIndex(Index),
     DropIndex {
@@ -415,6 +430,10 @@ pub struct ForeignKey {
     pub referenced_columns: Vec<String>,
     pub on_delete: Option<ForeignKeyAction>,
     pub on_update: Option<ForeignKeyAction>,
+    /// The names the key had before a `RENAME TABLE` gave it its table's
+    /// new name, oldest first. MySQL renames the key but not the index it
+    /// made for it, which keeps the old name.
+    pub former_names: Vec<String>,
 }
 
 /// A CHECK constraint.
@@ -551,6 +570,9 @@ impl fmt::Display for Operation {
                 write_position(f, position.as_ref())
             }
             Operation::RenameColumn { from, to } => write!(f, "rename column {from} to {to}"),
+            Operation::DropColumnDefault { column } => write!(f, "drop the default of {column}"),
+            Operation::RenameIndex { from, to } => write!(f, "rename index {from} to {to}"),
+            Operation::SetAutoIncrement { value } => write!(f, "set AUTO_INCREMENT to {value}"),
             Operation::SetColumnDefault { column, default } => {
                 write!(f, "set the default of {column} to {default}")
             }
@@ -779,6 +801,7 @@ mod tests {
             referenced_columns: vec!["id".into()],
             on_delete: Some(ForeignKeyAction::Cascade),
             on_update: None,
+            former_names: Vec::new(),
         };
         assert_eq!(
             Operation::AddForeignKey(key).to_string(),

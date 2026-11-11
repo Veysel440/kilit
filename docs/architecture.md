@@ -147,9 +147,26 @@ Each table is in one of three states:
 - *Missing*: kilit never saw the table, for example without `--schema`.
 
 A failure comes from the statement itself (error 1674 for an expression
-default, or the error of a forced `ALGORITHM` or `LOCK` that MySQL refuses), or
-from a Known table whose schema shows the cause. A cause that no schema shows,
-or that a Lost or Missing table hides, becomes a note, never a failure.
+default, error 1101 for a quoted default on a type named in the statement, or
+the error of a forced `ALGORITHM` or `LOCK` that MySQL refuses), or from a
+Known table whose schema shows the cause. A cause that no schema shows, or that
+a Lost or Missing table hides, becomes a note, never a failure.
+
+On a Lost table, and on a Missing one when no `--schema` was given, the table
+cannot decide the exceptions. `check.rs` collects every answer the table may
+have: the case's plain InnoDB answer, each exception that is not hidden, the
+case on MyISAM, COMPRESSED, COMPACT and REDUNDANT tables where the lab
+measured it, and for an index the refusals 1072 and 1061 from hand tests. A
+failure that comes from the statement alone is the answer (rule 1). If any
+candidate has no measured answer the statement is `UNKNOWN` (rule 2). If all
+candidates give the same word, that word stays, but "writes continue" never
+does (rule 3). If none lets writes continue, the answer is "writes wait" or
+"fails", with no algorithm, rebuild or error, because the table decides those
+(rule 4). Otherwise it is `UNKNOWN` (rule 5; no case reaches it today). The
+reason gives why kilit does not know the table and the plain InnoDB answer, and
+the notes list the candidates. A foreign key of a table kilit does not know may
+point at a Known table; kilit remembers such keys, so that dropping an index
+or changing a column of the parent is `UNKNOWN` too.
 
 A statement that fails as measured does not change the schema. Any other
 answer applies the statement. An `UNKNOWN` statement is followed as if it ran,

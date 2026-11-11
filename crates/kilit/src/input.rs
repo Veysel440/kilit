@@ -19,8 +19,9 @@ pub struct Input {
     /// Some input holds a `/*! ... */` comment, which MySQL runs. kilit does
     /// not see a statement made of one alone.
     pub runs_comments: bool,
-    /// How many inputs were read: files, or standard input.
-    sessions: usize,
+    /// The name of each input read, in order, as given: a file's path, or
+    /// `standard input`. Each runs in a session of its own.
+    pub session_names: Vec<String>,
 }
 
 /// Statements that belong together: one Laravel migration, or one SQL file.
@@ -79,7 +80,7 @@ impl Input {
             from_laravel: false,
             laravel_errors: Vec::new(),
             runs_comments: false,
-            sessions: 0,
+            session_names: Vec::new(),
         };
         let mut stdin_read = false;
         for file in files {
@@ -101,8 +102,8 @@ impl Input {
     }
 
     fn add(&mut self, name: String, file: Option<&Path>, text: &str) {
-        let session = self.sessions;
-        self.sessions += 1;
+        let session = self.session_names.len();
+        self.session_names.push(name.clone());
         self.runs_comments |= text.contains("/*!");
         match read_pretend(text) {
             Some(pretend) => {
@@ -145,7 +146,7 @@ impl Input {
 impl Input {
     /// How many inputs were read: files, or standard input.
     pub fn inputs(&self) -> usize {
-        self.sessions
+        self.session_names.len()
     }
 }
 

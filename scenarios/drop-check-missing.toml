@@ -1,0 +1,4 @@
+title = "Drop a CHECK constraint the table does not have with DROP CHECK"
+# The name nosuch is used in every scenario of this kind, so MySQL's
+# message names the same object in all of them.
+operation = "DROP CHECK nosuch"

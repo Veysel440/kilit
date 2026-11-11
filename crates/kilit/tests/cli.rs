@@ -2032,7 +2032,7 @@ fn statements_printed_before_the_error_keep_their_answers_in_text_and_json() {
     // Three migrations: an ALTER (ADD COLUMN ... null, INSTANT), one that
     // throws, an ALTER that Laravel never reaches.
     for input in [C4_L12, C4_L12_SYMFONY] {
-        let output = kilit(&["check"], input);
+        let output = kilit_on_dump(&["check"], input);
         let text = stdout(&output);
         let migration = text.find(FIRST_NAME).expect(&text);
         let answer = text
@@ -2051,7 +2051,7 @@ fn statements_printed_before_the_error_keep_their_answers_in_text_and_json() {
         );
         assert_eq!(output.status.code(), Some(2), "{text}");
 
-        let json = json_of(&kilit(&["check", "--format", "json"], input));
+        let json = json_of(&kilit_on_dump(&["check", "--format", "json"], input));
         assert_eq!(json["sources"].as_array().unwrap().len(), 1);
         assert_eq!(json["sources"][0]["name"], FIRST_NAME);
         assert_eq!(
@@ -2135,7 +2135,7 @@ fn the_error_warning_comes_before_the_metadata_lock_warning_and_the_exit_code_st
 fn a_read_gets_one_note_under_its_first_statement_and_changes_no_answer_or_exit_code() {
     // DB::table('orders')->count() then Schema::table('orders', ...): the
     // select is printed, then the ALTER.
-    let output = kilit(&["check"], C6_L12);
+    let output = kilit_on_dump(&["check"], C6_L12);
     let text = stdout(&output);
     assert_eq!(text.matches(READ_NOTE).count(), 1, "{text}");
     let select = text
@@ -2151,13 +2151,16 @@ fn a_read_gets_one_note_under_its_first_statement_and_changes_no_answer_or_exit_
         "{text}"
     );
     assert_eq!(output.status.code(), Some(0), "{text}");
-    assert_eq!(kilit(&["check", "--strict"], C6_L12).status.code(), Some(0));
+    assert_eq!(
+        kilit_on_dump(&["check", "--strict"], C6_L12).status.code(),
+        Some(0)
+    );
 
     for args in [
         &["check", "--format", "json"][..],
         &["check", "--format", "json", "--strict"][..],
     ] {
-        let output = kilit(args, C6_L12);
+        let output = kilit_on_dump(args, C6_L12);
         let json = json_of(&output);
         let statements = &json["sources"][0]["statements"];
         assert_eq!(
@@ -2213,7 +2216,7 @@ fn the_demo_has_no_read_note_and_no_laravel_error() {
 #[test]
 fn a_class_named_migration_and_nothing_to_migrate_are_read_as_before() {
     // class AddQtyToOrdersTable extends Migration: Laravel prints the class.
-    let output = kilit(&["check"], C9_L12);
+    let output = kilit_on_dump(&["check"], C9_L12);
     let text = stdout(&output);
     assert!(
         text.contains(
@@ -2223,7 +2226,7 @@ fn a_class_named_migration_and_nothing_to_migrate_are_read_as_before() {
     );
     assert_eq!(output.status.code(), Some(0), "{text}");
 
-    let output = kilit(&["check"], C10_L13_SHORT);
+    let output = kilit_on_dump(&["check"], C10_L13_SHORT);
     let text = stdout(&output);
     assert!(
         text.ends_with("\nnothing to check: Laravel has no pending migration\n"),
@@ -2240,7 +2243,7 @@ fn the_oem_code_page_forms_of_the_statement_mark_are_read_and_exit_with_0() {
         let input = format!(
             "\n   INFO  Running migrations.  \n\n  2026_02_01_000001_add_qty_to_orders_table ....  \n  {mark} alter table `orders` add `qty` int null  \n\n"
         );
-        let output = kilit(&["check"], &input);
+        let output = kilit_on_dump(&["check"], &input);
         let text = stdout(&output);
         assert!(!text.contains("could not read"), "{mark}: {text}");
         assert!(
@@ -2248,7 +2251,7 @@ fn the_oem_code_page_forms_of_the_statement_mark_are_read_and_exit_with_0() {
             "{mark}: {text}"
         );
         assert_eq!(output.status.code(), Some(0), "{mark}: {text}");
-        let json = json_of(&kilit(&["check", "--format", "json"], &input));
+        let json = json_of(&kilit_on_dump(&["check", "--format", "json"], &input));
         assert_eq!(json["unreadable"], serde_json::json!([]), "{mark}");
         assert_eq!(json["exit_code"], 0, "{mark}");
     }
@@ -2366,7 +2369,7 @@ const ROW_NOTES: [RowNote; 8] = [
         label: "NULL",
         table: "children",
         alter: "alter table `children` modify `maybe` int not null;",
-        prefix: "if a row holds NULL: ",
+        prefix: "if a row holds NULL (in strict SQL mode, the default): ",
     },
     RowNote {
         label: "duplicates, InnoDB",
@@ -2650,10 +2653,16 @@ fn tables_from_the_schema_file_keep_every_row_note() {
 
 #[test]
 fn create_table_if_not_exists_keeps_the_row_notes() {
-    // The table may have been there before: it is not "created here".
+    // The table may have been there before: it is not "created here". The
+    // schema file has it, so the statement keeps that table (without a schema
+    // file the table is lost: kilit cannot see whether one exists).
+    let dump = write_schema(
+        "if_not_exists_children.sql",
+        "CREATE TABLE `children` (`id` int NOT NULL, `qty` int NOT NULL) ENGINE=InnoDB;\n",
+    );
     let input = "create table if not exists `children` (`id` int not null, `qty` int not null);
                  alter table `children` modify `qty` smallint not null;";
-    let (text, json, _) = text_and_json(&[], input);
+    let (text, json, _) = text_and_json(&["--schema", dump.to_str().unwrap()], input);
     assert!(
         text.contains(
             "    - if a value does not fit the new type (in strict SQL mode, the default): "
@@ -2812,7 +2821,11 @@ fn a_laravel_migration_that_creates_a_table_and_adds_a_key_loses_the_row_line_on
     // the long form, and Laravel 13 prints a shorter form in some environments.
     for (form, input) in [("long", L12_CREATE_FK), ("short", L13_SHORT_CREATE_FK)] {
         let output = kilit(&["check"], input);
-        assert_eq!(stdout(&output), EXPECTED_CREATE_FK, "{form}");
+        assert_eq!(
+            without_the_schema_header(&stdout(&output)),
+            without_the_schema_header(EXPECTED_CREATE_FK),
+            "{form}"
+        );
         assert_eq!(output.status.code(), Some(0), "{form}");
         let json = json_of(&kilit(&["check", "--format", "json"], input));
         let statements = json["sources"][0]["statements"].as_array().unwrap();
@@ -2836,7 +2849,11 @@ fn an_insert_between_the_create_and_the_key_keeps_the_row_line_in_laravel_s_outp
         ("short", L13_SHORT_CREATE_INSERT_FK),
     ] {
         let output = kilit(&["check"], input);
-        assert_eq!(stdout(&output), EXPECTED_CREATE_INSERT_FK, "{form}");
+        assert_eq!(
+            without_the_schema_header(&stdout(&output)),
+            without_the_schema_header(EXPECTED_CREATE_INSERT_FK),
+            "{form}"
+        );
         assert_eq!(output.status.code(), Some(0), "{form}");
     }
 }
@@ -2898,6 +2915,8 @@ fn reads_migrations() -> [(&'static str, &'static [&'static str]); 2] {
     ]
 }
 
+// The answers are those of a table the schema file has: a table kilit does
+// not know gets no answer, so the test runs against a dump.
 const EXPECTED_READS: &str = r#"checked against mysql-8.4.13, as measured by kilit-lab
 no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE
 
@@ -2911,10 +2930,7 @@ no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE
   alter table `users` add `nickname` varchar(255) null
     INSTANT, no rebuild, writes continue
     measured as add-column (7 lab scenarios)
-    - if the record grows past what InnoDB keeps in a page (8126 bytes): MySQL fails with error 1118 (4157 with ALGORITHM=INSTANT), and 8.0.46 and 8.4.13 count the record differently, so kilit cannot tell (it counts the record when it knows every column of the table)
-    - if the table has a FULLTEXT index: COPY, copies every row, writes wait (add-column-with-fulltext)
     - if the table has had 64 instant column changes since it was last rebuilt: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)
-    - if the row grows past the 65,535 bytes MySQL allows: fails with error 1118 (add-column-over-row-size-limit)
   read (not checked): select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as ...
 
 2026_03_01_000002_reads_two_users_table
@@ -2925,10 +2941,7 @@ no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE
   alter table `users` add `phone` varchar(255) null
     INSTANT, no rebuild, writes continue
     measured as add-column (7 lab scenarios)
-    - if the record grows past what InnoDB keeps in a page (8126 bytes): MySQL fails with error 1118 (4157 with ALGORITHM=INSTANT), and 8.0.46 and 8.4.13 count the record differently, so kilit cannot tell (it counts the record when it knows every column of the table)
-    - if the table has a FULLTEXT index: COPY, copies every row, writes wait (add-column-with-fulltext)
     - if the table has had 64 instant column changes since it was last rebuilt: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)
-    - if the row grows past the 65,535 bytes MySQL allows: fails with error 1118 (add-column-over-row-size-limit)
 
 metadata lock on users:
   Every ALTER TABLE, DROP TABLE, RENAME TABLE and TRUNCATE TABLE first waits
@@ -2949,11 +2962,18 @@ fn every_read_after_the_first_in_a_migration_is_one_line_without_an_explanation(
         ("long", pretend_long(&reads_migrations())),
         ("short", pretend_short(&reads_migrations())),
     ] {
-        let output = kilit(&["check"], &input);
-        assert_eq!(stdout(&output), EXPECTED_READS, "{form}");
+        let output = kilit_on_dump(&["check"], &input);
+        assert_eq!(
+            without_the_schema_header(&stdout(&output)),
+            without_the_schema_header(EXPECTED_READS),
+            "{form}"
+        );
         // Reads change no exit code.
         assert_eq!(output.status.code(), Some(0), "{form}");
-        assert_eq!(kilit(&["check", "--strict"], &input).status.code(), Some(0));
+        assert_eq!(
+            kilit_on_dump(&["check", "--strict"], &input).status.code(),
+            Some(0)
+        );
     }
 }
 
@@ -2963,7 +2983,7 @@ fn the_json_keeps_every_read_and_the_read_note_as_before() {
         ("long", pretend_long(&reads_migrations())),
         ("short", pretend_short(&reads_migrations())),
     ] {
-        let json = json_of(&kilit(&["check", "--format", "json"], &input));
+        let json = json_of(&kilit_on_dump(&["check", "--format", "json"], &input));
         let sources = json["sources"].as_array().unwrap();
         assert_eq!(sources.len(), 2, "{form}");
         let counts: Vec<usize> = sources
@@ -3532,11 +3552,11 @@ fn a_schema_qualified_table_with_an_insert_by_its_short_name_keeps_the_row_notes
 }
 
 #[test]
-fn an_alter_kilit_reads_but_does_not_model_keeps_the_row_notes_of_the_next_alter() {
-    // AUTO_INCREMENT = 5 and ALTER COLUMN ... DROP DEFAULT parse as ALTERs
-    // with a change kilit does not model, and kilit answers UNKNOWN for them.
-    // They are no statement kilit fully reads: the row note of the next ALTER
-    // stays.
+fn an_alter_kilit_reads_and_follows_but_does_not_answer_leaves_the_row_notes_out() {
+    // AUTO_INCREMENT = 5 and ALTER COLUMN ... DROP DEFAULT are read and
+    // followed, and kilit answers UNKNOWN for them until the
+    // lab measures them. Neither can put rows into the table, so the row note
+    // of the next ALTER is left out, as for the statements that cannot have.
     for alter in [
         "alter table `ev` auto_increment = 5",
         "alter table `ev` alter column `n` drop default",
@@ -3544,11 +3564,11 @@ fn an_alter_kilit_reads_but_does_not_model_keeps_the_row_notes_of_the_next_alter
         let input = format!("{ROWS_IN_EV}{alter};\n{ADD_EV_UNIQUE}");
         let (text, _, _) = text_and_json(&[], &input);
         assert!(
-            text.contains("kilit does not understand this change"),
+            text.contains("has not been measured yet"),
             "{alter}: {text}"
         );
         assert!(
-            text.contains(&format!("    - {DUPLICATES}")),
+            !text.contains(&format!("    - {DUPLICATES}")),
             "{alter}: {text}"
         );
     }
@@ -6871,7 +6891,8 @@ fn a_refused_create_table_makes_no_table_so_the_next_alter_is_not_on_a_new_table
     let refused = "create table `tq` (`id` int primary key, `d` date null default CURRENT_DATE);
                    alter table `tq` add `c` int null;";
     let (text, json, code) = text_and_json(&[], refused);
-    assert_eq!(impacts_of(&json), ["unknown", "writes_continue"], "{text}");
+    // Tq is not known, so the ALTER is unknown too.
+    assert_eq!(impacts_of(&json), ["unknown", "unknown"], "{text}");
     let first = &json["sources"][0]["statements"][0];
     assert!(
         first["reason"].as_str().unwrap().starts_with(REFUSED_NAME),
@@ -6882,7 +6903,7 @@ fn a_refused_create_table_makes_no_table_so_the_next_alter_is_not_on_a_new_table
         "{text}"
     );
     assert_eq!(code, Some(0), "{text}");
-    assert_eq!(json["summary"]["unknown"], 1);
+    assert_eq!(json["summary"]["unknown"], 2);
     assert_eq!(json["summary"]["new_table"], 0);
 }
 
@@ -7379,7 +7400,7 @@ alter table orders drop index fk_x;";
     let sql = "drop table if exists ORDERS;
 alter table orders drop index fk_x;";
     let (text, json, code) = text_and_json(&["--schema", schema], sql);
-    assert_eq!(impacts_of(&json), ["unknown", "writes_continue"], "{text}");
+    assert_eq!(impacts_of(&json), ["unknown", "unknown"], "{text}");
     assert_eq!(code, Some(0), "{text}");
 }
 
@@ -7408,9 +7429,11 @@ CREATE TABLE `archive` (
 alter table ORDERS add fulltext ft (note);
 alter table orders add column x int null;";
     let (text, json, code) = text_and_json(&["--schema", schema], sql);
+    // The last ALTER is on a table kilit lost, so it is
+    // unknown too, not the plain table's answer.
     assert_eq!(
         impacts_of(&json),
-        ["unknown", "unknown", "writes_continue"],
+        ["unknown", "unknown", "unknown"],
         "{text}"
     );
     let reason = json["sources"][0]["statements"][1]["reason"]
@@ -7702,6 +7725,8 @@ fn the_exit_status_is_the_same_in_text_json_and_github() {
     let cases: Vec<(&str, Vec<&str>, &str, i32)> = vec![
         ("the demo", vec!["--schema", &schema], &demo, 1),
         ("sample.sql", vec!["--schema", &schema, sample], "", 1),
+        // Only the ADD FULLTEXT makes writes wait on every table it may be;
+        // the rest of orders is unknown without a schema.
         ("sample.sql without a schema", vec![sample], "", 1),
         (
             "writes continue",
@@ -8132,8 +8157,9 @@ fn sample_sql_gets_an_annotation_for_every_statement_that_fails_waits_or_is_unkn
     );
     assert_eq!(github.status, Some(1));
 
-    // Without the schema MODIFY and CHANGE are unknown; the exit status says
-    // the one statement that waits.
+    // Without the schema every statement on orders is unknown, except the
+    // ADD FULLTEXT on line 25: every table it may be makes writes wait, so it
+    // is an error annotation and the exit status is 1.
     let github = github_at(&dir, None, &[sample], "");
     let statements = without_lock(&github);
     let waits: Vec<String> = statements
@@ -8142,7 +8168,7 @@ fn sample_sql_gets_an_annotation_for_every_statement_that_fails_waits_or_is_unkn
         .filter(|parsed| parsed.level == "error")
         .map(|parsed| parsed.line.unwrap())
         .collect();
-    assert_eq!(waits, ["25"]);
+    assert_eq!(waits, vec!["25".to_owned()]);
     assert_eq!(github.status, Some(1));
 }
 
@@ -8342,8 +8368,17 @@ fn laravel_stopping_with_an_error_is_an_error_annotation_with_no_file() {
     // With several inputs the message names the one it comes from.
     let alter = github_write(&dir, "alter.sql", "alter table orders add x int null;\n");
     let alter = alter.to_str().unwrap();
-    let github = github_at(&dir, None, &[alter, "-"], C1_THROW_L12);
-    let lock = lock_message(&dir, &[alter, "-"], C1_THROW_L12);
+    // The ALTER runs against a schema file that has orders: without it the
+    // statement is unknown, and that has an annotation of its own (B1c).
+    let dump = github_write(
+        &dir,
+        "orders.sql",
+        "CREATE TABLE `orders` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, PRIMARY KEY (`id`)) \
+         ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n",
+    );
+    let args = ["--schema", dump.to_str().unwrap(), alter, "-"];
+    let github = github_at(&dir, None, &args, C1_THROW_L12);
+    let lock = lock_message(&dir, &args, C1_THROW_L12);
     assert_eq!(
         github.annotations,
         [
@@ -8451,8 +8486,14 @@ fn a_line_kilit_cannot_read_is_an_error_annotation_with_the_file_and_line_of_a_f
 fn the_metadata_lock_is_one_notice_that_names_every_table() {
     let dir = github_scratch("lock-tables");
     let sql = "alter table b add y int null;\nalter table a add x int null;\n";
-    let lock = lock_message(&dir, &[], sql);
-    let github = github_at(&dir, None, &[], sql);
+    let dump = github_write(
+        &dir,
+        "ab.sql",
+        "CREATE TABLE `a` (`id` int NOT NULL) ENGINE=InnoDB;\nCREATE TABLE `b` (`id` int NOT NULL) ENGINE=InnoDB;\n",
+    );
+    let args = ["--schema", dump.to_str().unwrap()];
+    let lock = lock_message(&dir, &args, sql);
+    let github = github_at(&dir, None, &args, sql);
     assert_eq!(
         github.annotations,
         [lock_notice("b, a", &lock, "mysql-8.4.13")]
@@ -9118,7 +9159,8 @@ const CAP_PREFIX: &str = "kilit: ";
 /// characters (`letter` repeated); the answer line holds the name.
 fn unreadable_with_long_name(letter: char, n: usize) -> (String, String) {
     let name: String = std::iter::repeat_n(letter, n).collect();
-    let statement = format!("alter table orders rename index {name} to y");
+    // sqlparser stops at the word after the table, so the reason holds the name.
+    let statement = format!("alter table orders {name} to y");
     (format!("{statement};\n"), statement)
 }
 
@@ -9656,13 +9698,10 @@ fn laravel_s_text_json_and_blob_defaults_fail_and_exit_with_1_in_both_forms() {
         assert_eq!(
             impacts_of(&json),
             [
-                "fails",
-                "fails",
-                "fails",
-                "writes_wait",
-                "fails",
-                "fails",
-                "fails"
+                "fails", "fails", "fails",
+                // The JSON expression default is a copy
+                // only on a plain table, and there is no table here.
+                "unknown", "fails", "fails", "fails"
             ],
             "{form}"
         );
@@ -9690,8 +9729,9 @@ fn an_empty_sql_mode_in_one_file_does_not_carry_to_the_next_file() {
     );
     let (json, code) = b1b_json(&[first.to_str().unwrap(), second.to_str().unwrap()], "");
     let first_statements = statements_of(&json, 0);
-    assert_eq!(first_statements[1]["impact"], "writes_continue");
-    assert_eq!(first_statements[1]["algorithm"], "INSTANT");
+    // The empty default is dropped by MySQL, and what that
+    // costs depends on the table, which is not known.
+    assert_eq!(first_statements[1]["impact"], "unknown");
     let second_statements = statements_of(&json, 1);
     assert_eq!(second_statements[0]["impact"], "fails");
     assert_eq!(second_statements[0]["error"], 1101);
@@ -9731,10 +9771,10 @@ fn dropping_the_primary_key_column_copies_the_table_and_exits_with_1() {
 }
 
 #[test]
-fn dropping_a_column_without_the_table_is_instant_with_a_note_and_exits_with_0() {
+fn dropping_a_column_without_the_table_is_unknown_with_a_note_and_exits_with_0() {
     let (json, code) = b1b_json(&[], "alter table `orders` drop `id`;");
     let statement = b1b_statement(&json, 0);
-    assert_eq!(statement["impact"], "writes_continue");
+    assert_eq!(statement["impact"], "unknown");
     assert!(
         notes_of(&statement).iter().any(|note| note
             .starts_with("if the column is the primary key: ")
@@ -9749,7 +9789,7 @@ fn dropping_a_column_without_the_table_is_instant_with_a_note_and_exits_with_0()
     assert_eq!(code, Some(0));
     assert_eq!(
         b1b_json(&["--strict"], "alter table `orders` drop `id`;").1,
-        Some(0)
+        Some(3)
     );
 }
 
@@ -9808,7 +9848,7 @@ fn a_new_column_without_the_table_carries_the_row_size_note() {
         "alter table `orders` add `link_color` varchar(255) null;",
     );
     let statement = b1b_statement(&json, 0);
-    assert_eq!(statement["impact"], "writes_continue");
+    assert_eq!(statement["impact"], "unknown");
     assert!(
         notes_of(&statement)
             .iter()
@@ -9908,13 +9948,28 @@ fn a_statement_on_a_table_missing_from_the_dump_stays_unknown_for_the_statements
 }
 
 #[test]
-fn without_a_schema_file_a_statement_on_any_table_is_answered_as_before() {
+fn without_a_schema_file_a_statement_on_a_table_kilit_does_not_know_is_unknown() {
+    // The reason says why kilit does not know the table, and shows what the
+    // lab measured on a plain one.
     let (json, code) = b1b_json(&[], "alter table `coupons` add `code` varchar(20) null;");
     let statement = b1b_statement(&json, 0);
-    assert_eq!(statement["impact"], "writes_continue");
-    assert_eq!(statement["algorithm"], "INSTANT");
-    assert!(statement.get("reason").is_none(), "{statement}");
+    assert_eq!(statement["impact"], "unknown");
+    let reason = statement["reason"].as_str().unwrap();
+    for part in [
+        "coupons",
+        "no --schema was given",
+        "on a plain InnoDB table the lab measured",
+        "add-column",
+    ] {
+        assert!(reason.contains(part), "{part}: {reason}");
+    }
     assert_eq!(code, Some(0));
+    let (json, code) = b1b_json(
+        &["--strict"],
+        "alter table `coupons` add `code` varchar(20) null;",
+    );
+    assert_eq!(b1b_statement(&json, 0)["impact"], "unknown");
+    assert_eq!(code, Some(3));
 }
 
 #[test]
@@ -10107,12 +10162,10 @@ fn text_a_migration_prints_is_a_note_with_its_lines_and_the_exit_status_is_0() {
                 warning["lines"][0]["text"].as_str().unwrap().trim(),
                 "plain text"
             );
-            assert_eq!(
-                impacts_of(&json),
-                ["writes_continue", "writes_continue"],
-                "{form}"
-            );
-            assert_eq!(code, Some(0), "{form} {strict:?}");
+            // No schema, so unknown; only --strict counts it.
+            assert_eq!(impacts_of(&json), ["unknown", "unknown"], "{form}");
+            let exit = if strict.is_empty() { 0 } else { 3 };
+            assert_eq!(code, Some(exit), "{form} {strict:?}");
         }
     }
 }
@@ -10331,8 +10384,9 @@ fn a_statement_line_with_a_mangled_mark_is_an_unreadable_line_and_exits_with_2()
             );
             assert!(b1b_warning(&json, "migration-output").is_none(), "{form}");
             assert_eq!(code, Some(2), "{form} {strict:?}");
-            // The statement Laravel's own mark shows is still checked.
-            assert_eq!(json["summary"]["writes_continue"], 1, "{form}");
+            // The statement Laravel's own mark shows is still checked: unknown,
+            // as orders is in no schema.
+            assert_eq!(json["summary"]["unknown"], 1, "{form}");
         }
         let output = kilit(&["check"], input);
         assert_eq!(output.status.code(), Some(2), "{form}");
@@ -10374,7 +10428,11 @@ fn dropping_the_foreign_key_mysql_named_itself_and_then_its_column_is_not_refuse
         assert_ne!(second["impact"], "fails", "{strict:?}: {second}");
         assert_ne!(second["error"], 1828, "{strict:?}: {second}");
         assert_eq!(json["summary"]["fails"], 0, "{strict:?}");
-        assert_eq!(code, Some(0), "{strict:?}: {json}");
+        // The table is lost, so the second statement is
+        // unknown; only --strict counts it.
+        assert_eq!(second["impact"], "unknown", "{strict:?}: {second}");
+        let exit = if strict.is_empty() { 0 } else { 3 };
+        assert_eq!(code, Some(exit), "{strict:?}: {json}");
     }
     // Without dropping the key first the column still fails.
     let (json, code) = b1b_json_against(&dump, &[], "alter table `orders` drop `user_id`;");
@@ -10416,13 +10474,14 @@ fn a_new_column_without_a_known_table_carries_the_note_about_the_record_in_a_pag
         ("no table", add.to_owned()),
         (
             "a lost table",
-            format!("alter table `orders` auto_increment = 1000;\n{add}"),
+            format!("alter table `orders` convert to character set utf8mb4;\n{add}"),
         ),
     ] {
         let (json, code) = b1b_json(&[], &sql);
         let last = statements_of(&json, 0).len() - 1;
         let statement = b1b_statement(&json, last);
-        assert_eq!(statement["impact"], "writes_continue", "{label}");
+        // Unknown, with the table-decided note kept.
+        assert_eq!(statement["impact"], "unknown", "{label}");
         assert!(
             notes_of(&statement).iter().any(|n| n.starts_with(note)),
             "{label}: {statement}"
@@ -10435,6 +10494,7 @@ fn a_new_column_without_a_known_table_carries_the_note_about_the_record_in_a_pag
     // A table kilit knows: it counts the record, so there is no such note.
     let (json, code) = b1b_json_against(&b1b_dump(), &[], add);
     let statement = b1b_statement(&json, 0);
+    assert_eq!(statement["impact"], "writes_continue");
     assert!(
         !notes_of(&statement).iter().any(|n| n.starts_with(note)),
         "{statement}"
@@ -10496,7 +10556,7 @@ fn a_foreign_key_to_a_parent_the_dump_does_not_have_says_what_kilit_has_neither(
 
 // ---------------------------------------------------------------------------
 // Step B1b, second fix phase: text printed without a line break that runs
-// into a statement line with a mangled mark. By hand on MySQL, `insert
+// into a statement line with a mangled mark. By hand on MySQL 8.0.46 and 8.4.13, `insert
 // ignore` filled the table and the ADD UNIQUE after it gave 1062, so the
 // output is not fully read: exit 2.
 
@@ -10609,8 +10669,9 @@ fn a_database_qualified_name_of_a_table_in_the_dump_says_which_database_kilit_do
         b1b_reason_run("ALTER TABLE shop.orders ADD COLUMN c INT NULL;\n");
     assert_eq!(alter["impact"], "unknown", "{alter}");
     let reason = alter["reason"].as_str().unwrap();
-    let wording =
-        "the schema dump has orders, and kilit does not know which database shop.orders is in";
+    // Both spellings, and the database kilit does
+    // not know.
+    let wording = "shop.orders names the database shop, and the schema dump has a table orders: kilit does not know the database the statements run in, so it cannot tell whether shop.orders is orders";
     assert!(reason.contains(wording), "{reason}");
     assert!(!reason.contains("neither in the schema dump"), "{reason}");
     assert!(text.contains(wording), "{text}");
@@ -10709,8 +10770,7 @@ fn a_qualified_name_of_a_table_only_the_input_created_says_kilit_has_a_table_of_
     let (json, alter, text, code) = b1b_reason_run(input);
     assert_eq!(alter["impact"], "unknown", "{alter}");
     let reason = alter["reason"].as_str().unwrap();
-    let wording =
-        "kilit has a table coupons, and kilit does not know which database shop.coupons is in";
+    let wording = "shop.coupons names the database shop, and kilit has a table coupons: kilit does not know the database the statements run in, so it cannot tell whether shop.coupons is coupons";
     assert!(reason.contains(wording), "{reason}");
     assert!(!reason.contains("the schema dump has coupons"), "{reason}");
     assert!(!reason.contains("neither in the schema dump"), "{reason}");
@@ -10742,16 +10802,777 @@ fn a_table_dropped_in_an_earlier_input_file_says_so() {
     let alter = statements_of(&json, 1).remove(0);
     assert_eq!(alter["impact"], "unknown", "{alter}");
     let reason = alter["reason"].as_str().unwrap();
-    assert!(
-        reason.contains("the statement on line 1 of an earlier input file"),
-        "{reason}"
-    );
+    // Small fix c: the file is named as it was given on the command line.
+    let named = format!("the statement on line 1 of {}", first.to_str().unwrap());
+    assert!(reason.contains(&named), "{reason}");
+    assert!(!reason.contains("an earlier input file"), "{reason}");
     assert!(!reason.contains("neither in the schema dump"), "{reason}");
     let output = kilit(&args, "");
     let text = stdout(&output);
+    assert!(text.contains(&named), "{text}");
+    assert_eq!(output.status.code(), Some(0), "{text}");
+}
+
+// ---------------------------------------------------------------------------
+// Step B1c: no measured answer on a table kilit does not know.
+//
+// The expectations come from the lab, from hand tests on MySQL 8.0.46 and
+// 8.4.13 and from the decisions of the step; each test says which.
+// ---------------------------------------------------------------------------
+
+/// Runs kilit with `args` (the first is `check`) and the schema dump of
+/// `users` and `orders` that the other tests use, so the answers are the
+/// lab's: without a schema they are unknown.
+fn kilit_on_dump(args: &[&str], stdin: &str) -> Output {
+    let dump = b1b_dump();
+    let mut all = vec![args[0], "--schema", dump.to_str().unwrap()];
+    all.extend(&args[1..]);
+    kilit(&all, stdin)
+}
+
+/// The text without the lines about the schema: that none was given, or the
+/// tables the file has.
+fn without_the_schema_header(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            !line.starts_with("no --schema given:")
+                && !line.starts_with("  give kilit the tables with --schema")
+                && !line.starts_with("tables from ")
+        })
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+/// The reason of statement `n` of the first source, which must be unknown.
+fn b1c_reason(json: &serde_json::Value, n: usize) -> String {
+    let statement = b1b_statement(json, n);
+    assert_eq!(statement["impact"], "unknown", "{statement}");
+    statement["reason"].as_str().unwrap().to_owned()
+}
+
+/// A mysqldump file where `orders` has a FULLTEXT index: a new column on it
+/// is a copy (add-column-with-fulltext), so the answer shows that kilit still
+/// knows the table.
+fn b1c_fulltext_dump() -> PathBuf {
+    write_schema(
+        "b1c_fulltext_dump.sql",
+        "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL DEFAULT '0',
+  `note` text,
+  PRIMARY KEY (`id`),
+  KEY `ix_amount` (`amount`),
+  FULLTEXT KEY `ft_note` (`note`),
+  KEY `orders_user_id_foreign` (`user_id`),
+  CONSTRAINT `orders_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+",
+    )
+}
+
+/// The same without the FULLTEXT index: `user_id` is only the column of a
+/// foreign key, so dropping it is the lab's 1828.
+fn b1c_foreign_key_dump() -> PathBuf {
+    write_schema(
+        "b1c_foreign_key_dump.sql",
+        "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL DEFAULT '0',
+  PRIMARY KEY (`id`),
+  KEY `orders_user_id_foreign` (`user_id`),
+  CONSTRAINT `orders_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+",
+    )
+}
+
+#[test]
+fn a_table_kilit_lost_is_unknown_with_the_lab_answer_in_the_reason_and_exits_with_0_or_3() {
+    // The statement before it is MySQL's CONVERT TO, which kilit does not read.
+    let dump = b1b_dump();
+    let sql = "alter table orders convert to character set utf8mb4;
+               alter table orders add c int null;";
+    let (json, code) = b1b_json_against(&dump, &[], sql);
+    let reason = b1c_reason(&json, 1);
+    for part in [
+        "orders",
+        "kilit lost track of",
+        "on a plain InnoDB table the lab measured",
+        "add-column",
+    ] {
+        assert!(reason.contains(part), "{part}: {reason}");
+    }
+    assert_eq!(code, Some(0));
+    assert_eq!(json["exit_code"], 0);
+    let (json, code) = b1b_json_against(&dump, &["--strict"], sql);
+    assert_eq!(json["exit_code"], 3);
+    assert_eq!(code, Some(3));
+    // The text report prints the reason.
+    let text = stdout(&kilit(&["check", "--schema", dump.to_str().unwrap()], sql));
     assert!(
-        text.contains("the statement on line 1 of an earlier input file"),
+        text.contains("on a plain InnoDB table the lab measured"),
         "{text}"
     );
-    assert_eq!(output.status.code(), Some(0), "{text}");
+}
+
+#[test]
+fn the_table_decided_exceptions_stay_as_notes_of_the_unknown_answer() {
+    // user_id is the column of a foreign key where the table is known: 1828.
+    // Without the table the answer is unknown and the note says so.
+    for (label, sql) in [
+        ("no --schema", "alter table orders drop user_id;"),
+        (
+            "a lost table",
+            "alter table orders convert to character set utf8mb4;
+             alter table orders drop user_id;",
+        ),
+    ] {
+        let (json, code) = b1b_json(&[], sql);
+        let last = statements_of(&json, 0).len() - 1;
+        let statement = b1b_statement(&json, last);
+        assert_eq!(statement["impact"], "unknown", "{label}");
+        assert!(
+            notes_of(&statement)
+                .iter()
+                .any(|note| note.contains("1828")),
+            "{label}: {statement}"
+        );
+        assert_eq!(code, Some(0), "{label}");
+        let text = stdout(&kilit(&["check"], sql));
+        assert!(text.contains("1828"), "{label}: {text}");
+    }
+    // The known table decides: 1828.
+    let sql = "alter table orders drop user_id;";
+    let (json, code) = b1b_json_against(&b1c_foreign_key_dump(), &[], sql);
+    assert_eq!(b1b_statement(&json, 0)["impact"], "fails");
+    assert_eq!(b1b_statement(&json, 0)["error"], 1828);
+    assert_eq!(code, Some(1));
+}
+
+#[test]
+fn a_failure_from_the_statement_alone_still_fails_without_the_table_and_exits_with_1() {
+    // 1674 and 1101 do not depend on the table.
+    for (sql, error) in [
+        (
+            "alter table orders add token char(36) not null default (uuid());",
+            1674,
+        ),
+        ("alter table orders add a text not null default '';", 1101),
+        ("alter table orders modify note text null default '';", 1101),
+    ] {
+        for strict in [&[][..], &["--strict"][..]] {
+            let (json, code) = b1b_json(strict, sql);
+            let statement = b1b_statement(&json, 0);
+            assert_eq!(statement["impact"], "fails", "{sql}");
+            assert_eq!(statement["error"], error, "{sql}");
+            assert_eq!(code, Some(1), "{sql}");
+        }
+    }
+}
+
+#[test]
+fn the_text_header_counts_the_statements_on_tables_kilit_does_not_know() {
+    let sql = "alter table coupons add a int null;
+               alter table coupons add b int null;
+               alter table invoices add c int null;
+               create table fresh (id bigint unsigned not null auto_increment primary key);
+               alter table fresh add d int null;";
+    let text = stdout(&kilit(&["check"], sql));
+    // Two lines: the count, then how to give kilit the tables.
+    let counts: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("no --schema given:"))
+        .collect();
+    assert_eq!(counts.len(), 1, "{text}");
+    // The three on coupons and invoices; the one on `fresh` is not counted.
+    assert!(
+        counts[0]
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| word == "3"),
+        "{}",
+        counts[0]
+    );
+    let how: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("php artisan schema:dump"))
+        .collect();
+    assert_eq!(how.len(), 1, "{text}");
+    assert!(how[0].contains("--schema"), "{}", how[0]);
+    assert!(how[0].contains("mysqldump --no-data"), "{}", how[0]);
+}
+
+#[test]
+fn the_text_header_is_one_line_without_a_dump_hint_when_the_input_only_has_the_tables_it_creates() {
+    // With a schema file there is no such line. Without one, and with no
+    // statement on a table kilit does not know, the header is one line without
+    // the hint on how to get a dump.
+    let dump = b1b_dump();
+    let text = stdout(&kilit(
+        &["check", "--schema", dump.to_str().unwrap()],
+        "alter table orders add c int null;",
+    ));
+    assert!(!text.contains("no --schema given"), "{text}");
+    assert!(!text.contains("php artisan schema:dump"), "{text}");
+    assert!(!text.contains("mysqldump --no-data"), "{text}");
+    let text = stdout(&kilit(
+        &["check"],
+        "create table fresh (id bigint unsigned not null auto_increment primary key);
+         alter table fresh add d int null;",
+    ));
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("no --schema given:"))
+        .collect();
+    assert_eq!(
+        lines,
+        ["no --schema given: kilit knows only the tables these statements create"],
+        "{text}"
+    );
+    assert!(!text.contains("php artisan schema:dump"), "{text}");
+    assert!(!text.contains("mysqldump --no-data"), "{text}");
+}
+
+#[test]
+fn a_table_missing_from_the_schema_file_stays_unknown_as_before() {
+    // Regression: the dump says the table is not there.
+    let dump = b1b_dump();
+    let sql = "alter table coupons add code varchar(20) null;
+               alter table coupons add token char(36) not null default (uuid());";
+    let (json, code) = b1b_json_against(&dump, &[], sql);
+    assert_eq!(impacts_of(&json), ["unknown", "unknown"]);
+    assert!(b1c_reason(&json, 0).contains("the dump may be out of date"));
+    assert_eq!(code, Some(0));
+    assert_eq!(b1b_json_against(&dump, &["--strict"], sql).1, Some(3));
+}
+
+#[test]
+fn json_names_the_table_and_its_state_for_each_statement() {
+    // `table` as written (or null) and `table_state` (known,
+    // created, lost, unseen, or null). Still format_version 1.1.
+    let dump = b1b_dump();
+    let sql = "set foreign_key_checks = 0;
+               alter table orders add c int null;
+               alter table orders convert to character set utf8mb4;
+               alter table orders add d int null;
+               alter table coupons add e int null;
+               create table fresh (id bigint unsigned not null auto_increment primary key);
+               alter table fresh add f int null;";
+    let (json, _) = b1b_json_against(&dump, &[], sql);
+    assert_eq!(json["format_version"], "1.1");
+    let statements = statements_of(&json, 0);
+    let expected: [(Option<&str>, Option<&str>); 7] = [
+        (None, None),
+        (Some("orders"), Some("known")),
+        (Some("orders"), Some("known")),
+        (Some("orders"), Some("lost")),
+        (Some("coupons"), Some("unseen")),
+        // The CREATE itself is not asserted: see below.
+        (Some("fresh"), Some("created")),
+        (Some("fresh"), Some("created")),
+    ];
+    for (n, (table, state)) in expected.iter().enumerate() {
+        if n == 5 {
+            // create table fresh: it names its table.
+            assert_eq!(statements[n]["table"], "fresh");
+            continue;
+        }
+        let statement = &statements[n];
+        match table {
+            Some(table) => assert_eq!(statement["table"], *table, "{n}: {statement}"),
+            None => assert!(statement["table"].is_null(), "{n}: {statement}"),
+        }
+        match state {
+            Some(state) => assert_eq!(statement["table_state"], *state, "{n}: {statement}"),
+            None => assert!(statement["table_state"].is_null(), "{n}: {statement}"),
+        }
+    }
+}
+
+#[test]
+fn dropping_or_altering_a_check_the_table_does_not_have_is_unknown_and_exits_with_0_or_3() {
+    // By hand on MySQL 8.0.46 and 8.4.13: 3821 for DROP CHECK and ALTER CHECK,
+    // 3940 for DROP CONSTRAINT and ALTER CONSTRAINT; the lab has them as
+    // drop-check-missing, alter-check-missing, drop-constraint-missing and
+    // alter-constraint-missing.
+    let dump = b1b_dump();
+    for (sql, error, scenario) in [
+        (
+            "alter table orders drop check nosuch;",
+            "3821",
+            "drop-check-missing",
+        ),
+        (
+            "alter table orders alter check nosuch enforced;",
+            "3821",
+            "alter-check-missing",
+        ),
+        (
+            "alter table orders drop constraint nosuch;",
+            "3940",
+            "drop-constraint-missing",
+        ),
+        (
+            "alter table orders alter constraint nosuch not enforced;",
+            "3940",
+            "alter-constraint-missing",
+        ),
+    ] {
+        let (json, code) = b1b_json_against(&dump, &[], sql);
+        let reason = b1c_reason(&json, 0);
+        assert!(reason.contains(error), "{sql}: {reason}");
+        assert!(reason.contains(scenario), "{sql}: {reason}");
+        assert!(
+            b1b_statement(&json, 0).get("error").is_none(),
+            "{sql}: never `fails` from the schema alone"
+        );
+        assert_eq!(code, Some(0), "{sql}");
+        assert_eq!(
+            b1b_json_against(&dump, &["--strict"], sql).1,
+            Some(3),
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn the_table_stays_known_after_a_check_it_does_not_have_is_dropped() {
+    // The next statement gets the FULLTEXT table's answer: a copy.
+    let dump = b1c_fulltext_dump();
+    let (json, code) = b1b_json_against(
+        &dump,
+        &[],
+        "alter table orders drop check nosuch;
+         alter table orders add c int null;",
+    );
+    assert_eq!(impacts_of(&json), ["unknown", "writes_wait"]);
+    assert_eq!(b1b_statement(&json, 1)["algorithm"], "COPY");
+    assert_eq!(code, Some(1));
+}
+
+#[test]
+fn the_five_statements_kilit_follows_keep_the_table_known_in_json() {
+    // Each is unknown itself; the next ADD COLUMN gets the
+    // FULLTEXT table's answer, a copy, so the table was not lost.
+    let dump = b1c_fulltext_dump();
+    for statement in [
+        "alter table orders auto_increment = 100",
+        "alter table orders alter column amount drop default",
+        "alter table orders rename index ix_amount to ix_total",
+        "alter table orders rename key ix_amount to ix_total",
+        "create fulltext index ft_extra on orders (note)",
+        "alter table orders engine = 'InnoDB'",
+    ] {
+        let sql = format!("{statement};\nalter table orders add c int null;");
+        let (json, code) = b1b_json_against(&dump, &[], &sql);
+        assert_eq!(impacts_of(&json), ["unknown", "writes_wait"], "{statement}");
+        assert_eq!(b1b_statement(&json, 1)["algorithm"], "COPY", "{statement}");
+        assert_eq!(code, Some(1), "{statement}");
+    }
+}
+
+#[test]
+fn a_rename_index_mysql_refuses_names_its_error_and_leaves_the_table_as_it_was() {
+    // By hand on MySQL 8.0.46 and 8.4.13: 1176 (no such index), 1061 (the name
+    // is taken), 1280 (PRIMARY).
+    let dump = b1c_fulltext_dump();
+    for (statement, error) in [
+        ("alter table orders rename index nosuch to ix_total", "1176"),
+        (
+            "alter table orders rename index ix_amount to ft_note",
+            "1061",
+        ),
+        (
+            "alter table orders rename index ix_amount to `PRIMARY`",
+            "1280",
+        ),
+    ] {
+        let sql = format!("{statement};\nalter table orders drop index ix_amount;");
+        let (json, _) = b1b_json_against(&dump, &[], &sql);
+        let reason = b1c_reason(&json, 0);
+        assert!(reason.contains(error), "{statement}: {reason}");
+        // The index keeps its name, so dropping it is the lab's answer.
+        assert_eq!(
+            b1b_statement(&json, 1)["impact"],
+            "writes_continue",
+            "{statement}"
+        );
+    }
+}
+
+#[test]
+fn a_qualified_name_whose_table_part_kilit_has_is_unknown_with_both_spellings() {
+    // With and without a schema file.
+    let dump = b1b_dump();
+    let sql = "alter table shop.orders add c int null;";
+    let (json, code) = b1b_json_against(&dump, &[], sql);
+    let reason = b1c_reason(&json, 0);
+    assert!(reason.contains("shop.orders"), "{reason}");
+    assert!(reason.matches("orders").count() >= 2, "{reason}");
+    assert!(!reason.contains("which database"), "{reason}");
+    assert_eq!(code, Some(0));
+    let (json, code) = b1b_json(
+        &[],
+        "create table orders (id bigint unsigned not null auto_increment primary key);
+         alter table shop.orders add c int null;",
+    );
+    let reason = b1c_reason(&json, 1);
+    assert!(reason.contains("shop.orders"), "{reason}");
+    assert!(!reason.contains("which database"), "{reason}");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn a_table_dropped_in_an_earlier_file_is_named_with_the_file_as_given() {
+    // Small fix c: "the statement on line 1 of sub/first.sql", not "of an
+    // earlier input file".
+    let dir = github_scratch("b1c-earlier-file");
+    let dump = github_write(
+        &dir,
+        "dump.sql",
+        "CREATE TABLE `orders` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, PRIMARY KEY (`id`)) \
+         ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n",
+    );
+    github_write(&dir, "sub/first.sql", "drop table orders;\n");
+    github_write(
+        &dir,
+        "sub/second.sql",
+        "alter table orders add c int null;\n",
+    );
+    let output = kilit_at(
+        &dir,
+        None,
+        &[
+            "check",
+            "--format",
+            "json",
+            "--schema",
+            dump.to_str().unwrap(),
+            "sub/first.sql",
+            "sub/second.sql",
+        ],
+        "",
+    );
+    let json = json_of(&output);
+    let reason = statements_of(&json, 1)[0]["reason"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(reason.contains("line 1 of sub/first.sql"), "{reason}");
+    assert!(!reason.contains("an earlier input file"), "{reason}");
+}
+
+#[test]
+fn a_foreign_key_column_of_a_length_kilit_cannot_count_is_unknown_and_kilit_does_not_panic() {
+    // It panicked in a debug build and said "fails with error 6125" in a
+    // release build.
+    let dump = b1b_dump();
+    let sql = "alter table users add unique index uq_name (name);
+               alter table orders add big varchar(4611686018427387904) null;
+               alter table orders add constraint fk_big foreign key (big) references users (name);";
+    let args = ["check", "--schema", dump.to_str().unwrap()];
+    let output = kilit(&args, sql);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(!stderr(&output).contains("panicked"), "{}", stderr(&output));
+    let (json, _) = b1b_json_against(&dump, &[], sql);
+    assert_eq!(b1b_statement(&json, 2)["impact"], "unknown");
+    assert!(
+        b1c_reason(&json, 1).contains("more bytes than kilit can count"),
+        "{json}"
+    );
+}
+
+#[test]
+fn the_documented_ci_commands_run_kilit_with_strict() {
+    // Answers on tables kilit does not know are unknown, and the default exit
+    // status does not count unknown.
+    for file in ["README.md", "docs/github-action.md"] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(file);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let runs: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains("run:") && line.contains("kilit check"))
+            .collect();
+        assert!(!runs.is_empty(), "{file} has no CI step that runs kilit");
+        for line in runs {
+            assert!(line.contains("--strict"), "{file}: {line}");
+        }
+    }
+}
+
+#[test]
+fn drops_renames_and_inserts_leave_the_header_of_a_run_without_a_schema_at_the_tables_the_input_creates()
+ {
+    // DROP TABLE, RENAME TABLE and INSERT name tables, but kilit checks no
+    // answer for them that a table could change: the count is 0.
+    let sql = "DROP TABLE a, b;
+               RENAME TABLE c TO d, e TO f;
+               INSERT INTO g VALUES (1);";
+    let text = stdout(&kilit(&["check"], sql));
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("no --schema given:"))
+        .collect();
+    assert_eq!(
+        lines,
+        ["no --schema given: kilit knows only the tables these statements create"],
+        "{text}"
+    );
+    assert!(!text.contains("php artisan schema:dump"), "{text}");
+}
+
+// ---------------------------------------------------------------------------
+// What every table it may be shares, and the VARCHAR that MySQL may change.
+//
+// The expectations come from the lab's matrix (every measured answer for
+// ADD FULLTEXT INDEX makes writes wait, or fails when ALGORITHM=INSTANT is
+// forced), from hand tests on MySQL 8.0.46 and 8.4.13 (VARCHAR(70000) is 1074
+// in strict mode and MEDIUMTEXT otherwise) and from the owner's rules.
+
+#[test]
+fn a_fulltext_index_without_a_schema_makes_writes_wait_in_json_and_exits_with_1() {
+    // $table->fullText('note');
+    let sql = "alter table `orders` add fulltext `orders_note_fulltext`(`note`);";
+    for strict in [&[][..], &["--strict"][..]] {
+        let (json, code) = b1b_json(strict, sql);
+        let statement = b1b_statement(&json, 0);
+        assert_eq!(statement["impact"], "writes_wait", "{strict:?}");
+        assert_eq!(statement["case"], "add-fulltext-index", "{strict:?}");
+        assert_eq!(statement["writes"], "blocked", "{strict:?}");
+        assert!(
+            !statement["evidence"].as_array().unwrap().is_empty(),
+            "{statement}"
+        );
+        assert!(
+            !statement["notes"].as_array().unwrap().is_empty(),
+            "{statement}"
+        );
+        assert!(
+            statement["reason"].as_str().unwrap().contains("orders"),
+            "{statement}"
+        );
+        // The algorithm and the rebuild depend on the table: kilit gives none.
+        for key in ["algorithm", "rebuilds_table", "copies_rows", "error"] {
+            assert!(statement.get(key).is_none(), "{key}: {statement}");
+        }
+        assert_eq!(json["summary"]["writes_wait"], 1, "{strict:?}");
+        assert_eq!(json["summary"]["unknown"], 0, "{strict:?}");
+        assert_eq!(json["exit_code"], 1, "{strict:?}");
+        assert_eq!(code, Some(1), "{strict:?}");
+    }
+}
+
+#[test]
+fn a_fulltext_index_without_a_schema_says_in_text_that_the_algorithm_depends_on_the_table() {
+    let output = kilit(
+        &["check"],
+        "alter table `orders` add fulltext `orders_note_fulltext`(`note`);",
+    );
+    let text = stdout(&output);
+    assert!(
+        text.contains(
+            "alter table `orders` add fulltext `orders_note_fulltext`(`note`)\n    \
+             writes wait; the algorithm and the rebuild depend on the table\n"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("\n    - if the table is MyISAM"), "{text}");
+    assert_eq!(output.status.code(), Some(1), "{text}");
+}
+
+#[test]
+fn a_fulltext_index_that_forces_instant_without_a_schema_fails_in_json_and_text() {
+    // $table->fullText('note') with ALGORITHM=INSTANT added by hand: every
+    // table it may be refuses it (1845 or 1846).
+    let sql = "alter table `orders` add fulltext `ft_note`(`note`), algorithm=instant;";
+    for strict in [&[][..], &["--strict"][..]] {
+        let (json, code) = b1b_json(strict, sql);
+        let statement = b1b_statement(&json, 0);
+        assert_eq!(statement["impact"], "fails", "{strict:?}");
+        assert!(statement.get("error").is_none(), "{statement}");
+        assert!(statement.get("algorithm").is_none(), "{statement}");
+        assert!(statement.get("writes").is_none(), "{statement}");
+        assert_eq!(json["summary"]["fails"], 1, "{strict:?}");
+        assert_eq!(code, Some(1), "{strict:?}");
+    }
+    let text = stdout(&kilit(&["check"], sql));
+    assert!(
+        text.contains("    fails; the error depends on the table\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_column_an_index_or_a_foreign_key_without_a_schema_stays_unknown_with_exit_0() {
+    // $table->string('coupon')->nullable(); $table->index('amount');
+    // $table->foreign('user_id')->references('id')->on('users');
+    for sql in [
+        "alter table `orders` add `coupon` varchar(255) null;",
+        "alter table `orders` add index `orders_amount_index`(`amount`);",
+        "alter table `orders` add constraint `orders_user_id_foreign` foreign key (`user_id`) \
+         references `users` (`id`);",
+    ] {
+        let (json, code) = b1b_json(&[], sql);
+        assert_eq!(b1b_statement(&json, 0)["impact"], "unknown", "{sql}");
+        assert_eq!(json["exit_code"], 0, "{sql}");
+        assert_eq!(code, Some(0), "{sql}");
+        // --strict counts unknown: exit 3, the only counted findings.
+        let (_, code) = b1b_json(&["--strict"], sql);
+        assert_eq!(code, Some(3), "{sql}");
+    }
+}
+
+#[test]
+fn a_fulltext_index_on_a_table_the_dump_lacks_is_unknown_with_exit_0() {
+    let dump = write_schema(
+        "b1c_unrelated_dump.sql",
+        "CREATE TABLE `tags` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, \
+         PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n",
+    );
+    let sql = "alter table `orders` add fulltext `orders_note_fulltext`(`note`);";
+    let (json, code) = b1b_json_against(&dump, &[], sql);
+    assert_eq!(b1b_statement(&json, 0)["impact"], "unknown");
+    assert_eq!(code, Some(0));
+    let (_, code) = b1b_json_against(&dump, &["--strict"], sql);
+    assert_eq!(code, Some(3));
+}
+
+#[test]
+fn a_fulltext_index_on_a_known_table_keeps_its_measured_answer_and_exit_status() {
+    // Regression: add-fulltext-index on the dump's InnoDB table, INPLACE with
+    // a rebuild, writes wait, the algorithm given.
+    let dump = b1b_dump();
+    let sql = "alter table `orders` add fulltext `orders_note_fulltext`(`note`);";
+    let (json, code) = b1b_json_against(&dump, &[], sql);
+    let statement = b1b_statement(&json, 0);
+    assert_eq!(statement["impact"], "writes_wait");
+    assert_eq!(statement["algorithm"], "INPLACE");
+    assert_eq!(statement["rebuilds_table"], true);
+    assert_eq!(code, Some(1));
+}
+
+/// The two statements that MySQL turns into MEDIUMTEXT when it is not strict,
+/// then a new column.
+const WIDE_VARCHAR_THEN_COLUMN: [&str; 2] = [
+    "alter table `orders` add `big` varchar(70000) null;\nalter table `orders` add `c` int null;",
+    "alter table `orders` add `big` varbinary(70000) null;\nalter table `orders` add `c` int null;",
+];
+
+#[test]
+fn a_varchar_or_varbinary_past_what_a_row_holds_loses_the_table_when_the_input_sets_no_strict_mode()
+{
+    let dump = b1b_dump();
+    for sql in WIDE_VARCHAR_THEN_COLUMN {
+        let (json, _) = b1b_json_against(&dump, &[], sql);
+        assert_eq!(impacts_of(&json), ["unknown", "unknown"], "{sql}");
+        assert!(
+            b1c_reason(&json, 1).contains("kilit lost track of"),
+            "{sql}: {json}"
+        );
+    }
+}
+
+#[test]
+fn a_strict_set_in_the_same_file_keeps_the_table_after_a_varchar_past_what_a_row_holds() {
+    // 1074 in strict mode: the table is as it was, so the new column gets its
+    // measured answer (INSTANT, writes continue).
+    let dump = b1b_dump();
+    for set in ["STRICT_TRANS_TABLES", "STRICT_ALL_TABLES"] {
+        for sql in WIDE_VARCHAR_THEN_COLUMN {
+            let sql = format!("set sql_mode = '{set}';\n{sql}");
+            let (json, _) = b1b_json_against(&dump, &[], &sql);
+            assert_eq!(
+                impacts_of(&json),
+                ["not_checked", "unknown", "writes_continue"],
+                "{sql}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_strict_set_in_an_earlier_file_does_not_count_for_the_next_file() {
+    // Each input file is a session of its own.
+    let dump = b1b_dump();
+    let first = write_schema(
+        "b1c_strict_first.sql",
+        "set sql_mode = 'STRICT_TRANS_TABLES';\n",
+    );
+    for sql in WIDE_VARCHAR_THEN_COLUMN {
+        let second = write_schema("b1c_strict_second.sql", sql);
+        let output = kilit(
+            &[
+                "check",
+                "--format",
+                "json",
+                "--schema",
+                dump.to_str().unwrap(),
+                first.to_str().unwrap(),
+                second.to_str().unwrap(),
+            ],
+            "",
+        );
+        let json = json_of(&output);
+        let statements = statements_of(&json, 1);
+        assert_eq!(statements[0]["impact"], "unknown", "{sql}");
+        assert_eq!(statements[1]["impact"], "unknown", "{sql}");
+        assert!(
+            statements[1]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("kilit lost track of"),
+            "{sql}: {json}"
+        );
+    }
+}
+
+#[test]
+fn a_char_or_binary_past_255_keeps_the_table_when_the_input_sets_no_strict_mode() {
+    // 1074 in every sql_mode, by hand: the table is as it was.
+    let dump = b1b_dump();
+    for column in ["char(300)", "binary(300)"] {
+        let sql = format!(
+            "alter table `orders` add `big` {column} null;\nalter table `orders` add `c` int null;"
+        );
+        let (json, _) = b1b_json_against(&dump, &[], &sql);
+        assert_eq!(impacts_of(&json), ["unknown", "writes_continue"], "{sql}");
+    }
+}
+
+#[test]
+fn dropping_an_index_of_a_table_kilit_does_not_know_is_unknown_in_json_and_exits_0_or_3() {
+    // Without --schema the table is missing; DROP INDEX has shapes the lab has
+    // not measured (by hand, ALGORITHM=INSTANT is 1846 or 1845 for some), so
+    // every variant is unknown, with and without --strict.
+    // $table->dropIndex('orders_amount_index');
+    for clause in ["", ", algorithm=instant", ", algorithm=inplace, lock=none"] {
+        let sql = format!("alter table `orders` drop index `orders_amount_index`{clause};");
+        for strict in [false, true] {
+            let mut args = vec!["check", "--format", "json"];
+            if strict {
+                args.push("--strict");
+            }
+            let output = kilit(&args, &sql);
+            let json = json_of(&output);
+            let statement = &statements_of(&json, 0)[0];
+            assert_eq!(statement["impact"], "unknown", "{clause}");
+            // Unknown makes only --strict exit, with 3.
+            let code = if strict { 3 } else { 0 };
+            assert_eq!(output.status.code(), Some(code), "{clause} strict={strict}");
+            assert_eq!(json["exit_code"], code, "{clause} strict={strict}");
+        }
+    }
 }

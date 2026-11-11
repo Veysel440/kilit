@@ -1,0 +1,3 @@
+title = "Drop a FULLTEXT index"
+setup = ["ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)"]
+operation = "DROP INDEX ft_orders_note"

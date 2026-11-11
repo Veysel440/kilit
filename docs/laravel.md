@@ -40,8 +40,18 @@ tables and exits 0. Load production's schema dump into the database with the
 creates the `migrations` table when the database has none, so do not point it
 at a database you do not want to touch.
 
-Without `--schema`, kilit still answers everything that does not depend on the
-table, and says so where it does.
+Run `php artisan schema:dump` first and pass the file. Without `--schema`,
+kilit does not know the tables the migration does not create. A change that
+the table could make heavier, such as an index on a table that may have a
+FULLTEXT index, is `UNKNOWN`, with the answer the lab measured on a plain
+InnoDB table as the likely one. Adding a FULLTEXT index is the exception: it
+makes writes wait on every table it may be, so kilit says so and exits 1. The
+report says so once at the top, with the
+number of statements it concerns. Tables the migrations create stay known,
+and a `CREATE TABLE IF NOT EXISTS` of a table kilit does not hold loses it,
+because MySQL keeps an existing table of that name and kilit cannot tell which
+definition stands. In a pipeline use `--strict`, so that an `UNKNOWN` stops
+the step (see [the exit status](../README.md#in-ci)).
 
 With `--format github`, an annotation points at
 `database/migrations/<name>.php`, line 1, only when that file exists under the

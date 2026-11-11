@@ -6,9 +6,10 @@ use std::path::{Component, Path, PathBuf};
 
 use clap::ValueEnum;
 use kilit_core::{
-    Algorithm, Impact, PRETEND_READ_NOTE, Prediction, Schema, ServerResults, Statement,
-    StatementKind, UnreadableLine, Verdict, Writes, check_sessions, depends_on_rows, impacts,
-    locked_tables as locked_tables_of, metadata_lock_warning, on_empty_tables, only_reads,
+    Algorithm, Impact, PRETEND_READ_NOTE, Prediction, Schema, ServerResults, Shared, Statement,
+    StatementKind, TableSeen, UnreadableLine, Verdict, Writes, check_files, depends_on_rows,
+    impacts, locked_tables as locked_tables_of, metadata_lock_warning, on_empty_tables,
+    on_new_tables, only_reads, table_of,
 };
 use serde::Serialize;
 
@@ -60,6 +61,10 @@ pub struct Report<'a> {
     /// Tables that may exist before the migration and that an ALTER, DROP
     /// TABLE, RENAME TABLE or TRUNCATE TABLE waits for.
     locked_tables: Vec<String>,
+    /// How many statements, but for CREATE TABLE, are on a table kilit
+    /// does not know: one no `--schema` and no statement before shows, or
+    /// one it lost track of.
+    on_unknown_tables: usize,
 }
 
 struct SchemaSummary {
@@ -80,6 +85,11 @@ struct SourceReport<'a> {
 
 struct Checked<'a> {
     statement: &'a Statement,
+    /// The table the statement is on, as written, when it names one.
+    table: Option<&'a str>,
+    /// What kilit knew of that table right before the statement: `known`,
+    /// `created` (by an earlier statement), `lost` or `unseen`.
+    table_state: Option<&'static str>,
     prediction: Prediction,
     impact: Impact,
     /// The statement changes a table that the input created earlier and
@@ -134,6 +144,10 @@ impl<'a> Report<'a> {
             }
         }
         let mut rest = statements.as_slice();
+        let file_names: Vec<&str> = lengths
+            .iter()
+            .map(|(session, _)| input.session_names[*session].as_str())
+            .collect();
         let sessions: Vec<&[Statement]> = lengths
             .into_iter()
             .map(|(_, len)| {
@@ -142,7 +156,7 @@ impl<'a> Report<'a> {
                 session
             })
             .collect();
-        let findings = check_sessions(&sessions, tables, results);
+        let findings = check_files(&sessions, &file_names, tables, results);
         let impacts = impacts(&statements, &findings);
         let mut others_said: Vec<Vec<OtherServer>> = vec![Vec::new(); statements.len()];
         // When no answer used a result or a rule that differs between the
@@ -150,7 +164,7 @@ impl<'a> Report<'a> {
         let server_dependent = findings.iter().any(|finding| finding.server_dependent);
         if server_dependent {
             for other in others {
-                let theirs = check_sessions(&sessions, tables, other);
+                let theirs = check_files(&sessions, &file_names, tables, other);
                 let their_impacts = kilit_core::impacts(&statements, &theirs);
                 for (at, (finding, impact)) in theirs.iter().zip(their_impacts).enumerate() {
                     if (impact, Shown::of(&finding.prediction))
@@ -182,6 +196,31 @@ impl<'a> Report<'a> {
             .map(|on_empty_table| on_empty_table && !rows_unseen);
 
         let locked_in_order = locked_tables_of(&statements, &findings);
+        let on_new_tables = on_new_tables(&statements, &findings);
+        // Statements on tables kilit does not know, but for a CREATE TABLE.
+        let unseen = findings
+            .iter()
+            .zip(&statements)
+            .filter(|(finding, statement)| {
+                matches!(
+                    finding.table_state,
+                    Some(TableSeen::Unseen | TableSeen::Lost)
+                ) && !matches!(statement.kind, StatementKind::CreateTable { .. })
+            })
+            .count();
+        let table_states: Vec<Option<&'static str>> = findings
+            .iter()
+            .zip(on_new_tables)
+            .map(|(finding, on_new_table)| {
+                finding.table_state.map(|state| match state {
+                    TableSeen::Known if on_new_table => "created",
+                    TableSeen::Known => "known",
+                    TableSeen::Lost => "lost",
+                    TableSeen::Unseen => "unseen",
+                })
+            })
+            .collect();
+        let mut table_states = table_states.into_iter();
         let mut checked = findings
             .into_iter()
             .zip(impacts)
@@ -203,8 +242,13 @@ impl<'a> Report<'a> {
                         let (((finding, impact), on_empty_table), others) = checked
                             .next()
                             .expect("check gives one finding per statement");
+                        let table_state = table_states
+                            .next()
+                            .expect("check gives one finding per statement");
                         Checked {
                             statement,
+                            table: table_of(statement),
+                            table_state,
                             prediction: finding.prediction,
                             impact,
                             on_empty_table,
@@ -252,6 +296,7 @@ impl<'a> Report<'a> {
                 .collect(),
             several_inputs: input.inputs() > 1,
             locked_tables,
+            on_unknown_tables: unseen,
         }
     }
 
@@ -329,10 +374,28 @@ impl<'a> Report<'a> {
                     writeln!(out, "  {warning}")?;
                 }
             }
-            None => writeln!(
+            None if self.on_unknown_tables == 0 => writeln!(
                 out,
-                "no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE"
+                "no --schema given: kilit knows only the tables these statements create"
             )?,
+            None => {
+                let count = self.on_unknown_tables;
+                let (statements, get) = if count == 1 {
+                    ("statement", "gets")
+                } else {
+                    ("statements", "get")
+                };
+                writeln!(
+                    out,
+                    "no --schema given: {count} {statements} on tables kilit does not know {get} \
+                     no answer the table could change"
+                )?;
+                writeln!(
+                    out,
+                    "  give kilit the tables with --schema: php artisan schema:dump, or \
+                     mysqldump --no-data"
+                )?;
+            }
         }
 
         for source in &self.sources {
@@ -870,7 +933,15 @@ impl std::fmt::Display for AnswerLine<'_> {
                 ..
             } => write!(f, "fails with error {code}"),
             Prediction::Measured { verdict, .. } => write!(f, "{verdict}"),
-            Prediction::Unknown { reason } => {
+            Prediction::DependsOnTable {
+                shared: Shared::WritesWait,
+                ..
+            } => f.write_str("writes wait; the algorithm and the rebuild depend on the table"),
+            Prediction::DependsOnTable {
+                shared: Shared::Fails,
+                ..
+            } => f.write_str("fails; the error depends on the table"),
+            Prediction::Unknown { reason, .. } => {
                 write!(f, "UNKNOWN: {}", reason.lines().next().unwrap_or_default())
             }
             Prediction::NotChecked { reason } => write!(f, "not checked: {reason}"),
@@ -901,6 +972,7 @@ enum Shown {
         copies_rows: bool,
         writes: Writes,
     },
+    DependsOnTable(Shared),
     Unknown,
     NotChecked,
 }
@@ -928,6 +1000,7 @@ impl Shown {
                 copies_rows: copied_rows.is_some_and(|rows| rows > 0),
                 writes: *writes,
             },
+            Prediction::DependsOnTable { shared, .. } => Shown::DependsOnTable(*shared),
             Prediction::Unknown { .. } => Shown::Unknown,
             Prediction::NotChecked { .. } => Shown::NotChecked,
         }
@@ -952,7 +1025,7 @@ fn same_everywhere(
     let said: Vec<(Vec<kilit_core::Finding>, Vec<Impact>)> = all
         .iter()
         .map(|server| {
-            let findings = check_sessions(sessions, tables, server);
+            let findings = check_files(sessions, &[], tables, server);
             let impacts = impacts(statements, &findings);
             (findings, impacts)
         })
@@ -1004,10 +1077,23 @@ fn write_prediction(out: &mut String, checked: &Checked) -> std::fmt::Result {
                 writeln!(out, "    - {note}")?;
             }
         }
-        Prediction::Unknown { reason } => {
+        Prediction::DependsOnTable { reason, notes, .. } => {
+            writeln!(out, "    {}", AnswerLine(&checked.prediction))?;
+            writeln!(out, "    {reason}")?;
+            for note in notes
+                .iter()
+                .filter(|note| !(checked.on_empty_table && depends_on_rows(note)))
+            {
+                writeln!(out, "    - {note}")?;
+            }
+        }
+        Prediction::Unknown { reason, notes } => {
             writeln!(out, "    {}", AnswerLine(&checked.prediction))?;
             for line in reason.lines().skip(1) {
                 writeln!(out, "      {line}")?;
+            }
+            for note in notes {
+                writeln!(out, "    - {note}")?;
             }
         }
         Prediction::NotChecked { .. } => {
@@ -1163,6 +1249,10 @@ struct JsonSource<'a> {
 struct JsonStatement<'a> {
     line: usize,
     sql: &'a str,
+    /// The table the statement is on, as written, or null.
+    table: Option<&'a str>,
+    /// `known`, `created`, `lost`, `unseen`, or null.
+    table_state: Option<&'static str>,
     impact: Impact,
     #[serde(skip_serializing_if = "Option::is_none")]
     case: Option<&'static str>,
@@ -1198,6 +1288,8 @@ impl<'a> From<&'a Checked<'a>> for JsonStatement<'a> {
         let mut json = JsonStatement {
             line: checked.statement.line,
             sql: &checked.statement.sql,
+            table: checked.table,
+            table_state: checked.table_state,
             impact: checked.impact,
             case: None,
             algorithm: None,
@@ -1244,7 +1336,26 @@ impl<'a> From<&'a Checked<'a>> for JsonStatement<'a> {
                     Verdict::Fails { code, .. } => json.error = Some(*code),
                 }
             }
-            Prediction::Unknown { reason } | Prediction::NotChecked { reason } => {
+            Prediction::DependsOnTable {
+                case,
+                shared,
+                evidence,
+                reason,
+                notes,
+            } => {
+                json.case = Some(case);
+                json.evidence = evidence;
+                json.notes = notes.iter().map(String::as_str).collect();
+                json.reason = Some(reason);
+                if *shared == Shared::WritesWait {
+                    json.writes = Some(Writes::Blocked);
+                }
+            }
+            Prediction::Unknown { reason, notes } => {
+                json.reason = Some(reason);
+                json.notes = notes.iter().map(String::as_str).collect();
+            }
+            Prediction::NotChecked { reason } => {
                 json.reason = Some(reason);
             }
         }

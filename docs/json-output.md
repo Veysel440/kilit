@@ -15,9 +15,9 @@ The JSON is the one to parse.
 
 `format_version` is `"1.1"`, a string, and it is the first key. A minor
 increase adds fields: `"1.1"` added the `migration-output` warning and its
-keys `migration` and `lines`. A major increase (`"2.0"`) removes, renames or
-changes one. Ignore fields you do not know, and reject a major version you do
-not support.
+keys `migration` and `lines`, and the statement keys `table` and
+`table_state`. A major increase (`"2.0"`) removes, renames or changes one.
+Ignore fields you do not know, and reject a major version you do not support.
 
 ## Top level
 
@@ -49,9 +49,28 @@ The keys come in this order.
 Each entry of `sources` has `name`, `kind` (`laravel_migration` or `sql`) and
 `statements`.
 
-Each statement always has `line`, `sql` and `impact` (`fails`, `writes_wait`,
-`writes_continue`, `new_table`, `unknown` or `not_checked`). These keys come
-only when there is something to say, and are left out otherwise:
+Each statement always has `line`, `sql`, `table`, `table_state` and `impact`
+(`fails`, `writes_wait`, `writes_continue`, `new_table`, `unknown` or
+`not_checked`). `table` is the name of the table the statement works on, as
+written, or `null` for a statement that names none, such as a `SET`.
+`table_state` says what kilit knew of that table when it read the statement,
+or is `null` when `table` is:
+
+| `table_state` | Meaning |
+| --- | --- |
+| `known` | kilit has the table, from the `--schema` file or from earlier statements, and the answer takes its definition into account |
+| `created` | an earlier statement of the input created the table |
+| `lost` | kilit had the table and stopped trusting it, for a reason the `reason` of the statement or the `lost` list of the schema gives |
+| `unseen` | kilit has never seen the table: it is not in the dump, there is no dump, or the name is written another way than the table's |
+
+On a `lost` or `unseen` table, a change that the table could make heavier is
+`unknown`, with the likely answer in `reason`. When every table it may be
+gives the same result, the impact is `writes_wait` (or `fails`) instead, with
+`case`, `evidence` (the scenarios of the plain InnoDB case), `notes` (one per
+situation), `reason` and, for `writes_wait`, `writes` set to `blocked`; there
+is no `algorithm`, `rebuilds_table`, `copies_rows` or `error`, because the
+table decides them. Today this is `ADD FULLTEXT`. The other keys come only when
+there is something to say, and are left out otherwise:
 
 | Key | Holds |
 | --- | --- |
@@ -62,8 +81,8 @@ only when there is something to say, and are left out otherwise:
 | `writes` | `allowed`, `blocked` or `unknown` |
 | `error` | the MySQL error number, when the statement fails |
 | `evidence` | the lab scenarios behind the answer |
-| `notes` | what kilit worked out, and situations that change the answer |
-| `reason` | why the statement is unknown or not checked |
+| `notes` | what kilit worked out, and situations that change the answer; an `unknown` statement lists the measured situations that would change the likely answer |
+| `reason` | why the statement is unknown or not checked, or why kilit does not know the table behind a `writes_wait` or `fails` |
 | `other_servers` | where another measured server answers differently: `server`, `impact` and `answer`, the line the text report would print for that server |
 
 A statement whose impact is `unknown` may carry `case`, `algorithm`,
@@ -129,6 +148,8 @@ SQL
         {
           "line": 1,
           "sql": "alter table `orders` add `coupon` varchar(255) null",
+          "table": "orders",
+          "table_state": "known",
           "impact": "writes_continue",
           "case": "add-column",
           "algorithm": "INSTANT",
@@ -151,6 +172,8 @@ SQL
         {
           "line": 2,
           "sql": "alter table `orders` add index `orders_amount_index` (`amount`)",
+          "table": "orders",
+          "table_state": "known",
           "impact": "writes_continue",
           "case": "add-index",
           "algorithm": "INPLACE",

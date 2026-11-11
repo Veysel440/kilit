@@ -17,7 +17,7 @@ use sqlparser::ast::{
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
-use sqlparser::tokenizer::{Location, Token, Tokenizer};
+use sqlparser::tokenizer::{Location, Token, Tokenizer, Word};
 
 use crate::split::split;
 use crate::statement::{
@@ -62,12 +62,139 @@ fn read(sql: &str) -> StatementKind {
                     table: None,
                 };
             }
-            table_options_alter(sql).unwrap_or_else(|| StatementKind::Unparsed {
-                error: unreadable(parser_message(err)),
-                table: table_named_in(sql),
-            })
+            table_options_alter(sql)
+                .or_else(|| created_fulltext_index(sql))
+                .unwrap_or_else(|| StatementKind::Unparsed {
+                    error: unreadable(parser_message(err)),
+                    table: table_named_in(sql),
+                })
         }
     }
+}
+
+/// Whether `sql` is a `CREATE FULLTEXT INDEX`, which kilit reads as the
+/// `ALTER TABLE ... ADD FULLTEXT` MySQL runs for it: see
+/// [`created_fulltext_index`].
+pub(crate) fn creates_fulltext_index(sql: &str) -> bool {
+    if !may_begin_with(sql, &["create"]) {
+        return false;
+    }
+    // The first two words, unless a comment comes first or between them.
+    let mut plain = sql.split_whitespace();
+    if let (Some(first), Some(second)) = (plain.next(), plain.next())
+        && first.eq_ignore_ascii_case("create")
+        && !["/*", "--", "#"]
+            .iter()
+            .any(|comment| second.starts_with(comment))
+    {
+        return second.eq_ignore_ascii_case("fulltext");
+    }
+    let words = words(sql);
+    matches!(
+        [words.first(), words.get(1)].map(|word| word.map_or(Keyword::NoKeyword, keyword)),
+        [Keyword::CREATE, Keyword::FULLTEXT]
+    )
+}
+
+/// `CREATE FULLTEXT INDEX name ON table (column, ...)`, with `ALGORITHM` and
+/// `LOCK` after the columns if written, as the `ALTER TABLE ... ADD
+/// FULLTEXT` MySQL runs for it: by hand on MySQL 8.0.46 and 8.4.13, the two
+/// leave the same table. The parser cannot read it. `None` for any other
+/// form, such as a prefix, `WITH PARSER` or a comment MySQL runs (`/*!`).
+fn created_fulltext_index(sql: &str) -> Option<StatementKind> {
+    if sql.contains("/*!") || !creates_fulltext_index(sql) {
+        return None;
+    }
+    let words = words(sql);
+    let name = |token: &Token| match token {
+        Token::Word(word) => match word.quote_style {
+            Some('`') => Some(word.value.clone()),
+            Some(_) => None,
+            None if RESERVED
+                .binary_search(&word.value.to_ascii_uppercase().as_str())
+                .is_ok() =>
+            {
+                None
+            }
+            None => Some(word.value.clone()),
+        },
+        _ => None,
+    };
+    let [_, _, index_word, index_name, on, ..] = words.as_slice() else {
+        return None;
+    };
+    if keyword(index_word) != Keyword::INDEX || keyword(on) != Keyword::ON {
+        return None;
+    }
+    let index_name = name(index_name)?;
+    let (table, rest) = table_after(&words, Keyword::ON)?;
+    let [Token::LParen, after @ ..] = rest else {
+        return None;
+    };
+    let mut rest: &[Token] = after;
+    let mut columns = Vec::new();
+    loop {
+        let [column, after @ ..] = rest else {
+            return None;
+        };
+        columns.push(name(column)?);
+        match after {
+            [Token::Comma, next @ ..] => rest = next,
+            [Token::RParen, next @ ..] => {
+                rest = next;
+                break;
+            }
+            _ => return None,
+        }
+    }
+    let mut alter = Alter {
+        table,
+        ..Alter::default()
+    };
+    while let [Token::Word(word), after @ ..] = rest {
+        if word.quote_style.is_some() {
+            return None;
+        }
+        let (value, after) = match after {
+            [Token::Eq, Token::Word(value), after @ ..] | [Token::Word(value), after @ ..]
+                if value.quote_style.is_none() =>
+            {
+                (value.value.to_ascii_uppercase(), after)
+            }
+            _ => return None,
+        };
+        match word.value.to_ascii_uppercase().as_str() {
+            "ALGORITHM" => {
+                alter.algorithm = match value.as_str() {
+                    "DEFAULT" => None,
+                    "INSTANT" => Some(Algorithm::Instant),
+                    "INPLACE" => Some(Algorithm::Inplace),
+                    "COPY" => Some(Algorithm::Copy),
+                    _ => return None,
+                };
+            }
+            "LOCK" => {
+                alter.lock = match value.as_str() {
+                    "DEFAULT" => None,
+                    "NONE" => Some(Lock::None),
+                    "SHARED" => Some(Lock::Shared),
+                    "EXCLUSIVE" => Some(Lock::Exclusive),
+                    _ => return None,
+                };
+            }
+            _ => return None,
+        }
+        rest = after;
+    }
+    if !rest.is_empty() {
+        return None;
+    }
+    alter.operations.push(Operation::AddIndex(Index {
+        name: Some(index_name),
+        kind: IndexKind::Fulltext,
+        columns,
+    }));
+    Some(StatementKind::Alter(alter))
 }
 
 /// The table a `TRUNCATE TABLE` empties, in the form MySQL takes:
@@ -225,11 +352,13 @@ pub(crate) fn alters_named_table(sql: &str) -> bool {
 /// table options `COMMENT`, `ENGINE`, `ROW_FORMAT` and `KEY_BLOCK_SIZE`, as
 /// in `ALTER TABLE notes COMMENT = 'Notes'`, and the CHECK constraint
 /// clauses `DROP CHECK name`, `ALTER CHECK name [NOT] ENFORCED` and `ALTER
-/// CONSTRAINT name [NOT] ENFORCED`, with `ALGORITHM` and `LOCK` if written.
+/// CONSTRAINT name [NOT] ENFORCED`, and `RENAME {INDEX | KEY} a TO b`, with
+/// `ALGORITHM` and `LOCK` if written.
 /// The options come in any order, with or without `=`, between commas or
 /// spaces; the CHECK clauses, `ALGORITHM` and `LOCK` between commas, as
 /// MySQL takes them. `None` for anything else, and for forms kilit does not
-/// follow: a quoted `ENGINE`, `ROW_FORMAT` or `KEY_BLOCK_SIZE`, a `COMMENT`
+/// follow: a quoted `ROW_FORMAT` or `KEY_BLOCK_SIZE`, a quoted `ENGINE`
+/// other than `'InnoDB'`, a `COMMENT`
 /// that is not one quoted string, a comment MySQL runs (`/*! ... */`). A
 /// CHECK clause in a form MySQL 8.0.46 and 8.4.13 do not accept, run by hand
 /// on both, gives the reason, and no table changes: see [`check_clause`].
@@ -267,6 +396,16 @@ fn table_options_alter(sql: &str) -> Option<StatementKind> {
             return None;
         }
         let name = word.value.to_ascii_uppercase();
+        if !after_option && name == "RENAME" {
+            let (operation, after) = renamed_index(after)?;
+            alter.operations.push(operation);
+            rest = match after {
+                [] => &[],
+                [Token::Comma, next @ ..] if !next.is_empty() => next,
+                _ => return None,
+            };
+            continue;
+        }
         if !after_option && matches!(name.as_str(), "DROP" | "ALTER") {
             let (operation, after) = match check_clause(&name, after) {
                 CheckClause::Read(operation, after) => (operation, after),
@@ -328,6 +467,13 @@ fn table_options_alter(sql: &str) -> Option<StatementKind> {
             }
             ("ENGINE", Token::Word(engine)) if engine.quote_style.is_none_or(|q| q == '`') => {
                 options.engine = Some(Engine::named(&engine.value));
+            }
+            // By hand on MySQL 8.0.46 and 8.4.13, `ENGINE = 'InnoDB'` is the
+            // same as `ENGINE = InnoDB`; other quoted engines were not tried.
+            ("ENGINE", Token::SingleQuotedString(engine))
+                if engine.eq_ignore_ascii_case("InnoDB") =>
+            {
+                options.engine = Some(Engine::InnoDb);
             }
             ("ROW_FORMAT", Token::Word(format)) if format.quote_style.is_none() => {
                 options.row_format = Some(RowFormat::named(&format.value));
@@ -656,6 +802,46 @@ const RESERVED: [&str; 264] = [
     "YEAR_MONTH",
     "ZEROFILL",
 ];
+
+/// `INDEX a TO b` or `KEY a TO b` after the `RENAME` of an `ALTER TABLE`,
+/// with the words after it. The names take backticks or none; anything
+/// else, or a word MySQL reserves, is left to the parser's error.
+fn renamed_index(words: &[Token]) -> Option<(Operation, &[Token])> {
+    let [
+        Token::Word(what),
+        Token::Word(from),
+        Token::Word(to_word),
+        Token::Word(to),
+        after @ ..,
+    ] = words
+    else {
+        return None;
+    };
+    let name = |word: &Word| match word.quote_style {
+        Some('`') => Some(word.value.clone()),
+        Some(_) => None,
+        None if RESERVED
+            .binary_search(&word.value.to_ascii_uppercase().as_str())
+            .is_ok() =>
+        {
+            None
+        }
+        None => Some(word.value.clone()),
+    };
+    let keyword_is = |word: &Word, expected: &str| {
+        word.quote_style.is_none() && word.value.eq_ignore_ascii_case(expected)
+    };
+    if !(keyword_is(what, "INDEX") || keyword_is(what, "KEY")) || !keyword_is(to_word, "TO") {
+        return None;
+    }
+    Some((
+        Operation::RenameIndex {
+            from: name(from)?,
+            to: name(to)?,
+        },
+        after,
+    ))
+}
 
 /// A CHECK constraint clause of an `ALTER TABLE`, read from the words after
 /// its `DROP` or `ALTER`.
@@ -1971,6 +2157,15 @@ fn operation_of(operation: AlterTableOperation) -> Operation {
             column: column_name.value,
             default: value.to_string(),
         },
+        AlterTableOperation::AlterColumn {
+            column_name,
+            op: AlterColumnOperation::DropDefault,
+        } => Operation::DropColumnDefault {
+            column: column_name.value,
+        },
+        AlterTableOperation::AutoIncrement { value, .. } => Operation::SetAutoIncrement {
+            value: value.to_string(),
+        },
         AlterTableOperation::AddConstraint { constraint, .. } => added_constraint(constraint),
         AlterTableOperation::DropIndex { name } => Operation::DropIndex { name: name.value },
         AlterTableOperation::DropForeignKey { name, .. } => {
@@ -2169,6 +2364,7 @@ fn foreign_key(key: ForeignKeyConstraint) -> ForeignKey {
             .collect(),
         on_delete: key.on_delete.map(foreign_key_action),
         on_update: key.on_update.map(foreign_key_action),
+        former_names: Vec::new(),
     }
 }
 
@@ -2741,6 +2937,7 @@ mod tests {
                 referenced_columns: vec!["id".into()],
                 on_delete: Some(ForeignKeyAction::SetNull),
                 on_update: Some(ForeignKeyAction::Cascade),
+                former_names: Vec::new(),
             })
         );
     }
@@ -3028,8 +3225,9 @@ mod tests {
             "ALTER TABLE t COMMENT='x',, ENGINE=InnoDB",
             "ALTER TABLE t COMMENT=",
             "ALTER TABLE t KEY_BLOCK_SIZE=8.5",
-            // A quoted engine, as 9a decided for CREATE TABLE.
-            "ALTER TABLE t ENGINE='InnoDB'",
+            // A quoted engine other than InnoDB, as 9a decided for CREATE
+            // TABLE.
+            "ALTER TABLE t ENGINE='MyISAM'",
             // Anything else in the statement.
             "ALTER TABLE t COMMENT='x', AUTO_INCREMENT=5",
             "ALTER TABLE t COMMENT='x' DEFAULT CHARSET=utf8mb4",
@@ -3099,11 +3297,111 @@ mod tests {
     #[test]
     fn operations_kilit_does_not_model_are_kept_as_other() {
         assert_eq!(
-            operation("ALTER TABLE t AUTO_INCREMENT = 1000"),
+            operation("ALTER TABLE t ALTER COLUMN c SET NOT NULL"),
             Operation::Other {
-                sql: "AUTO_INCREMENT = 1000".into()
+                sql: "ALTER COLUMN c SET NOT NULL".into()
             }
         );
+    }
+
+    #[test]
+    fn reads_auto_increment_drop_default_and_rename_index() {
+        assert_eq!(
+            operation("ALTER TABLE t AUTO_INCREMENT = 1000"),
+            Operation::SetAutoIncrement {
+                value: "1000".into()
+            }
+        );
+        assert_eq!(
+            operation("ALTER TABLE t ALTER COLUMN `c` DROP DEFAULT"),
+            Operation::DropColumnDefault { column: "c".into() }
+        );
+        for sql in [
+            "ALTER TABLE t RENAME INDEX a TO b",
+            "ALTER TABLE t RENAME KEY `a` TO `b`",
+            "alter table `t` rename index `a` to `b`",
+        ] {
+            assert_eq!(
+                kind(sql),
+                StatementKind::Alter(Alter {
+                    table: "t".into(),
+                    operations: vec![Operation::RenameIndex {
+                        from: "a".into(),
+                        to: "b".into()
+                    }],
+                    ..Alter::default()
+                }),
+                "{sql}"
+            );
+        }
+        // A word MySQL reserves, or a quoted name, is left unread.
+        for sql in [
+            "ALTER TABLE t RENAME INDEX select TO b",
+            "ALTER TABLE t RENAME INDEX 'a' TO b",
+            "ALTER TABLE t RENAME INDEX a b",
+        ] {
+            assert!(
+                matches!(kind(sql), StatementKind::Unparsed { .. }),
+                "{sql}: {:?}",
+                kind(sql)
+            );
+        }
+    }
+
+    #[test]
+    fn reads_create_fulltext_index_as_the_alter_table_mysql_runs() {
+        assert_eq!(
+            kind("CREATE FULLTEXT INDEX ft ON orders (note, `body`) ALGORITHM=INPLACE LOCK=SHARED"),
+            StatementKind::Alter(Alter {
+                table: "orders".into(),
+                operations: vec![Operation::AddIndex(Index {
+                    name: Some("ft".into()),
+                    kind: IndexKind::Fulltext,
+                    columns: vec!["note".into(), "body".into()],
+                })],
+                algorithm: Some(Algorithm::Inplace),
+                lock: Some(Lock::Shared),
+            })
+        );
+        // Forms kilit does not read stay unread, with their table.
+        for sql in [
+            "CREATE FULLTEXT INDEX ft ON orders (note) WITH PARSER ngram",
+            "CREATE FULLTEXT INDEX ft ON orders (note(10))",
+            "CREATE FULLTEXT INDEX ft ON orders (note) /*!50100 INVISIBLE */",
+        ] {
+            assert!(
+                matches!(kind(sql), StatementKind::Unparsed { ref table, .. }
+                    if table.as_deref() == Some("orders")),
+                "{sql}: {:?}",
+                kind(sql)
+            );
+        }
+    }
+
+    #[test]
+    fn a_quoted_innodb_engine_is_read_and_other_quoted_engines_are_not() {
+        for sql in [
+            "ALTER TABLE t ENGINE='InnoDB'",
+            "ALTER TABLE t ENGINE = 'innodb'",
+            "ALTER TABLE t ENGINE = `InnoDB`",
+        ] {
+            assert_eq!(
+                kind(sql),
+                StatementKind::Alter(Alter {
+                    table: "t".into(),
+                    operations: vec![Operation::ChangeTableOptions(TableOptions {
+                        engine: Some(Engine::InnoDb),
+                        ..TableOptions::default()
+                    })],
+                    ..Alter::default()
+                }),
+                "{sql}"
+            );
+        }
+        assert!(matches!(
+            kind("ALTER TABLE t ENGINE='MyISAM'"),
+            StatementKind::Unparsed { .. }
+        ));
     }
 
     /// The CHECK constraints of a `CREATE TABLE`, in the order MySQL numbers them.
@@ -3594,7 +3892,6 @@ mod tests {
         for sql in [
             "ALTER TABLE t CONVERT TO CHARACTER SET utf8mb4",
             "ALTER TABLE t ENGINE=InnoDB, AUTO_INCREMENT=5",
-            "ALTER TABLE t RENAME INDEX a TO b",
             "ALTER TABLE t ADD c INT, ALGORITHM=NOCOPY",
             "OPTIMIZE TABLE t",
         ] {
@@ -4852,7 +5149,7 @@ SET FOREIGN_KEY_CHECKS=1;
             // An index statement names its table after ON. MySQL 8.0.46 and
             // 8.4.13 accept each one, run by hand.
             (
-                "CREATE FULLTEXT INDEX ft_note ON orders (note)",
+                "CREATE FULLTEXT INDEX ft_note ON orders (note) WITH PARSER ngram",
                 Some("orders"),
             ),
             (

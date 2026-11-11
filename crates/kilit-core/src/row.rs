@@ -108,8 +108,10 @@ pub fn count(table: &Table, columns: &[&Column], format: Option<Format>) -> Resu
 
 /// The columns InnoDB keeps a table's rows in order of, each with whether
 /// the key takes only a prefix of it: the primary key, or without one the
-/// first UNIQUE index whose columns are all among `columns` and NOT NULL.
-/// `None` when there is neither, and InnoDB adds a row id.
+/// first UNIQUE index whose columns are all among `columns`, NOT NULL and
+/// whole. By hand on MySQL 8.0.46 and 8.4.13 (INNODB_INDEXES), InnoDB skips
+/// a UNIQUE index with a prefix part. `None` when there is neither, and
+/// InnoDB adds a row id.
 fn clustered_key(table: &Table, columns: &[&Column]) -> Option<Vec<(String, bool)>> {
     let entries = |entries: &[String]| -> Option<Vec<(String, bool)>> {
         entries
@@ -140,7 +142,10 @@ fn clustered_key(table: &Table, columns: &[&Column]) -> Option<Vec<(String, bool
         .iter()
         .filter(|index| index.kind == IndexKind::Unique)
         .filter_map(|index| entries(&index.columns))
-        .find(|key| key.iter().all(|(name, _)| not_null(name)))
+        .find(|key| {
+            key.iter()
+                .all(|(name, prefixed)| !prefixed && not_null(name))
+        })
 }
 
 /// A column as InnoDB keeps it in a record.
@@ -229,40 +234,94 @@ fn page(format: Format, fields: &[Field], nullable: u64, clustered: bool) -> (u6
     }
 }
 
-/// Why a new column is no row too long but one MySQL refuses in strict SQL
-/// mode (error 1074) and makes TEXT or BLOB in the others: a VARCHAR or
-/// VARBINARY of more than 65,535 bytes, or a CHAR or BINARY of more than
-/// 255 characters. `None` for any other column, or one kilit cannot read.
-/// Without the table, only what is too long in any character set counts.
+/// `n bytes`, or, for a count that reached the most kilit can hold, "more
+/// bytes than kilit can count": no table comes near it, but a statement
+/// can write such a length.
+pub fn bytes(n: u64) -> String {
+    if n == u64::MAX {
+        "more bytes than kilit can count".to_owned()
+    } else {
+        format!("{n} bytes")
+    }
+}
+
+/// How MySQL takes a column longer than its type holds, by hand on MySQL
+/// 8.0.46 and 8.4.13, in ADD, MODIFY and CREATE TABLE alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TooLong {
+    /// A CHAR or BINARY of more than 255 characters: refused in every SQL
+    /// mode (error 1074).
+    InEveryMode,
+    /// A VARCHAR or VARBINARY of more than 65,535 bytes: refused in strict
+    /// SQL mode (error 1074); in the others MySQL makes it a TEXT or BLOB
+    /// type (MEDIUMTEXT and MEDIUMBLOB for the lengths tried).
+    InStrictMode,
+}
+
+/// Whether `column` is longer than its type holds, and how MySQL takes it:
+/// see [`TooLong`]. `None` for any other column, or one kilit cannot read.
+/// Without the table, or its character set, only what is too long in any
+/// character set counts.
+pub fn too_long_kind(table: Option<&Table>, column: &Column) -> Option<TooLong> {
+    too_long_by(table, column).map(|(kind, ..)| kind)
+}
+
+/// Why a new column is no row too long but one MySQL refuses: see
+/// [`TooLong`]. `None` for any other column, or one kilit cannot read.
 pub fn too_long(table: Option<&Table>, column: &Column) -> Option<String> {
-    let (limit, length, what) = match &column.data_type {
+    let (kind, length, limit, what) = too_long_by(table, column)?;
+    let length = if what == "bytes" {
+        bytes(length)
+    } else {
+        format!("{length} {what}")
+    };
+    let how = match kind {
+        TooLong::InEveryMode => {
+            "MySQL 8.0.46 and 8.4.13 refuse it in every SQL mode (error 1074, by hand)"
+        }
+        TooLong::InStrictMode => {
+            "MySQL refuses it in strict SQL mode (error 1074) and makes it a TEXT or BLOB type \
+             in the others (by hand on MySQL 8.0.46 and 8.4.13), which the lab has not measured"
+        }
+    };
+    Some(format!(
+        "{} takes up to {length}, more than its type holds ({limit}): {how}",
+        column.name
+    ))
+}
+
+fn too_long_by(
+    table: Option<&Table>,
+    column: &Column,
+) -> Option<(TooLong, u64, u64, &'static str)> {
+    let (kind, limit, length, what) = match &column.data_type {
         DataType::VarChar { length } => {
-            let per_character = match table {
-                Some(table) => table.text_settings(column).ok()?.charset.max_bytes,
-                None => 1,
-            };
-            (MAX_ROW_BYTES, length.saturating_mul(per_character), "bytes")
+            // A character set kilit cannot tell counts as its fewest bytes.
+            let per_character = table
+                .and_then(|table| table.text_settings(column).ok())
+                .map_or(1, |settings| settings.charset.max_bytes);
+            (
+                TooLong::InStrictMode,
+                MAX_ROW_BYTES,
+                length.saturating_mul(per_character),
+                "bytes",
+            )
         }
         DataType::Text(name) | DataType::Other(name) => {
             let written = name.trim().to_ascii_uppercase();
             let (base, rest) = written.split_once('(')?;
             let length: u64 = rest.strip_suffix(')')?.trim().parse().ok()?;
             match base.trim() {
-                "VARBINARY" => (MAX_ROW_BYTES, length, "bytes"),
-                "CHAR" | "CHARACTER" | "BINARY" => (255, length, "characters"),
+                "VARBINARY" => (TooLong::InStrictMode, MAX_ROW_BYTES, length, "bytes"),
+                "CHAR" | "CHARACTER" | "BINARY" => {
+                    (TooLong::InEveryMode, 255, length, "characters")
+                }
                 _ => return None,
             }
         }
         DataType::Integer { .. } => return None,
     };
-    (length > limit).then(|| {
-        format!(
-            "{} takes up to {length} {what}, more than its type holds ({limit}): MySQL refuses \
-             it in strict SQL mode and changes its type in the others, which the lab has not \
-             measured",
-            column.name
-        )
-    })
+    (length > limit).then_some((kind, length, limit, what))
 }
 
 /// What one column adds to a row.
@@ -630,6 +689,26 @@ mod tests {
         assert_eq!(
             counts(unique, "q", Some(Format::Dynamic)).page,
             Some((5 + 1 + 2_802 + 13 + 4, 8_125))
+        );
+    }
+
+    #[test]
+    fn a_unique_key_on_a_prefix_is_not_the_one_innodb_keys_the_rows_on() {
+        // By hand on MySQL 8.0.46 and 8.4.13 (INNODB_INDEXES): without a
+        // primary key, InnoDB keys the rows on u2, the first UNIQUE index of
+        // whole NOT NULL columns, and passes over u1 on a prefix of a.
+        let sql = "CREATE TABLE q (a VARCHAR(20) NOT NULL, k VARCHAR(700) NOT NULL, \
+                   UNIQUE KEY u1 (a(10)), UNIQUE KEY u2 (k)) DEFAULT CHARSET=utf8mb4";
+        // k is the key, counted whole (2,800 + 2), then a as a field.
+        assert_eq!(
+            counts(sql, "q", Some(Format::Dynamic)).page,
+            Some((5 + 2_802 + 13 + 81, 8_125))
+        );
+        // With u1 on the whole of a, a is the key, and k a long field.
+        let whole = sql.replace("u1 (a(10))", "u1 (a)");
+        assert_eq!(
+            counts(&whole, "q", Some(Format::Dynamic)).page,
+            Some((5 + 81 + 13 + 41, 8_125))
         );
     }
 

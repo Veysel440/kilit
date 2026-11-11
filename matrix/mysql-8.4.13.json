@@ -8426,6 +8426,73 @@
       ]
     },
     {
+      "id": "alter-check-missing",
+      "title": "Stop enforcing a CHECK constraint the table does not have",
+      "session": [],
+      "statement": "ALTER TABLE orders ALTER CHECK nosuch NOT ENFORCED",
+      "verdict": {
+        "result": "fails",
+        "code": 3821,
+        "message": "Check constraint 'nosuch' is not found in the table."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3821,
+          "message": "Check constraint 'nosuch' is not found in the table."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3821,
+          "message": "Check constraint 'nosuch' is not found in the table."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3821,
+          "message": "Check constraint 'nosuch' is not found in the table."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3821,
+          "message": "Check constraint 'nosuch' is not found in the table."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3821,
+          "message": "Check constraint 'nosuch' is not found in the table."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3821,
+          "message": "Check constraint 'nosuch' is not found in the table."
+        }
+      ]
+    },
+    {
       "id": "alter-check-not-enforced",
       "title": "Stop enforcing a CHECK constraint with ALTER CHECK",
       "setup": [
@@ -8864,6 +8931,73 @@
           "result": "rejected",
           "code": 1846,
           "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "alter-constraint-missing",
+      "title": "Stop enforcing a constraint the table does not have with ALTER CONSTRAINT",
+      "session": [],
+      "statement": "ALTER TABLE orders ALTER CONSTRAINT nosuch NOT ENFORCED",
+      "verdict": {
+        "result": "fails",
+        "code": 3940,
+        "message": "Constraint 'nosuch' does not exist."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3940,
+          "message": "Constraint 'nosuch' does not exist."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3940,
+          "message": "Constraint 'nosuch' does not exist."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3940,
+          "message": "Constraint 'nosuch' does not exist."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3940,
+          "message": "Constraint 'nosuch' does not exist."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3940,
+          "message": "Constraint 'nosuch' does not exist."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3940,
+          "message": "Constraint 'nosuch' does not exist."
         }
       ]
     },
@@ -9401,6 +9535,92 @@
             0,
             0
           ]
+        }
+      ]
+    },
+    {
+      "id": "compact-add-fulltext-index",
+      "title": "Add a FULLTEXT index on a TEXT column to a COMPACT table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN body TEXT NULL"
+      ],
+      "session": [],
+      "row_format": "COMPACT",
+      "statement": "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_body (body)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": true,
+        "copied_rows": 0,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Fulltext index creation requires a lock. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Fulltext index creation requires a lock. Try LOCK=SHARED."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Fulltext index creation requires a lock. Try LOCK=SHARED."
         }
       ]
     },
@@ -10447,6 +10667,92 @@
       ]
     },
     {
+      "id": "compressed-add-fulltext-index",
+      "title": "Add a FULLTEXT index on a TEXT column to a COMPRESSED table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN body TEXT NULL"
+      ],
+      "session": [],
+      "row_format": "COMPRESSED",
+      "statement": "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_body (body)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": true,
+        "copied_rows": 0,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Fulltext index creation requires a lock. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Fulltext index creation requires a lock. Try LOCK=SHARED."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Fulltext index creation requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
       "id": "compressed-add-index",
       "title": "Add a secondary index to a COMPRESSED table",
       "session": [],
@@ -11267,6 +11573,73 @@
             0,
             0
           ]
+        }
+      ]
+    },
+    {
+      "id": "drop-check-missing",
+      "title": "Drop a CHECK constraint the table does not have with DROP CHECK",
+      "session": [],
+      "statement": "ALTER TABLE orders DROP CHECK nosuch",
+      "verdict": {
+        "result": "fails",
+        "code": 3821,
+        "message": "Check constraint 'nosuch' is not found in the table."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3821,
+          "message": "Check constraint 'nosuch' is not found in the table."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3821,
+          "message": "Check constraint 'nosuch' is not found in the table."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3821,
+          "message": "Check constraint 'nosuch' is not found in the table."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3821,
+          "message": "Check constraint 'nosuch' is not found in the table."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3821,
+          "message": "Check constraint 'nosuch' is not found in the table."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3821,
+          "message": "Check constraint 'nosuch' is not found in the table."
         }
       ]
     },
@@ -14095,6 +14468,73 @@
       ]
     },
     {
+      "id": "drop-constraint-missing",
+      "title": "Drop a constraint the table does not have with DROP CONSTRAINT",
+      "session": [],
+      "statement": "ALTER TABLE orders DROP CONSTRAINT nosuch",
+      "verdict": {
+        "result": "fails",
+        "code": 3940,
+        "message": "Constraint 'nosuch' does not exist."
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3940,
+          "message": "Constraint 'nosuch' does not exist."
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3940,
+          "message": "Constraint 'nosuch' does not exist."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3940,
+          "message": "Constraint 'nosuch' does not exist."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3940,
+          "message": "Constraint 'nosuch' does not exist."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 3940,
+          "message": "Constraint 'nosuch' does not exist."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 3940,
+          "message": "Constraint 'nosuch' does not exist."
+        }
+      ]
+    },
+    {
       "id": "drop-constraint-not-enforced-check",
       "title": "Drop a NOT ENFORCED CHECK constraint with DROP CONSTRAINT",
       "setup": [
@@ -14445,6 +14885,99 @@
           "result": "rejected",
           "code": 1091,
           "message": "Can't DROP 'nosuch'; check that column/key exists"
+        }
+      ]
+    },
+    {
+      "id": "drop-fulltext-index",
+      "title": "Drop a FULLTEXT index",
+      "setup": [
+        "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP INDEX ft_orders_note",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
         }
       ]
     },
@@ -15423,6 +15956,99 @@
           "result": "rejected",
           "code": 1846,
           "message": "LOCK=NONE is not supported. Reason: Dropping a primary key is not allowed without also adding a new primary key. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "drop-unique-index",
+      "title": "Drop a UNIQUE index",
+      "setup": [
+        "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_amount (amount)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP INDEX uq_orders_amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
         }
       ]
     },
@@ -17238,6 +17864,88 @@
       "session": [],
       "engine": "MyISAM",
       "statement": "ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "LOCK=NONE is not supported for this operation. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "myisam-add-fulltext-index-text",
+      "title": "Add a FULLTEXT index on a TEXT column to a MyISAM table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN body TEXT NULL"
+      ],
+      "session": [],
+      "engine": "MyISAM",
+      "statement": "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_body (body)",
       "verdict": {
         "result": "runs",
         "algorithm": "COPY",
@@ -19385,6 +20093,92 @@
           "result": "rejected",
           "code": 1846,
           "message": "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "redundant-add-fulltext-index",
+      "title": "Add a FULLTEXT index on a TEXT column to a REDUNDANT table",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN body TEXT NULL"
+      ],
+      "session": [],
+      "row_format": "REDUNDANT",
+      "statement": "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_body (body)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": true,
+        "copied_rows": 0,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Fulltext index creation requires a lock. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Fulltext index creation requires a lock. Try LOCK=SHARED."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Fulltext index creation requires a lock. Try LOCK=SHARED."
         }
       ]
     },

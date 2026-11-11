@@ -100,11 +100,15 @@ jobs:
         run: docker exec -i "$MYSQL_CONTAINER" mysql -uroot -p"$DB_PASSWORD" "$DB_DATABASE" < database/schema/mysql-schema.sql
       - name: Check the pending migrations
         shell: bash
-        run: php artisan migrate --pretend | kilit check --format github --server mysql-8.4 --schema database/schema/mysql-schema.sql
+        run: php artisan migrate --pretend | kilit check --strict --format github --server mysql-8.4 --schema database/schema/mysql-schema.sql
 ```
 
 A third-party action, such as the PHP setup here, runs with your job's rights.
 Pin it to a commit SHA, as the example does, and keep the version in a comment.
+
+`--strict` makes UNKNOWN stop the step too: UNKNOWN means a person must look,
+and without it kilit exits 0 for a statement it cannot answer
+(`--fail-on fails,waits` accepts UNKNOWN).
 
 `--server` names the series of the MySQL service, `mysql-8.4` here. Use the
 series of your production server, and the same image for the service

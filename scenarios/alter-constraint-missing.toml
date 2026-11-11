@@ -1,0 +1,4 @@
+title = "Stop enforcing a constraint the table does not have with ALTER CONSTRAINT"
+# The name nosuch is used in every scenario of this kind, so MySQL's
+# message names the same object in all of them.
+operation = "ALTER CONSTRAINT nosuch NOT ENFORCED"

@@ -54,6 +54,16 @@ pub struct Schema {
     gone: BTreeMap<String, Gone>,
     /// The names of the tables the dump has: see [`Schema::from_dump`].
     dump_tables: BTreeSet<String>,
+    /// How many sessions (input files) have ended: the one being checked
+    /// is this one, counting from 0.
+    sessions_ended: usize,
+    /// Tables a foreign key of a table kilit does not know may point at:
+    /// the keys a table had when kilit lost track of it, and the keys added
+    /// to a table it does not know.
+    unseen_keys_point_at: BTreeSet<String>,
+    /// A statement kilit could not read writes REFERENCES: the keys it adds
+    /// may point anywhere.
+    unseen_keys_anywhere: bool,
 }
 
 /// A statement that took a table away from kilit's schema.
@@ -64,6 +74,8 @@ pub(crate) struct Gone {
     /// The statement is in an earlier input file than the one being
     /// checked, so its line is a line of that file.
     pub earlier_file: bool,
+    /// The session (input file) of the statement, counting from 0.
+    pub session: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,12 +166,12 @@ impl Schema {
     /// The statement that took the table `name`, written exactly so, away,
     /// when no statement created it again since.
     pub(crate) fn gone(&self, name: &str) -> Option<&Gone> {
-        self.gone.get(&key(name))
+        self.gone.get(name)
     }
 
     /// Whether the dump has the table `name`, written exactly so.
     pub(crate) fn dump_has(&self, name: &str) -> bool {
-        self.dump_tables.contains(&key(name))
+        self.dump_tables.contains(name)
     }
 
     /// What kilit knows about the table `name`, written exactly so: with
@@ -167,7 +179,7 @@ impl Schema {
     /// `orders` and `ORDERS` apart, and with 1 or 2 it takes them as one
     /// table. See `Schema::in_another_case`.
     pub fn table(&self, name: &str) -> TableState<'_> {
-        match self.tables.get(&key(name)) {
+        match self.tables.get(name) {
             Some(Entry::Known(table)) => TableState::Known(table),
             Some(Entry::Lost {
                 reason,
@@ -197,6 +209,7 @@ impl Schema {
     /// The session ends: its temporary tables are gone, and the tables they
     /// hid are seen again as they were.
     pub(crate) fn session_ends(&mut self) {
+        self.sessions_ended += 1;
         for gone in self.gone.values_mut() {
             gone.earlier_file = true;
         }
@@ -231,6 +244,13 @@ impl Schema {
     /// A key that points at the table in another letter case counts.
     pub(crate) fn may_be_pointed_at(&self, name: &str) -> bool {
         self.pointed_at.contains(&folded(name))
+    }
+
+    /// Whether a foreign key of a table kilit does not know (one it lost
+    /// track of, or one no schema shows) may point at the table `name`:
+    /// such a key is in no table kilit holds.
+    pub(crate) fn unseen_key_may_point_at(&self, name: &str) -> bool {
+        self.unseen_keys_anywhere || self.unseen_keys_point_at.contains(&folded(name))
     }
 
     /// The first table name of `statement` that matches a table kilit knows
@@ -421,8 +441,7 @@ impl Schema {
                     unclear |= self.row_format_unclear_of(name);
                 }
                 if temporary && !self.hidden_by_temporary.contains_key(written) {
-                    let hidden = self.take(written);
-                    self.hidden_by_temporary.insert(written.to_owned(), hidden);
+                    self.hide_for_temporary(written);
                 }
                 self.lose_in_another_case(written, reason.clone(), lost_engine, unclear);
             }
@@ -457,10 +476,9 @@ impl Schema {
                 _ => None,
             };
             if let Some(name) = name
-                && !self.hidden_by_temporary.contains_key(&key(name))
+                && !self.hidden_by_temporary.contains_key(name)
             {
-                let hidden = self.take(&key(name));
-                self.hidden_by_temporary.insert(key(name), hidden);
+                self.hide_for_temporary(name);
             }
         }
         match &statement.kind {
@@ -468,7 +486,7 @@ impl Schema {
                 table,
                 if_not_exists,
             } => {
-                if *if_not_exists && self.tables.contains_key(&key(&table.name)) {
+                if *if_not_exists && self.tables.contains_key(&table.name) {
                     return;
                 }
                 let mut table = table.clone();
@@ -508,14 +526,14 @@ impl Schema {
                 self.put(key(&table.name), Entry::Known(table));
             }
             StatementKind::DropTable { tables } => {
-                let temporary = statement
-                    .sql
-                    .split_whitespace()
-                    .nth(1)
-                    .is_some_and(|word| word.eq_ignore_ascii_case("TEMPORARY"));
+                // Comments between the words count for nothing.
+                let temporary = crate::parse::drops_temporary_table(&statement.sql);
                 for name in tables {
-                    let hid = self.hidden_by_temporary.contains_key(&key(name));
-                    if self.take(&key(name)).is_some() {
+                    let hid = self.hidden_by_temporary.contains_key(name);
+                    // Without a dump, a table kilit never saw is gone too:
+                    // after the statement there is none of the name, with
+                    // IF EXISTS or not, unless only a temporary one went.
+                    if self.take(&key(name)).is_some() || !self.from_dump {
                         let how = if temporary || hid {
                             GoneHow::MaybeDropped
                         } else {
@@ -527,6 +545,7 @@ impl Schema {
                                 line: statement.line,
                                 how,
                                 earlier_file: false,
+                                session: self.sessions_ended,
                             },
                         );
                     }
@@ -541,7 +560,7 @@ impl Schema {
             StatementKind::Unparsed {
                 table: Some(name), ..
             } => {
-                let exists = self.tables.contains_key(&key(name));
+                let exists = self.tables.contains_key(name);
                 let engine = match written_engine(&statement.sql) {
                     // A CREATE of a table that exists changes nothing.
                     _ if exists && creates(&statement.sql) => self.engine_of(name).cloned(),
@@ -576,8 +595,14 @@ impl Schema {
                     engine,
                     unclear,
                 );
+                if writes_references(&statement.sql) {
+                    self.unseen_keys_anywhere = true;
+                }
             }
             StatementKind::Unparsed { table: None, .. } => {
+                if writes_references(&statement.sql) {
+                    self.unseen_keys_anywhere = true;
+                }
                 let first = statement.sql.split_whitespace().next().unwrap_or_default();
                 if !["TRUNCATE", "LOCK", "UNLOCK"]
                     .iter()
@@ -603,6 +628,23 @@ impl Schema {
                     line,
                     how: GoneHow::Renamed { to: to.to_owned() },
                     earlier_file: false,
+                    session: self.sessions_ended,
+                },
+            );
+        } else if !self.from_dump && !self.gone.contains_key(from) {
+            // Without a dump, a table kilit never saw is gone after the
+            // statement as after a DROP: if it was there it is `to` now,
+            // and if not MySQL refused the rename (1146 either way on a
+            // later statement on it, by hand on MySQL 8.0.46 and 8.4.13).
+            // `to` may be a table now, whatever kilit knew of it.
+            self.gone.remove(to);
+            self.gone.insert(
+                key(from),
+                Gone {
+                    line,
+                    how: GoneHow::Renamed { to: to.to_owned() },
+                    earlier_file: false,
+                    session: self.sessions_ended,
                 },
             );
         }
@@ -615,6 +657,7 @@ impl Schema {
         engine: Option<Engine>,
         row_format_unclear: bool,
     ) {
+        self.keys_go_unseen(name);
         self.put(
             key(name),
             Entry::Lost {
@@ -633,6 +676,7 @@ impl Schema {
         engine: Option<Engine>,
         row_format_unclear: bool,
     ) {
+        self.keys_go_unseen(name);
         self.put(
             key(name),
             Entry::Lost {
@@ -642,6 +686,29 @@ impl Schema {
                 in_another_case: true,
             },
         );
+    }
+
+    /// A temporary table of the name `name` hides the table of that name
+    /// until the session ends. The keys of the hidden table stay on the
+    /// server, in no table kilit holds now.
+    fn hide_for_temporary(&mut self, name: &str) {
+        self.keys_go_unseen(name);
+        let hidden = self.take(&key(name));
+        self.hidden_by_temporary.insert(key(name), hidden);
+    }
+
+    /// kilit is about to lose track of the table `name`: the foreign keys it
+    /// has, or may have, are no longer in a table kilit holds.
+    fn keys_go_unseen(&mut self, name: &str) {
+        match self.tables.get(name) {
+            Some(Entry::Known(table)) => {
+                for foreign_key in &table.foreign_keys {
+                    self.unseen_keys_point_at
+                        .insert(folded(&foreign_key.referenced_table));
+                }
+            }
+            Some(Entry::Lost { .. }) | None => {}
+        }
     }
 
     /// Sets the entry of the table `name`, keeping [`Schema::by_fold`].
@@ -678,7 +745,7 @@ impl Schema {
     /// server's default, as far as kilit knows it. `false` for a table kilit
     /// does not know.
     fn row_format_unclear_of(&self, name: &str) -> bool {
-        match self.tables.get(&key(name)) {
+        match self.tables.get(name) {
             Some(Entry::Known(table)) => row_format_unclear(table),
             Some(Entry::Lost {
                 row_format_unclear, ..
@@ -689,7 +756,7 @@ impl Schema {
 
     /// The engine kilit last knew the table `name` to have.
     fn engine_of(&self, name: &str) -> Option<&Engine> {
-        match self.tables.get(&key(name))? {
+        match self.tables.get(name)? {
             Entry::Known(table) => table.engine.as_ref(),
             Entry::Lost { engine, .. } => engine.as_ref(),
         }
@@ -700,6 +767,18 @@ impl Schema {
     /// with the engine written, and a row format that may not be the
     /// server's default.
     fn options_of_unknown_table(&mut self, line: usize, alter: &Alter) {
+        // A key added to a table kilit does not know is in no table it holds.
+        for operation in &alter.operations {
+            if let Operation::AddForeignKey(foreign_key) = operation {
+                self.unseen_keys_point_at
+                    .insert(folded(&foreign_key.referenced_table));
+            }
+        }
+        // With a dump, a table it lacks that no statement created is not
+        // there: it stays missing, and every statement on it unknown.
+        if self.from_dump && !self.tables.contains_key(&alter.table) {
+            return;
+        }
         for operation in &alter.operations {
             let Operation::ChangeTableOptions(options) = operation else {
                 continue;
@@ -714,7 +793,7 @@ impl Schema {
                 None => self.engine_of(&alter.table).cloned(),
             };
             let unclear = writes_row_format || self.row_format_unclear_of(&alter.table);
-            let reason = match self.tables.get(&key(&alter.table)) {
+            let reason = match self.tables.get(&alter.table) {
                 Some(Entry::Lost { reason, .. }) => reason.clone(),
                 _ => format!("line {line}: changes the options of a table kilit does not know"),
             };
@@ -763,6 +842,26 @@ impl Schema {
                         && names_foreign_key_index(&statement.sql) =>
                 {
                     Err(MYISAM_INDEX_NAME.to_owned())
+                }
+                // MySQL takes every RENAME INDEX of a statement against the
+                // names the table had before it, and the other clauses too:
+                // kilit follows one alone only.
+                Operation::RenameIndex { .. } if alter.operations.len() > 1 => Err(
+                    "renames an index beside other changes, which kilit does not follow".to_owned(),
+                ),
+                // MySQL refuses a CHECK constraint clause on a name the table
+                // does not have, and with it the whole statement: alone, the
+                // table stays as it was; beside other changes, kilit cannot
+                // tell what an earlier one of them did to the name.
+                Operation::DropCheck { name }
+                | Operation::AlterCheck { name, .. }
+                | Operation::DropConstraint { name }
+                    if alter.operations.len() > 1 && missing_constraint(table, operation, name) =>
+                {
+                    Err(format!(
+                        "names the constraint {name} beside other changes, and the table has \
+                         no constraint of that name"
+                    ))
                 }
                 other => change(table, other),
             };
@@ -1058,6 +1157,51 @@ fn change(table: &mut Table, operation: &Operation) -> Result<(), String> {
             let at = table.position_of(column).ok_or_else(|| no_column(column))?;
             table.columns[at].default = Some(default.clone());
         }
+        // By hand on MySQL 8.0.46 and 8.4.13: the column has no default
+        // after it, whatever it had; of a column the table does not have,
+        // MySQL refuses it (error 1054), and the table stays as it was.
+        Operation::DropColumnDefault { column } => {
+            if let Some(at) = table.position_of(column) {
+                table.columns[at].default = None;
+            }
+        }
+        // By hand on MySQL 8.0.46 and 8.4.13: only the name changes. MySQL
+        // refuses an index that is not there (1176), a name another index
+        // has in any letter case (1061) and PRIMARY (1280); the table stays
+        // as it was then.
+        Operation::RenameIndex { from, to } => {
+            if same(from, "PRIMARY") || same(to, "PRIMARY") {
+                return Ok(());
+            }
+            let named = |name: &str| {
+                table
+                    .indexes
+                    .iter()
+                    .position(|index| index.name.as_deref().is_some_and(|n| same(n, name)))
+            };
+            match named(from) {
+                Some(at) if named(to).is_none_or(|other| other == at) => {
+                    table.indexes[at].name = Some(to.clone());
+                }
+                Some(_) => {}
+                // MySQL named the index kilit holds without a name, and
+                // kilit cannot tell whether it is this one.
+                None if table.indexes.iter().any(|index| index.name.is_none()) => {
+                    return Err(format!(
+                        "renames the index {from}, which may be one kilit holds without its name"
+                    ));
+                }
+                None => {}
+            }
+        }
+        // MySQL keeps the counter apart from the table's definition, and so
+        // does kilit: by hand on MySQL 8.0.46 and 8.4.13, SHOW CREATE TABLE
+        // changes only in AUTO_INCREMENT=.
+        Operation::SetAutoIncrement { .. } => {}
+        // MySQL refuses an index of a name the table has in any letter case
+        // (1061) and one on a column the table does not have (1072), by hand
+        // on MySQL 8.0.46 and 8.4.13; the table stays as it was then.
+        Operation::AddIndex(index) if refused_index(table, index) => {}
         Operation::AddIndex(index) => {
             let mut index = index.clone();
             if index.name.is_none() {
@@ -1142,11 +1286,18 @@ fn change(table: &mut Table, operation: &Operation) -> Result<(), String> {
                 .indexes
                 .retain(|index| index.kind != IndexKind::Unique || !has_name([&index.name], name)),
             [ConstraintKind::PrimaryKey] => table.primary_key.clear(),
-            [] => {
+            // MySQL named a foreign key kilit holds without a name, and
+            // kilit cannot tell whether it is this one.
+            [] if table.foreign_keys.iter().any(|key| key.name.is_none()) => {
                 return Err(format!(
-                    "drops the constraint {name}, which kilit does not know"
+                    "drops the constraint {name}, which may be a foreign key kilit holds \
+                     without its name"
                 ));
             }
+            // MySQL refuses a name the table does not have (error 3940, by
+            // the lab), and if kilit's tables are out of date and the table
+            // had it, what kilit knows of the table stays right but for it.
+            [] => {}
             _ => {
                 return Err(format!(
                     "drops the constraint {name}, a name that several of its constraints have"
@@ -1159,11 +1310,8 @@ fn change(table: &mut Table, operation: &Operation) -> Result<(), String> {
             }
             // MySQL 8.0.46 and 8.4.13 refuse the statement: the table stays.
             CheckTarget::NotACheck(_) => {}
-            CheckTarget::Nothing => {
-                return Err(format!(
-                    "drops the CHECK constraint {name}, which kilit does not know"
-                ));
-            }
+            // MySQL refuses it (error 3821, by the lab): see DropConstraint.
+            CheckTarget::Nothing => {}
             CheckTarget::Several => {
                 return Err(format!(
                     "drops the CHECK constraint {name}, a name that several of its constraints \
@@ -1175,11 +1323,9 @@ fn change(table: &mut Table, operation: &Operation) -> Result<(), String> {
             CheckTarget::Check(at) => table.checks[at].enforced = *enforced,
             // MySQL 8.0.46 and 8.4.13 refuse the statement: the table stays.
             CheckTarget::NotACheck(_) => {}
-            CheckTarget::Nothing => {
-                return Err(format!(
-                    "changes the CHECK constraint {name}, which kilit does not know"
-                ));
-            }
+            // MySQL refuses it (error 3821 for ALTER CHECK, 3940 for ALTER
+            // CONSTRAINT, by the lab): see DropConstraint.
+            CheckTarget::Nothing => {}
             CheckTarget::Several => {
                 return Err(format!(
                     "changes the CHECK constraint {name}, a name that several of its \
@@ -1353,7 +1499,8 @@ fn rename_generated_checks(table: &mut Table, to: &str) {
             continue;
         };
         if let Some(suffix) = name.strip_prefix(&from).filter(|suffix| !suffix.is_empty()) {
-            *name = format!("{to_prefix}{suffix}");
+            let renamed = format!("{to_prefix}{suffix}");
+            key.former_names.push(std::mem::replace(name, renamed));
         }
     }
 }
@@ -1608,6 +1755,41 @@ fn creates(sql: &str) -> bool {
 
 /// The name MySQL gives an index added without one: its first column's,
 /// with `_2`, `_3` and so on when that is taken.
+/// Whether `sql` writes the word REFERENCES, as a foreign key does.
+fn writes_references(sql: &str) -> bool {
+    sql.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|word| word.eq_ignore_ascii_case("references"))
+}
+
+/// Whether `operation`, a CHECK constraint clause or `DROP CONSTRAINT`,
+/// names what `table` does not have.
+fn missing_constraint(table: &Table, operation: &Operation, name: &str) -> bool {
+    match operation {
+        Operation::DropConstraint { .. } => table.constraints_named(name).is_empty(),
+        _ => table.check_target(name) == CheckTarget::Nothing,
+    }
+}
+
+/// Whether MySQL refuses to add `index` to `table`: its name is one the
+/// table's indexes have in any letter case, or a column of it is one the
+/// table does not have. An expression part names no column.
+pub(crate) fn refused_index(table: &Table, index: &Index) -> bool {
+    let taken = index.name.as_deref().is_some_and(|name| {
+        table
+            .indexes
+            .iter()
+            .any(|other| other.name.as_deref().is_some_and(|n| same(n, name)))
+    });
+    // The parser cuts a name that starts with a digit, such as `2e`, at the
+    // digits: such a key part says nothing kilit can check.
+    let missing = index.columns.iter().any(|entry| {
+        let column = indexed_column(entry.trim());
+        !column.starts_with(|c: char| c == '(' || c.is_ascii_digit())
+            && table.position_of(column.trim_matches('`')).is_none()
+    });
+    taken || missing
+}
+
 fn generated_index_name(table: &Table, index: &Index) -> String {
     let base = index
         .columns
@@ -2076,7 +2258,7 @@ mod tests {
     #[test]
     fn a_change_kilit_cannot_follow_loses_the_table() {
         let schema = after(
-            "alter table `orders` auto_increment = 1000;
+            "alter table `orders` alter column `note` set not null;
              ALTER TABLE users CONVERT TO CHARACTER SET latin1;
              alter table `shops` rename column `nope` to `yes`",
         );
@@ -2086,7 +2268,7 @@ mod tests {
             [
                 (
                     "orders",
-                    "line 1: kilit does not follow `AUTO_INCREMENT = 1000`"
+                    "line 1: kilit does not follow `ALTER COLUMN `note` SET NOT NULL`"
                 ),
                 (
                     "shops",
@@ -2483,19 +2665,17 @@ mod tests {
             "orders",
         );
         assert!(orders.primary_key.is_empty());
-        // No constraint of that name: a plain index is none.
-        for (name, reason) in [
-            (
-                "nosuch",
-                "line 1: drops the constraint nosuch, which kilit does not know",
-            ),
-            (
-                "i_note",
-                "line 1: drops the constraint i_note, which kilit does not know",
-            ),
-        ] {
+        // No constraint of that name: a plain index is none. MySQL refuses
+        // the statement (the lab: 3940), and the table stays as it was.
+        let untouched = after("SELECT 1");
+        for name in ["nosuch", "i_note"] {
             let schema = after(&format!("ALTER TABLE orders DROP CONSTRAINT {name}"));
-            assert_eq!(schema.lost().collect::<Vec<_>>(), [("orders", reason)]);
+            assert_eq!(schema.lost().count(), 0, "{name}");
+            assert_eq!(
+                known(&schema, "orders"),
+                known(&untouched, "orders"),
+                "{name}"
+            );
         }
         // A name two kinds share: MySQL refuses it.
         let schema = after(
@@ -2606,10 +2786,21 @@ ALTER TABLE t ADD CONSTRAINT C CHECK (a > 1);",
     }
 
     #[test]
-    fn a_check_clause_on_a_name_kilit_does_not_know_loses_the_table() {
+    fn a_check_clause_on_a_name_kilit_does_not_know_keeps_the_table_alone_and_loses_it_beside_others()
+     {
+        // MySQL refuses it (the lab: 3821, 3940): the table stays as it was.
+        let setup = format!("CREATE TABLE p (id INT PRIMARY KEY);\n{WITH_CHECKS}");
+        let before = from_sql(&setup);
         for sql in [
             "ALTER TABLE t DROP CHECK nothing",
             "ALTER TABLE t ALTER CHECK nothing ENFORCED",
+            "ALTER TABLE t ALTER CONSTRAINT nothing NOT ENFORCED",
+        ] {
+            let schema = from_sql(&format!("{setup}\n{sql};"));
+            assert_eq!(schema.lost().count(), 0, "{sql}");
+            assert_eq!(known(&schema, "t"), known(&before, "t"), "{sql}");
+        }
+        for sql in [
             "ALTER TABLE t DROP CHECK c, DROP CHECK c",
             "ALTER TABLE t DROP CHECK c, ALTER CHECK c ENFORCED",
         ] {

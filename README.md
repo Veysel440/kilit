@@ -117,7 +117,11 @@ kilit exits with 1 here, because three statements make writes wait. Every
 statement gets a **measured answer** (the algorithm, rebuild or copy, whether
 writes continue, and the scenarios behind it), **UNKNOWN** with the reason, or
 **not checked**: a `CREATE TABLE`, a `DROP TABLE`, a `SET`, a read or a write
-of rows. kilit never reports a change it has not measured as safe.
+of rows. kilit never calls a change safe that it has not measured safe on what
+it knows of the table. On a table it does not know, it says UNKNOWN and shows
+the answer the lab measured on a plain InnoDB table, the likely one. Where
+every table it may be gives the same result, such as writes wait for a FULLTEXT
+index, it says that.
 
 ## How it works
 
@@ -137,7 +141,7 @@ flowchart LR
     check --> status["exit status"]
 ```
 
-The lab runs each of 275 scenarios six ways on fresh tables. kilit follows your
+The lab runs each of 281 scenarios six ways on fresh tables. kilit follows your
 tables through the migration and answers each change from the matching
 measurement: [architecture](docs/architecture.md).
 
@@ -216,8 +220,12 @@ php artisan migrate --pretend | kilit check --schema database/schema/mysql-schem
 ```
 
 Run both against a database that has production's migrations applied
-([why](#in-ci)). Without `--schema`, kilit still answers what does not depend
-on the table. More in [the Laravel notes](docs/laravel.md).
+([why](#in-ci)). Give `--schema` every time: without it kilit does not know
+the tables the migration does not create, so it answers UNKNOWN for a change a
+table could make heavier (a foreign key, a MyISAM or COMPRESSED table), says
+only "writes wait" where every table it may be makes them wait (a FULLTEXT
+index), and the report says so once at the top. More in [the Laravel
+notes](docs/laravel.md).
 
 For SQL files or saved `--pretend` output (or standard input):
 
@@ -235,6 +243,7 @@ default. The header of every report names the exact release. `kilit servers`
 lists them and marks the default.
 
 `--schema` takes `php artisan schema:dump` or `mysqldump --no-data` output.
+A table the dump does not have is a table kilit does not know.
 kilit warns when its `-- Server version` line names another MySQL series. A
 MariaDB dump stops kilit with exit status 2 unless you give `--server`.
 
@@ -248,7 +257,7 @@ An example pipeline: the job pipes Laravel's `--pretend` output into
 flowchart LR
     pr["pull request"] --> job["CI job"]
     job --> pretend["php artisan migrate --pretend"]
-    pretend -->|"pipe"| check["kilit check --schema ..."]
+    pretend -->|"pipe"| check["kilit check --strict --schema ..."]
     check --> s0["0: the step passes"]
     check --> s1["1: a counted statement fails<br/>or makes writes wait"]
     check --> s2["2: kilit could not<br/>check everything"]
@@ -260,8 +269,12 @@ In a GitHub Actions job, the Action installs kilit from the release:
 ```yaml
 - uses: Veysel440/kilit@v0.1.0
 - shell: bash
-  run: php artisan migrate --pretend | kilit check --format github --server mysql-8.4 --schema database/schema/mysql-schema.sql
+  run: php artisan migrate --pretend | kilit check --strict --format github --server mysql-8.4 --schema database/schema/mysql-schema.sql
 ```
+
+`--strict` makes UNKNOWN stop the step too: UNKNOWN means a person must look,
+and without it kilit exits 0 for a statement it cannot answer
+(`--fail-on fails,waits` accepts UNKNOWN).
 
 To pin the Action to the commit the tag points at, write `uses:
 Veysel440/kilit@<commit sha> # v0.1.0`. Find the commit with `gh api
@@ -298,8 +311,11 @@ When several apply, 2 wins over 1, and 1 over 3.
 fails,waits,unknown` and cannot be combined with it. An empty list or another
 word is a usage error, exit status 2. Status 3 needs `unknown` in the list.
 
-An unknown statement is usually a change the lab has not measured, so by
-default it does not stop a build. A passing run ends its text with a line
+An unknown statement is a change the lab has not measured, or one on a table
+kilit does not know whose answer the table could change, so by default it does
+not stop a build: a run without `--schema` can exit 0 for a change that may
+make writes wait. Use `--strict` in
+CI. A passing run ends its text with a line
 saying how many were not counted.
 
 In a pipeline, `--strict` also stops on unknown statements, and `--fail-on
@@ -405,8 +421,10 @@ them. For other settings it names (`binlog_format`, `innodb_default_row_format`,
 matter. It cannot see a server configured otherwise. The limitations a user
 meets first:
 
-- `MODIFY` and `CHANGE` need the table's current definition: without a schema,
-  kilit lists what the lab measured instead of answering.
+- kilit answers only for tables it knows: the ones in the `--schema` file and
+  the ones the input creates. For any other table, or one it lost track of,
+  it says `UNKNOWN` and shows the likely answer, unless the change cannot
+  depend on the table. `MODIFY` and `CHANGE` need the current definition too.
 - A statement with several changes is `UNKNOWN`, and so is a type change other
   than between integer types: the lab measured single changes only.
 - Only MySQL 8.0.46 and 8.4.13 are measured. MariaDB is not supported.

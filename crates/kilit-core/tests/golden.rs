@@ -11,7 +11,8 @@ use std::path::Path;
 use kilit_core::{
     CASES, Condition, Engine, Impact, Knowledge, MYISAM_CASES, OLD_ALTER_TABLE_CASES,
     OLD_ALTER_TABLE_TWINS, Outcome, Prediction, ROW_FORMAT_CASES, RowFormat, ScenarioResult,
-    Schema, Statement, TableState, Variant, Verdict, check, impacts, parse, read_pretend,
+    Schema, Shared, Statement, TableState, Variant, Verdict, Writes, check, check_sessions,
+    impacts, parse, read_pretend,
 };
 
 /// The tables every lab scenario starts from.
@@ -276,6 +277,11 @@ fn what_kilit_cannot_see_shows_up_as_a_note() {
         let server = results.server.name();
         for case in CASES {
             for exception in case.exceptions {
+                // A name the table does not have is no note: dropping it is
+                // unknown on a known table, and on an unknown one.
+                if exception.conditions.contains(&Condition::NoSuchName) {
+                    continue;
+                }
                 // A note names the exception's first scenario.
                 let first = exception.scenarios[0];
                 for id in exception.scenarios {
@@ -298,8 +304,18 @@ fn what_kilit_cannot_see_shows_up_as_a_note() {
                             );
                         }
                         // Without the table a MODIFY has no answer at all.
-                        Prediction::Unknown { reason }
+                        Prediction::Unknown { reason, .. }
                             if reason.starts_with("MODIFY and CHANGE depend on") => {}
+                        // Without the table the answer is
+                        // unknown, or what every table shares; the exception
+                        // the table decides is a note either way.
+                        Prediction::Unknown { notes, .. }
+                        | Prediction::DependsOnTable { notes, .. } => {
+                            assert!(
+                                notes.iter().any(|note| note.contains(first)),
+                                "{first} is missing from the notes of {id}: {notes:?}"
+                            );
+                        }
                         other => panic!("{id} on {server}: {other:?}"),
                     }
                 }
@@ -361,6 +377,10 @@ fn statements_on(server: &str, schema: &str, statements: &[Statement]) -> Vec<St
             Prediction::Measured { verdict, .. } => verdict.to_string(),
             Prediction::Unknown { .. } => "unknown".to_owned(),
             Prediction::NotChecked { .. } => "not checked".to_owned(),
+            Prediction::DependsOnTable { shared, .. } => match shared {
+                Shared::WritesWait => "depends on the table: writes wait".to_owned(),
+                Shared::Fails => "depends on the table: fails".to_owned(),
+            },
         })
         .collect()
 }
@@ -371,12 +391,30 @@ const LARAVEL_TABLES: &str = include_str!("../examples/mysql-schema.sql");
 // The facts below are what the README promises. If a new measurement
 // changes one of them, the README has to change with it.
 
+// These facts are about tables kilit knows, so they run
+// against a small schema dump. Without the tables the answers are unknown.
+
+/// `shops` and an `orders` with a text column, as `php artisan schema:dump`
+/// writes them.
+const README_TABLES: &str = "create table `shops` (`id` bigint unsigned not null auto_increment, \
+    primary key (`id`)) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;
+    create table `orders` (`id` bigint unsigned not null auto_increment, `note` text null, \
+    primary key (`id`)) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;\n";
+
+/// The same with a `shop_id` column on `orders`.
+const README_TABLES_WITH_SHOP_ID: &str =
+    "create table `shops` (`id` bigint unsigned not null auto_increment, \
+    primary key (`id`)) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;
+    create table `orders` (`id` bigint unsigned not null auto_increment, \
+    `shop_id` bigint unsigned null, primary key (`id`), key `orders_shop_id_index` (`shop_id`)) \
+    engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;\n";
+
 #[test]
 fn a_constrained_foreign_id_copies_the_table() {
     // $table->foreignId('shop_id')->nullable()->constrained();
     assert_eq!(
         on_mysql_84(
-            "",
+            README_TABLES,
             "alter table `orders` add `shop_id` bigint unsigned null;
              alter table `orders` add constraint `orders_shop_id_foreign` \
              foreign key (`shop_id`) references `shops` (`id`);"
@@ -393,7 +431,7 @@ fn turning_foreign_key_checks_off_avoids_the_copy() {
     // Schema::disableForeignKeyConstraints(); ... enableForeignKeyConstraints();
     assert_eq!(
         on_mysql_84(
-            "",
+            README_TABLES_WITH_SHOP_ID,
             "SET FOREIGN_KEY_CHECKS=0;
              alter table `orders` add constraint `orders_shop_id_foreign` \
              foreign key (`shop_id`) references `shops` (`id`);
@@ -412,7 +450,7 @@ fn a_fulltext_index_makes_writes_wait() {
     // $table->fullText('note');
     assert_eq!(
         on_mysql_84(
-            "",
+            README_TABLES,
             "alter table `orders` add fulltext `orders_note_fulltext`(`note`)"
         ),
         ["INPLACE, rebuilds the table, writes wait"]
@@ -437,7 +475,7 @@ fn the_other_measured_expression_defaults_copy_the_table() {
     // $table->date('due_on')->useCurrent(); and DB::raw() defaults.
     assert_eq!(
         on_mysql_84(
-            "",
+            README_TABLES,
             "alter table `orders` add `due_on` date not null default (CURDATE());
              alter table `orders` add `placed_at` datetime not null default (NOW());
              alter table `orders` add `seen_at` timestamp null default (CURRENT_TIMESTAMP);
@@ -465,7 +503,7 @@ fn a_functional_index_makes_writes_wait() {
 fn forcing_inplace_on_a_new_column_rebuilds_the_table() {
     assert_eq!(
         on_mysql_84(
-            "",
+            README_TABLES,
             "alter table `orders` add `coupon` varchar(255) null, algorithm=inplace"
         ),
         ["INPLACE, rebuilds the table, writes continue"]
@@ -952,8 +990,8 @@ fn predictions_on(server: &str, schema: &str, sql: &str) -> Vec<Prediction> {
 /// The notes of a measured prediction.
 fn notes_of(prediction: &Prediction) -> &[String] {
     match prediction {
-        Prediction::Measured { notes, .. } => notes,
-        other => panic!("expected a measured answer, got {other:?}"),
+        Prediction::Measured { notes, .. } | Prediction::Unknown { notes, .. } => notes,
+        other => panic!("expected a measured or an unknown answer, got {other:?}"),
     }
 }
 
@@ -1736,7 +1774,8 @@ fn restrict_fk_on_non_standard_key_makes_the_index_rules_unknown_even_when_a_tab
              FOREIGN KEY (user_id) REFERENCES users (id);"
         )
     };
-    let lost = |table: &str| format!("{LAB_TABLES}ALTER TABLE {table} AUTO_INCREMENT = 5;");
+    let lost =
+        |table: &str| format!("{LAB_TABLES}ALTER TABLE {table} CONVERT TO CHARACTER SET utf8mb4;");
     let schemas = [
         ("neither table", String::new()),
         ("no parent", format!("{LAB_TABLES}DROP TABLE users;")),
@@ -1757,7 +1796,9 @@ fn restrict_fk_on_non_standard_key_makes_the_index_rules_unknown_even_when_a_tab
     for (name, schema) in &schemas {
         let alter = "ALTER TABLE orders ADD CONSTRAINT fk_orders_user \
                      FOREIGN KEY (user_id) REFERENCES users (id);";
-        assert_eq!(on_both(schema, alter), [COPY, COPY], "{name}");
+        // A key on a table kilit does not know is unknown,
+        // for the child and for the parent alike.
+        assert_eq!(on_both(schema, alter), ["unknown", "unknown"], "{name}");
     }
 }
 
@@ -1823,8 +1864,12 @@ fn turning_foreign_key_checks_back_on_brings_the_failure_back() {
 }
 
 #[test]
-fn with_foreign_key_checks_off_a_table_kilit_does_not_know_keeps_todays_answer_and_notes() {
-    let lost = |table: &str| format!("{LAB_TABLES}ALTER TABLE {table} AUTO_INCREMENT = 5;");
+fn with_foreign_key_checks_off_a_table_kilit_does_not_know_is_unknown() {
+    // A key on a table kilit does not know is unknown
+    // with the checks off too; the missing column, SET NULL on a NOT NULL
+    // column and MyISAM are what the tables would decide.
+    let lost =
+        |table: &str| format!("{LAB_TABLES}ALTER TABLE {table} CONVERT TO CHARACTER SET utf8mb4;");
     let sql = "SET foreign_key_checks = 0;
         ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name \
         FOREIGN KEY (user_name) REFERENCES users (name);";
@@ -1838,30 +1883,12 @@ fn with_foreign_key_checks_off_a_table_kilit_does_not_know_keeps_todays_answer_a
         for server in [MYSQL_80, MYSQL_84] {
             let predictions = predictions_on(server, &schema, sql);
             assert!(
-                matches!(
-                    &predictions[1],
-                    Prediction::Measured {
-                        verdict: Verdict::Runs { .. },
-                        ..
-                    }
-                ),
+                matches!(&predictions[1], Prediction::Unknown { .. }),
                 "{name} on {server}: {:?}",
                 predictions[1]
             );
-            // The one note it always had: rows that point nowhere are kept.
-            // B1b: and one for what the tables would decide (a missing
-            // column, SET NULL on a NOT NULL column, MyISAM), which kilit
-            // cannot see when it does not know both tables.
-            let notes = notes_of(&predictions[1]);
-            assert_eq!(notes.len(), 2, "{name} on {server}: {notes:?}");
-            assert!(
-                notes
-                    .iter()
-                    .any(|note| note.starts_with("if a column of the key is missing")),
-                "{name} on {server}: {notes:?}"
-            );
         }
-        assert_eq!(on_both(&schema, sql), [INPLACE, INPLACE], "{name}");
+        assert_eq!(on_both(&schema, sql), [UNKNOWN, UNKNOWN], "{name}");
     }
 }
 
@@ -1871,7 +1898,8 @@ fn with_foreign_key_checks_off_a_table_kilit_does_not_know_keeps_todays_answer_a
 
 #[test]
 fn a_foreign_key_is_never_a_failure_when_a_table_is_missing_or_lost() {
-    let lost = |table: &str| format!("{LAB_TABLES}ALTER TABLE {table} AUTO_INCREMENT = 5;");
+    let lost =
+        |table: &str| format!("{LAB_TABLES}ALTER TABLE {table} CONVERT TO CHARACTER SET utf8mb4;");
     let schemas = [
         ("neither table", String::new()),
         ("no parent", format!("{LAB_TABLES}DROP TABLE users;")),
@@ -1900,20 +1928,12 @@ fn a_foreign_key_is_never_a_failure_when_a_table_is_missing_or_lost() {
             assert_eq!(known, [FAILS_1822, FAILS_6125]);
         }
         for (state, schema) in &schemas {
-            assert_eq!(on_both(schema, &sql), [COPY, COPY], "{shape}, {state}");
-            for server in [MYSQL_80, MYSQL_84] {
-                // Today's two notes, and one more for each of the five
-                // exceptions kilit could not look at; B1b adds one for the
-                // shapes the tables would decide (a missing column, SET NULL
-                // on a NOT NULL column, MyISAM).
-                let predictions = predictions_on(server, schema, &sql);
-                assert_eq!(
-                    notes_of(&predictions[0]).len(),
-                    8,
-                    "{shape}, {state} on {server}: {:?}",
-                    predictions[0]
-                );
-            }
+            // Unknown, never COPY and never a failure.
+            assert_eq!(
+                on_both(schema, &sql),
+                ["unknown", "unknown"],
+                "{shape}, {state}"
+            );
         }
     }
 }
@@ -3116,7 +3136,7 @@ fn a_myisam_foreign_key_that_kilit_cannot_place_loses_the_table() {
         assert_eq!(predictions.len(), 3, "{server}");
         for prediction in &predictions[1..] {
             match prediction {
-                Prediction::Unknown { reason } => {
+                Prediction::Unknown { reason, .. } => {
                     assert!(reason.contains("MyISAM"), "{server}: {reason}")
                 }
                 other => panic!("{server}: {other:?}"),
@@ -3180,7 +3200,7 @@ fn every_change_to_a_memory_archive_or_unknown_engine_table_is_unknown() {
             for server in [MYSQL_80, MYSQL_84] {
                 let predictions = predictions_on(server, &schema, &sql);
                 match &predictions[..] {
-                    [Prediction::Unknown { reason }] => assert!(
+                    [Prediction::Unknown { reason, .. }] => assert!(
                         reason.contains(engine),
                         "{operation} on {engine}: the reason does not name the engine: {reason}"
                     ),
@@ -3255,7 +3275,7 @@ fn a_quoted_engine_name_that_the_parser_cannot_read_makes_the_table_unknown() {
     for server in [MYSQL_80, MYSQL_84] {
         for options in ["ENGINE='MyISAM'", "ENGINE=\"MyISAM\""] {
             match predictions_on(server, "", &sql(options)).last().unwrap() {
-                Prediction::Unknown { reason } => {
+                Prediction::Unknown { reason, .. } => {
                     assert!(reason.contains("MyISAM"), "{options}: {reason}")
                 }
                 other => panic!("{options} on {server}: {other:?}"),
@@ -3272,14 +3292,15 @@ fn a_table_copied_with_like_from_a_myisam_table_is_lost_and_unknown() {
     for server in [MYSQL_80, MYSQL_84] {
         let predictions = predictions_on(server, &myisam_lab_after(&[]), sql);
         match predictions.last().unwrap() {
-            Prediction::Unknown { reason } => {
+            Prediction::Unknown { reason, .. } => {
                 assert!(reason.contains("MyISAM"), "{server}: {reason}")
             }
             other => panic!("{server}: {other:?}"),
         }
     }
-    // The control: a copy of an InnoDB table keeps today's answer.
-    assert_answer("InnoDB copy", LAB_TABLES, sql, INSTANT);
+    // The control: kilit does not read LIKE, so a copy of an InnoDB table is
+    // lost too (unknown).
+    assert_answer("InnoDB copy", LAB_TABLES, sql, UNKNOWN);
 }
 
 #[test]
@@ -3387,18 +3408,20 @@ fn a_new_myisam_table_follows_the_measurements_for_myisam() {
 }
 
 #[test]
-fn a_lost_myisam_table_is_unknown_and_a_lost_innodb_table_keeps_its_answer() {
+fn a_lost_table_is_unknown_whatever_its_engine() {
     // A change kilit cannot follow loses the table. (B1b: dropping a column
     // the table does not have no longer does: the table stays known.)
-    let lose = "ALTER TABLE orders AUTO_INCREMENT = 5;";
+    let lose = "ALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4;";
     let then = "ALTER TABLE orders ADD COLUMN c INT NULL;";
     let myisam = all_on_both(&myisam_lab_after(&[]), &format!("{lose}\n{then}"));
     for answers in myisam {
         assert_eq!(answers.last().unwrap(), "unknown", "{answers:?}");
     }
+    // A lost InnoDB table no longer keeps the answer of the
+    // plain table.
     let innodb = all_on_both(&lab_after(&[]), &format!("{lose}\n{then}"));
     for answers in innodb {
-        assert_eq!(answers.last().unwrap(), INSTANT, "{answers:?}");
+        assert_eq!(answers.last().unwrap(), "unknown", "{answers:?}");
     }
 }
 
@@ -3464,9 +3487,10 @@ fn a_change_of_engine_keeps_a_table_without_foreign_keys_known_and_loses_one_wit
 }
 
 #[test]
-fn a_missing_table_gets_the_innodb_answer_whatever_its_engine_was() {
+fn a_missing_table_is_unknown_whatever_its_engine_was() {
+    // No InnoDB answer for a table kilit does not have.
     let sql = "ALTER TABLE orders ADD COLUMN c INT NULL;";
-    assert_answer("nothing known", "", sql, INSTANT);
+    assert_answer("nothing known", "", sql, "unknown");
     // A MyISAM table that was dropped is missing again.
     assert_answer(
         "dropped",
@@ -3474,7 +3498,7 @@ fn a_missing_table_gets_the_innodb_answer_whatever_its_engine_was() {
         "CREATE TABLE orders (id INT PRIMARY KEY) ENGINE=MyISAM;
          DROP TABLE orders;
          ALTER TABLE orders ADD COLUMN c INT NULL;",
-        INSTANT,
+        "unknown",
     );
 }
 
@@ -3493,7 +3517,7 @@ fn innodb_tables_keep_their_answers_when_the_engine_is_read() {
 
 #[test]
 fn setting_default_storage_engine_to_innodb_still_leaves_a_new_table_without_a_known_engine() {
-    // Decision 1: any form of the setting, before a CREATE TABLE without ENGINE.
+    // Any form of the setting, before a CREATE TABLE without ENGINE.
     assert_answer(
         "SET to InnoDB",
         "",
@@ -3769,7 +3793,7 @@ fn the_reason_for_a_myisam_foreign_key_with_an_unknown_parent_starts_with_kilit_
         let results = Knowledge::built_in().server(server).unwrap();
         let findings = check(&statements, &Schema::new(), results);
         match &findings.last().unwrap().prediction {
-            Prediction::Unknown { reason } => {
+            Prediction::Unknown { reason, .. } => {
                 assert!(
                     reason.starts_with("kilit cannot tell if"),
                     "{server}: {reason}"
@@ -3813,7 +3837,7 @@ fn unknown_reason_on(server: &str, schema: &str, sql: &str) -> String {
     let results = Knowledge::built_in().server(server).unwrap();
     let findings = check(&parse(sql), &Schema::from_sql(schema), results);
     match &findings.last().unwrap().prediction {
-        Prediction::Unknown { reason } => reason.clone(),
+        Prediction::Unknown { reason, .. } => reason.clone(),
         other => panic!("{server}: {sql}: {other:?}"),
     }
 }
@@ -3834,7 +3858,7 @@ fn a_new_column_defaulting_to_uuid_short_sysdate_or_user_fails_with_1674_on_both
 fn the_same_three_defaults_fail_without_a_schema_and_on_a_lost_innodb_table() {
     // The lab's table is not needed for the answer: the failure does not
     // depend on anything in the table. A lost table keeps its InnoDB answers.
-    let lost = format!("{LAB_TABLES}ALTER TABLE orders AUTO_INCREMENT = 5;");
+    let lost = format!("{LAB_TABLES}ALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4;");
     for column in BINLOG_UNSAFE_COLUMNS {
         let sql = format!("ALTER TABLE orders ADD COLUMN {column};");
         assert_answer(column, "", &sql, "fails with error 1674");
@@ -3911,7 +3935,7 @@ fn a_failed_uuid_short_default_leaves_the_table_as_it_was() {
             "ALTER TABLE orders ADD COLUMN ref BIGINT UNSIGNED NULL;\n{modify}"
         ));
         assert!(
-            !matches!(&added, Prediction::Unknown { reason } if reason.contains(not_there)),
+            !matches!(&added, Prediction::Unknown { reason, .. } if reason.contains(not_there)),
             "{server}: {added:?}"
         );
         for default in ["(UUID_SHORT())", "(SYSDATE())", "(USER())"] {
@@ -3919,7 +3943,7 @@ fn a_failed_uuid_short_default_leaves_the_table_as_it_was() {
                 "ALTER TABLE orders ADD COLUMN ref BIGINT UNSIGNED NULL DEFAULT {default};\n{modify}"
             );
             match last(&sql) {
-                Prediction::Unknown { reason } => {
+                Prediction::Unknown { reason, .. } => {
                     assert!(reason.contains(not_there), "{server}: {default}: {reason}")
                 }
                 other => panic!("{server}: {default}: {other:?}"),
@@ -4682,7 +4706,7 @@ fn tables_without_a_row_format_or_with_the_default_one_keep_their_answers() {
 
 #[test]
 fn row_formats_and_block_sizes_the_lab_did_not_measure_make_every_alter_unknown() {
-    // Decision 2 and the hand tests: KEY_BLOCK_SIZE 1, 2, 4 and 16 (not
+    // The hand tests: KEY_BLOCK_SIZE 1, 2, 4 and 16 (not
     // measured), KEY_BLOCK_SIZE with another row format (MySQL: 1031 at
     // CREATE, 1478 at ALTER), FIXED and a misspelling (1031), and quoted
     // values (1064).
@@ -4732,7 +4756,7 @@ fn a_quoted_row_format_or_block_size_says_the_servers_do_not_accept_it() {
 
 #[test]
 fn a_myisam_table_with_a_row_format_or_block_size_is_unknown() {
-    // Decision 6. Without the option the MyISAM answer is COPY.
+    // Without the option the MyISAM answer is COPY.
     assert_orders(
         "no option",
         &lab_tables_with(Some("MyISAM"), ""),
@@ -4755,7 +4779,7 @@ fn a_myisam_table_with_a_row_format_or_block_size_is_unknown() {
 
 #[test]
 fn a_change_outside_the_eight_on_a_compressed_compact_or_redundant_table_is_unknown() {
-    // Decision 2: only the measured operations get an answer, never a
+    // Only the measured operations get an answer, never a
     // DYNAMIC one.
     let add_foreign_key = MYISAM_ADD_FK;
     for options in [COMPRESSED, COMPACT_OPTION, REDUNDANT_OPTION] {
@@ -4835,7 +4859,7 @@ fn an_index_kilit_cannot_measure_the_key_bytes_of_on_a_compact_table_is_unknown(
 
 #[test]
 fn adding_a_column_to_a_non_dynamic_table_with_a_fulltext_index_is_unknown() {
-    // Decision 8: on DYNAMIC a FULLTEXT index changes the answer; nothing
+    // On DYNAMIC a FULLTEXT index changes the answer; nothing
     // measured the combination.
     let keys = ",\n  FULLTEXT KEY `ft_note` (`note`)";
     for options in [COMPRESSED, COMPACT_OPTION, REDUNDANT_OPTION] {
@@ -4871,7 +4895,7 @@ fn naming_innodb_default_row_format_makes_tables_without_a_row_format_unknown() 
         assert_answer(
             set,
             LAB_TABLES,
-            &format!("ALTER TABLE orders AUTO_INCREMENT = 5;\n{set};\n{alter}"),
+            &format!("ALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4;\n{set};\n{alter}"),
             UNKNOWN,
         );
         // What ran before the setting keeps its answer.
@@ -4884,7 +4908,7 @@ fn naming_innodb_default_row_format_makes_tables_without_a_row_format_unknown() 
 #[test]
 fn after_innodb_default_row_format_a_dynamic_table_keeps_all_its_answers_and_a_compact_one_all_but_its_indexes()
  {
-    // Decision 5: a written ROW_FORMAT does not depend on the
+    // A written ROW_FORMAT does not depend on the
     // default. kilit has no key-byte rule on DYNAMIC, so its index answer
     // stays; on COMPACT the index answers depend on the 767-byte limit and
     // are unknown.
@@ -4930,7 +4954,7 @@ fn after_innodb_default_row_format_a_dynamic_table_keeps_all_its_answers_and_a_c
 
 #[test]
 fn naming_innodb_strict_mode_makes_tables_created_after_it_without_a_row_format_unknown() {
-    // Decision 5. Tables created before the setting keep their answers.
+    // Tables created before the setting keep their answers.
     let create = "CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, amount INT NOT NULL, \
                   email VARCHAR(255) NULL) DEFAULT CHARSET=utf8mb4";
     for set in [
@@ -4972,7 +4996,7 @@ fn naming_innodb_strict_mode_makes_tables_created_after_it_without_a_row_format_
 
 #[test]
 fn naming_innodb_strict_mode_makes_index_answers_on_other_row_formats_unknown() {
-    // Decision 5: without strict mode MySQL cuts a too long key instead of
+    // Without strict mode MySQL cuts a too long key instead of
     // failing with 1071. The tables are created after the setting.
     let set = "SET SESSION innodb_strict_mode = OFF";
     for options in [COMPACT_OPTION, REDUNDANT_OPTION, COMPRESSED] {
@@ -5010,10 +5034,10 @@ fn naming_innodb_strict_mode_makes_index_answers_on_other_row_formats_unknown() 
 #[test]
 fn an_alter_that_writes_a_row_format_or_block_size_on_a_table_kilit_does_not_know_leaves_it_unknown()
  {
-    // Decision 4 of step 9b, kept for a table kilit cannot see (step 11b):
+    // Kept for a table kilit cannot see (step 11b):
     // the statement is read, but nothing says what the table was, so it
     // may have a row format other than DYNAMIC.
-    let lost = format!("{LAB_TABLES}ALTER TABLE orders AUTO_INCREMENT = 5;");
+    let lost = format!("{LAB_TABLES}ALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4;");
     let then = "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;";
     for schema in [lost.as_str(), ""] {
         for option in [
@@ -5035,21 +5059,22 @@ fn an_alter_that_writes_a_row_format_or_block_size_on_a_table_kilit_does_not_kno
 }
 
 #[test]
-fn an_unreadable_alter_that_writes_neither_keeps_the_answer_of_a_dynamic_table() {
-    let lose = "ALTER TABLE orders AUTO_INCREMENT = 5;";
+fn an_unreadable_alter_that_writes_neither_leaves_a_dynamic_table_unknown() {
+    let lose = "ALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4;";
     let then = "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;";
-    assert_answer("dynamic", LAB_TABLES, &format!("{lose}\n{then}"), INSTANT);
+    // The table is lost, so the later statement is unknown.
+    assert_answer("dynamic", LAB_TABLES, &format!("{lose}\n{then}"), UNKNOWN);
     assert_answer(
         "dynamic written",
         &lab_with_options(" ROW_FORMAT=DYNAMIC", &[]),
         &format!("{lose}\n{then}"),
-        INSTANT,
+        UNKNOWN,
     );
 }
 
 #[test]
 fn a_known_compressed_compact_or_redundant_table_lost_by_any_unreadable_statement_is_unknown() {
-    let lose = "ALTER TABLE orders AUTO_INCREMENT = 5;";
+    let lose = "ALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4;";
     let then = "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;";
     for options in [
         COMPRESSED,
@@ -5068,7 +5093,7 @@ fn a_known_compressed_compact_or_redundant_table_lost_by_any_unreadable_statemen
 
 #[test]
 fn a_new_compressed_table_is_never_waited_for_and_a_new_compact_table_can_still_fail() {
-    // Decision 9: the new-table rule uses the measurement for the table's
+    // The new-table rule uses the measurement for the table's
     // row format.
     let create = |options: &str| {
         format!(
@@ -5328,7 +5353,7 @@ fn turning_old_alter_table_off_again_gives_the_normal_answers() {
 
 #[test]
 fn old_alter_table_set_in_a_way_kilit_cannot_follow_makes_every_later_alter_unknown() {
-    // Decision 1: GLOBAL, PERSIST, PERSIST_ONLY, DEFAULT, a value that is
+    // GLOBAL, PERSIST, PERSIST_ONLY, DEFAULT, a value that is
     // neither on nor off, and a multi-assignment that names the global
     // variable. Hand tests: SET GLOBAL is not seen by the session, DEFAULT
     // takes the global value, = 2 and = YES give 1231.
@@ -5435,14 +5460,14 @@ fn with_old_alter_table_on_a_table_kilit_cannot_vouch_for_is_unknown() {
     let alter = format!("ALTER TABLE orders {ADD_COLUMN}");
     for clause in ["", ", ALGORITHM=INSTANT"] {
         let sql = format!("{set}{alter}{clause};");
-        // MyISAM (decision 6), COMPRESSED, COMPACT and REDUNDANT (decision 8).
+        // MyISAM, COMPRESSED, COMPACT and REDUNDANT.
         for (name, schema) in [
             ("myisam", lab_tables_with(Some("MyISAM"), "")),
             ("compressed", lab_with_options(COMPRESSED, &[])),
             ("key block size", lab_with_options(" KEY_BLOCK_SIZE=8", &[])),
             ("compact", lab_with_options(COMPACT_OPTION, &[])),
             ("redundant", lab_with_options(REDUNDANT_OPTION, &[])),
-            // Decision 8: a FULLTEXT index changes the DYNAMIC answer.
+            // A FULLTEXT index changes the DYNAMIC answer.
             (
                 "fulltext",
                 dump_orders("", ",\n  FULLTEXT KEY `ft_note` (`note`)"),
@@ -5460,7 +5485,7 @@ fn laravel_s_foreign_key_checks_lines_are_not_mistaken_for_old_alter_table() {
     // The set forms Laravel writes do not name old_alter_table.
     assert_eq!(
         on_mysql_84(
-            "",
+            README_TABLES,
             "SET FOREIGN_KEY_CHECKS=0;
              alter table `orders` add `coupon` varchar(255) null;
              SET FOREIGN_KEY_CHECKS=1;"
@@ -5605,7 +5630,7 @@ fn first_reason_on(server: &str, schema: &str, sql: &str) -> String {
     let results = Knowledge::built_in().server(server).unwrap();
     let findings = check(&parse(sql), &Schema::from_sql(schema), results);
     match &findings[0].prediction {
-        Prediction::Unknown { reason } => reason.clone(),
+        Prediction::Unknown { reason, .. } => reason.clone(),
         other => panic!("{server}: {sql}: {other:?}"),
     }
 }
@@ -5750,7 +5775,7 @@ fn a_table_comment_leaves_the_table_known_and_free_of_the_fulltext_note() {
         );
     }
     // The contrast: a statement kilit cannot follow does lose it.
-    let lost = format!("ALTER TABLE orders AUTO_INCREMENT = 5;\n{ADD_C}");
+    let lost = format!("ALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4;\n{ADD_C}");
     for server in [MYSQL_80, MYSQL_84] {
         let predictions = predictions_on(server, LAB_TABLES, &lost);
         assert!(mentions_fulltext(&predictions[1]), "{server}");
@@ -5788,7 +5813,7 @@ fn the_column_changes_after_a_table_comment_keep_their_answers() {
 
 #[test]
 fn a_table_comment_on_myisam_a_non_dynamic_row_format_or_old_alter_table_is_unknown() {
-    // Decision 2: the lab measured only an InnoDB DYNAMIC table with
+    // The lab measured only an InnoDB DYNAMIC table with
     // old_alter_table off.
     let comment = "ALTER TABLE orders COMMENT = 'x';";
     assert_answer("myisam", &myisam_lab_after(&[]), comment, UNKNOWN);
@@ -5814,12 +5839,13 @@ fn a_table_comment_on_myisam_a_non_dynamic_row_format_or_old_alter_table_is_unkn
 
 #[test]
 fn a_table_comment_on_a_table_kilit_does_not_know_changes_nothing_about_it() {
-    let lost = format!("{LAB_TABLES}ALTER TABLE orders AUTO_INCREMENT = 5;");
+    let lost = format!("{LAB_TABLES}ALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4;");
     let sql = format!("ALTER TABLE orders COMMENT = 'x';\n{ADD_C}");
-    // A missing table stays missing: today's InnoDB answers.
-    assert_every_answer("missing", "", &sql, &[INPLACE, INSTANT]);
-    // A lost table stays lost: its later statement keeps the FULLTEXT note.
-    assert_every_answer("lost", &lost, &sql, &[INPLACE, INSTANT]);
+    // A missing table stays missing, and a lost one lost:
+    // nothing is answered for either, and the later statement keeps the
+    // FULLTEXT note.
+    assert_every_answer("missing", "", &sql, &[UNKNOWN, UNKNOWN]);
+    assert_every_answer("lost", &lost, &sql, &[UNKNOWN, UNKNOWN]);
     for server in [MYSQL_80, MYSQL_84] {
         let predictions = predictions_on(server, &lost, &sql);
         assert!(mentions_fulltext(&predictions[1]), "{server}");
@@ -6021,7 +6047,7 @@ fn a_change_to_myisam_of_a_table_with_a_foreign_key_or_a_parent_loses_the_table(
 
 #[test]
 fn an_engine_or_row_format_alter_on_a_table_kilit_does_not_know_leaves_it_as_before() {
-    let lost = format!("{LAB_TABLES}ALTER TABLE orders AUTO_INCREMENT = 5;");
+    let lost = format!("{LAB_TABLES}ALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4;");
     for schema in ["", lost.as_str()] {
         // The engine written is the engine the table has.
         assert_every_answer(
@@ -6034,7 +6060,7 @@ fn an_engine_or_row_format_alter_on_a_table_kilit_does_not_know_leaves_it_as_bef
             "innodb",
             schema,
             &format!("ALTER TABLE orders ENGINE=InnoDB;\n{ADD_C}"),
-            &[UNKNOWN, INSTANT],
+            &[UNKNOWN, UNKNOWN],
         );
         // A comment next to the engine changes nothing else.
         assert_every_answer(
@@ -6047,9 +6073,8 @@ fn an_engine_or_row_format_alter_on_a_table_kilit_does_not_know_leaves_it_as_bef
 }
 
 /// A statement kilit still cannot read, and whether it loses `orders`.
-const UNREADABLE_OPTION_ALTERS: [(&str, bool); 16] = [
+const UNREADABLE_OPTION_ALTERS: [(&str, bool); 15] = [
     ("ALTER TABLE orders COMMENT='x' ALGORITHM=INSTANT", true),
-    ("ALTER TABLE orders ENGINE='InnoDB'", false),
     ("ALTER TABLE orders ROW_FORMAT='DYNAMIC'", false),
     ("ALTER TABLE orders KEY_BLOCK_SIZE='8'", false),
     ("ALTER TABLE orders COMMENT='x', AUTO_INCREMENT=5", true),
@@ -6772,6 +6797,9 @@ fn shown_answer(impact: Impact, prediction: &Prediction) -> String {
         ),
         Prediction::Unknown { .. } => format!("{impact:?}: unknown"),
         Prediction::NotChecked { .. } => format!("{impact:?}: not checked"),
+        Prediction::DependsOnTable { shared, .. } => {
+            format!("{impact:?}: depends on the table, {shared:?}")
+        }
     }
 }
 
@@ -6865,7 +6893,7 @@ fn refusal_problems(statement: &str) -> Vec<String> {
     let mut problems = Vec::new();
     for server in [MYSQL_80, MYSQL_84] {
         match predictions_on(server, S13A_TABLES, statement).last() {
-            Some(Prediction::Unknown { reason }) if reason.starts_with(NOT_ACCEPTED) => {}
+            Some(Prediction::Unknown { reason, .. }) if reason.starts_with(NOT_ACCEPTED) => {}
             other => problems.push(format!("{server}: {statement}\n    got {other:?}")),
         }
     }
@@ -6899,7 +6927,7 @@ fn assert_not_refused(statements: &[&str]) {
     let mut problems = Vec::new();
     for statement in statements {
         for server in [MYSQL_80, MYSQL_84] {
-            if let Some(Prediction::Unknown { reason }) =
+            if let Some(Prediction::Unknown { reason, .. }) =
                 predictions_on(server, S13A_TABLES, statement).last()
                 && reason.starts_with(NOT_ACCEPTED)
             {
@@ -7634,7 +7662,7 @@ fn a_refused_alter_leaves_the_table_known_so_the_next_add_column_has_no_fulltext
             let predictions = predictions_on(server, S13A_TABLES, &sql);
             assert_eq!(predictions.len(), 2, "{refused}");
             assert!(
-                matches!(&predictions[0], Prediction::Unknown { reason } if reason.starts_with(NOT_ACCEPTED)),
+                matches!(&predictions[0], Prediction::Unknown { reason, .. } if reason.starts_with(NOT_ACCEPTED)),
                 "{server}: {refused}: {:?}",
                 predictions[0]
             );
@@ -7680,7 +7708,8 @@ fn a_refused_create_table_creates_no_table_for_the_statements_after_it() {
         for server in [MYSQL_80, MYSQL_84] {
             assert_eq!(
                 impacts_on(server, S13A_TABLES, &sql),
-                [Impact::Unknown, Impact::WritesContinue],
+                // tq is not known, so nothing runs on it.
+                [Impact::Unknown, Impact::Unknown],
                 "{server}: {refused}"
             );
             assert!(
@@ -7731,7 +7760,7 @@ fn assert_accepted_as_an_index(statements: &[&str]) {
                     "{server}: {statement}\n    expected {INPLACE}, got {got:?}"
                 ));
             }
-            if let Some(Prediction::Unknown { reason }) =
+            if let Some(Prediction::Unknown { reason, .. }) =
                 predictions_on(server, KW_TABLE, statement).last()
                 && reason.contains("do not accept")
             {
@@ -7773,7 +7802,7 @@ fn a_create_table_with_prefix_keys_on_ceil_floor_and_trim_is_not_refused() {
     let sql = format!("{create};\nALTER TABLE t3 ADD COLUMN c INT NULL;");
     for server in [MYSQL_80, MYSQL_84] {
         match predictions_on(server, KW_TABLE, create).last() {
-            Some(Prediction::Unknown { reason }) if reason.contains("do not accept") => {
+            Some(Prediction::Unknown { reason, .. }) if reason.contains("do not accept") => {
                 panic!("{server}: refused: {reason}")
             }
             _ => {}
@@ -7855,7 +7884,7 @@ fn a_number_as_a_key_part_is_refused_on_both_servers() {
     ] {
         for server in [MYSQL_80, MYSQL_84] {
             match predictions_on(server, KW_TABLE, statement).last() {
-                Some(Prediction::Unknown { reason }) if reason.starts_with(NOT_ACCEPTED) => {}
+                Some(Prediction::Unknown { reason, .. }) if reason.starts_with(NOT_ACCEPTED) => {}
                 other => panic!("{server}: {statement}\n    got {other:?}"),
             }
         }
@@ -7945,7 +7974,7 @@ fn assert_unknown_13b(schema: &str, sql: &str, part: &str) -> String {
     let mut reason = String::new();
     for server in [MYSQL_80, MYSQL_84] {
         match predictions_on(server, schema, sql).pop() {
-            Some(Prediction::Unknown { reason: found }) => {
+            Some(Prediction::Unknown { reason: found, .. }) => {
                 assert!(
                     found.contains(part),
                     "{server}: {sql}\n    reason {found:?} lacks {part:?}"
@@ -8344,7 +8373,7 @@ fn clauses_mysql_rejects_are_unknown_and_leave_the_table_known_and_unchanged() {
             let predictions = predictions_on(server, S13B_SCHEMA, &sql);
             assert_eq!(predictions.len(), 4, "{server}: {sql}");
             match &predictions[0] {
-                Prediction::Unknown { reason } if reason.starts_with(NOT_ACCEPTED) => {}
+                Prediction::Unknown { reason, .. } if reason.starts_with(NOT_ACCEPTED) => {}
                 other => panic!("{server}: {statement}\n    got {other:?}"),
             }
             assert!(
@@ -8446,10 +8475,10 @@ fn a_name_that_is_no_check_of_the_table_is_unknown_and_the_table_unchanged() {
 }
 
 #[test]
-fn a_name_the_table_has_no_constraint_or_index_of_is_unknown_and_the_table_is_lost() {
-    // Error 3821 / 3940 on both servers (hand tests). kilit loses the table
-    // as it does for DROP CONSTRAINT of an unknown name, so the ADD COLUMN
-    // after it gets the notes of a table kilit does not know.
+fn a_name_the_table_has_no_constraint_or_index_of_is_unknown_and_the_table_stays_known() {
+    // Error 3821 / 3940 on both servers (hand tests). The
+    // statement is unknown and the table stays known, so the ADD COLUMN after
+    // it gets no note of a table kilit does not know.
     for statement in [
         "ALTER TABLE orders DROP CHECK nosuch",
         "ALTER TABLE orders DROP CHECK note",
@@ -8462,20 +8491,21 @@ fn a_name_the_table_has_no_constraint_or_index_of_is_unknown_and_the_table_is_lo
         for server in [MYSQL_80, MYSQL_84] {
             let predictions =
                 predictions_on(server, S13B_SCHEMA, &format!("{statement};\n{ADD_COUPON}"));
-            assert!(mentions_fulltext(&predictions[1]), "{server}: {statement}");
+            assert!(!mentions_fulltext(&predictions[1]), "{server}: {statement}");
         }
     }
 }
 
 #[test]
-fn a_check_dropped_twice_is_unknown_the_second_time_and_loses_the_table() {
+fn a_check_dropped_twice_is_unknown_the_second_time_and_the_table_stays_known() {
     // Hand test: DROP CHECK of a name the table no longer has is error 3821.
     let sql = "ALTER TABLE orders DROP CHECK chk_amount;
                ALTER TABLE orders DROP CHECK chk_amount;";
     assert_13b(S13B_SCHEMA, sql, &[INSTANT, "unknown"]);
     for server in [MYSQL_80, MYSQL_84] {
         let predictions = predictions_on(server, S13B_SCHEMA, &format!("{sql}\n{ADD_COUPON};"));
-        assert!(mentions_fulltext(&predictions[2]), "{server}");
+        // The table stays known.
+        assert!(!mentions_fulltext(&predictions[2]), "{server}");
     }
 }
 
@@ -8505,7 +8535,8 @@ CONSTRAINT dup CHECK (amount > 0));
 fn a_check_clause_on_a_lost_or_missing_table_is_unknown_and_never_a_failure() {
     // Lost: an earlier clause on an unknown name took the table. Missing: the
     // table is in no schema and no statement.
-    let lost = "ALTER TABLE orders DROP CHECK nosuch;\n";
+    // DROP CHECK of an unknown name no longer takes the table.
+    let lost = "ALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4;\n";
     for clause in [
         "DROP CHECK chk_amount",
         "ALTER CHECK chk_amount NOT ENFORCED",
@@ -8604,13 +8635,17 @@ fn a_schema_qualified_table_is_read_but_not_known_so_the_check_clause_is_unknown
         "ALTER TABLE shop.orders ALTER CHECK chk_off ENFORCED",
         "ALTER TABLE shop.orders ALTER CONSTRAINT chk_off NOT ENFORCED",
     ] {
-        let reason = assert_unknown_13b(S13B_SCHEMA, statement, "kilit does not know this table");
+        let reason = assert_unknown_13b(
+            S13B_SCHEMA,
+            statement,
+            "kilit does not know the database the statements run in",
+        );
         assert!(!reason.contains("could not read"), "{statement}: {reason}");
     }
     assert_unknown_13b(
         S13B_SCHEMA,
         "ALTER TABLE shop.orders DROP CHECK chk_amount",
-        "kilit does not know this table, so it cannot tell whether chk_amount is one of its CHECK constraints",
+        "so it cannot tell whether shop.orders is orders",
     );
 }
 
@@ -8686,8 +8721,8 @@ fn an_unnamed_check_has_the_name_mysql_gave_it_and_a_renamed_table_the_new_one()
              ALTER TABLE orders2 ADD COLUMN coupon INT NULL;"
         );
         assert!(
-            mentions_fulltext(predictions_on(server, S13B_SCHEMA, &sql).last().unwrap()),
-            "{server}: the table should be lost"
+            !mentions_fulltext(predictions_on(server, S13B_SCHEMA, &sql).last().unwrap()),
+            "{server}: the table should stay known"
         );
     }
     // A CHECK written in a column definition has the same kind of name.
@@ -8771,7 +8806,7 @@ CREATE TABLE `rw` (
     ] {
         for server in [MYSQL_80, MYSQL_84] {
             match predictions_on(server, schema, statement).last() {
-                Some(Prediction::Unknown { reason })
+                Some(Prediction::Unknown { reason, .. })
                     if reason.starts_with("kilit could not read this statement") => {}
                 other => panic!("{server}: {statement}\n    got {other:?}"),
             }
@@ -9083,11 +9118,12 @@ fn the_reason_of_a_statement_whose_two_settings_part_ways_ends_with_the_sentence
 
 #[test]
 fn a_name_that_matches_no_table_in_any_case_gets_the_answer_it_got_before() {
-    // Missing: a note, never a failure, and the letter case changes nothing.
+    // Missing: unknown, never a failure, and the letter case
+    // changes nothing.
     let schema = case_plain();
     for table in ["ghosts", "GHOSTS", "Ghosts", "orders_old", "ORDERS_OLD"] {
         let sql = format!("ALTER TABLE {table} ADD COLUMN x INT NULL");
-        assert_eq!(case_last_answer(&schema, &sql), INSTANT, "{sql}");
+        assert_eq!(case_last_answer(&schema, &sql), UNKNOWN, "{sql}");
     }
     // A database in front of a name makes another name, as before.
     assert_eq!(
@@ -9095,12 +9131,12 @@ fn a_name_that_matches_no_table_in_any_case_gets_the_answer_it_got_before() {
             &schema,
             "ALTER TABLE kilit_lab.orders ADD COLUMN x INT NULL"
         ),
-        INSTANT
+        UNKNOWN
     );
     // A table that was dropped is Missing, in either case.
     for table in ["orders", "ORDERS"] {
         let sql = format!("DROP TABLE orders; ALTER TABLE {table} ADD COLUMN x INT NULL");
-        assert_eq!(case_last_answer(&schema, &sql), INSTANT, "{sql}");
+        assert_eq!(case_last_answer(&schema, &sql), UNKNOWN, "{sql}");
     }
 }
 
@@ -9232,13 +9268,14 @@ fn a_foreign_key_to_a_parent_in_another_case_is_unknown_with_the_checks_on_or_of
             assert_case_unknown(&schema, &sql, "users", parent.trim_matches('`'));
         }
     }
-    // A parent that matches no table in any case: as before.
+    // A parent that matches no table in any case: a parent kilit does not
+    // know makes the key unknown.
     assert_eq!(
         case_last_answer(
             &schema,
             &format!("SET foreign_key_checks = 0;\n{}", add("ghosts"))
         ),
-        INPLACE
+        UNKNOWN
     );
 }
 
@@ -9314,7 +9351,7 @@ fn a_table_name_with_non_ascii_letters_in_another_case_is_unknown() {
     // Another name altogether: as before.
     assert_eq!(
         case_last_answer(&schema, "ALTER TABLE ÇİZELGE2 ADD COLUMN x INT NULL"),
-        INSTANT
+        UNKNOWN
     );
 }
 
@@ -9367,8 +9404,8 @@ fn case_trust_after(statements: &str, table: &str) -> String {
 fn what_kilit_trusts_after_a_statement_in_another_letter_case_follows_the_hand_tests() {
     // After each statement: `ALTER TABLE <table> ADD COLUMN x INT NULL` on the
     // FULLTEXT tables. COPY: the table is known (its FULLTEXT index is
-    // seen). INSTANT: the table is gone or no longer trusted, the answer of a
-    // table kilit cannot see. UNKNOWN: the name is ambiguous next to its twin.
+    // seen). UNKNOWN: the table is gone or no longer trusted, or the name is
+    // ambiguous next to its twin.
     // A) the statement fails with 0 and the migration stops: kilit goes on
     // with the table known (hand tests 1-8, 10, 11, 13, 14).
     // B) it fails with 1: ORDERS / USERS is the table, renamed, or a table of
@@ -9396,10 +9433,10 @@ fn what_kilit_trusts_after_a_statement_in_another_letter_case_follows_the_hand_t
             &[("orders", COPY), ("users", COPY)],
         ),
         // A: the table is gone (Missing), or has another name and is known.
-        ("DROP TABLE ORDERS", &[("orders", INSTANT), ("users", COPY)]),
+        ("DROP TABLE ORDERS", &[("orders", UNKNOWN), ("users", COPY)]),
         (
             "RENAME TABLE ORDERS TO o2",
-            &[("orders", INSTANT), ("o2", COPY), ("users", COPY)],
+            &[("orders", UNKNOWN), ("o2", COPY), ("users", COPY)],
         ),
         // B: the table is renamed to its own name in another case. The old
         // spelling is Missing, but it matches the known new one without case:
@@ -9415,15 +9452,15 @@ fn what_kilit_trusts_after_a_statement_in_another_letter_case_follows_the_hand_t
         // C: the tables the statement may change are lost.
         (
             "DROP TABLE IF EXISTS ORDERS",
-            &[("orders", INSTANT), ("users", COPY)],
+            &[("orders", UNKNOWN), ("users", COPY)],
         ),
         (
             "DROP TABLE ORDERS, users",
-            &[("orders", INSTANT), ("users", INSTANT)],
+            &[("orders", UNKNOWN), ("users", UNKNOWN)],
         ),
         (
             "DROP TABLE users, ORDERS",
-            &[("orders", INSTANT), ("users", INSTANT)],
+            &[("orders", UNKNOWN), ("users", UNKNOWN)],
         ),
         (
             "CREATE TABLE t9 (id INT PRIMARY KEY, user_id BIGINT UNSIGNED, \
@@ -9452,7 +9489,7 @@ fn a_statement_that_fails_with_0_is_applied_to_the_known_table_and_a_measured_fa
     // A) The statement goes on as with 1 or 2, where ORDERS is orders.
     let plain = case_plain();
     // ADD FULLTEXT makes the later new column copy the table; DROP TABLE IF
-    // EXISTS (C) loses the table instead, and the new column is INSTANT.
+    // EXISTS (C) loses the table instead, and the new column is unknown.
     let fulltext = "ALTER TABLE ORDERS ADD FULLTEXT ft_email (email);\n";
     assert_eq!(
         case_last_answer(
@@ -9466,7 +9503,7 @@ fn a_statement_that_fails_with_0_is_applied_to_the_known_table_and_a_measured_fa
             &plain,
             "DROP TABLE IF EXISTS ORDERS;\nALTER TABLE orders ADD COLUMN x INT NULL"
         ),
-        INSTANT
+        UNKNOWN
     );
     // The foreign key is dropped by the statement: its column can go.
     assert_eq!(
@@ -9508,7 +9545,7 @@ fn a_statement_that_fails_with_0_is_applied_to_the_known_table_and_a_measured_fa
             &plain,
             "RENAME TABLE ORDERS TO o2;\nALTER TABLE orders DROP COLUMN user_id"
         ),
-        INSTANT
+        UNKNOWN
     );
 }
 
@@ -9575,9 +9612,10 @@ fn a_statement_in_another_letter_case_leaves_the_other_tables_alone() {
     // 2, the table is still known: the foreign key still holds the column.
     let sql = "ALTER TABLE ORDERS ADD COLUMN y INT NULL;\nALTER TABLE orders DROP COLUMN user_id";
     assert_eq!(case_last_answer(&case_plain(), sql), FAILS_1828);
-    // Where the two settings part ways the table is lost: no failure from it.
+    // Where the two settings part ways the table is lost: no failure from it,
+    // and no answer either.
     let sql = "DROP TABLE IF EXISTS ORDERS;\nALTER TABLE orders DROP COLUMN user_id";
-    assert_eq!(case_last_answer(&case_plain(), sql), INSTANT);
+    assert_eq!(case_last_answer(&case_plain(), sql), UNKNOWN);
 }
 
 #[test]
@@ -9645,10 +9683,10 @@ fn a_new_name_in_another_letter_case_is_its_own_table_or_stays_ambiguous_next_to
         assert_eq!(case_last_answer(&schema, &sql), UNKNOWN, "{sql}");
         assert_case_unknown(&schema, &sql, other, table);
     }
-    // Lost without a twin: the lost-table answer.
+    // Lost without a twin: the lost table is unknown.
     assert_eq!(
         case_trust_after("DROP TABLE IF EXISTS ORDERS", "orders"),
-        INSTANT
+        UNKNOWN
     );
 }
 
@@ -9756,20 +9794,19 @@ fn a_statement_kilit_cannot_read_keeps_its_own_reason_and_loses_the_table_in_ano
         "{reason}"
     );
     assert!(!reason.contains("lower_case_table_names"), "{reason}");
-    assert_eq!(case_trust_after(sql, "orders"), INSTANT);
+    assert_eq!(case_trust_after(sql, "orders"), UNKNOWN);
     assert_eq!(case_trust_after(sql, "users"), COPY);
     // The same statement on the exact name loses the table the same way.
     assert_eq!(
         case_trust_after("ALTER TABLE orders FROBNICATE x", "orders"),
-        INSTANT
+        UNKNOWN
     );
 }
 
 #[test]
 fn a_table_kilit_lost_still_matches_a_name_in_another_case() {
-    // Lost, not Missing: the name in another case is unknown with the same
-    // reason, where a Missing table gets the answer of a table kilit cannot
-    // see.
+    // Lost, not Missing: the name in another case is unknown with the case
+    // reason, and the exact name is unknown with the lost-table reason.
     let schema = case_fulltext();
     let lose = "ALTER TABLE orders FROBNICATE x;\n";
     let sql = format!("{lose}ALTER TABLE ORDERS ADD COLUMN y INT NULL");
@@ -9781,7 +9818,7 @@ fn a_table_kilit_lost_still_matches_a_name_in_another_case() {
             &schema,
             &format!("{lose}ALTER TABLE orders ADD COLUMN y INT NULL")
         ),
-        INSTANT
+        UNKNOWN
     );
 }
 
@@ -9938,7 +9975,9 @@ fn a_table_made_in_the_input_stays_new_after_a_statement_in_another_case_that_fa
             "CREATE TABLE shop.orders (id INT PRIMARY KEY); ALTER TABLE Shop.orders ADD COLUMN a INT NULL; \
              ALTER TABLE shop.orders ADD COLUMN b INT NULL;"
         ),
-        [Impact::NotChecked, Impact::Unknown, Impact::NewTable]
+        // The database spelling is ambiguous, so the table is lost; B1c,
+        // A lost table is unknown even when the input created it.
+        [Impact::NotChecked, Impact::Unknown, Impact::Unknown]
     );
 }
 
@@ -9968,7 +10007,7 @@ fn a_self_reference_written_as_the_table_is_known_keeps_its_answer() {
 /// The reason of statement number `at` (from 0) of `sql`, which has no answer.
 fn case_reason_at(schema: &str, sql: &str, at: usize) -> String {
     match &predictions_on(MYSQL_84, schema, sql)[at] {
-        Prediction::Unknown { reason } => reason.clone(),
+        Prediction::Unknown { reason, .. } => reason.clone(),
         other => panic!("{sql}\n    statement {at}: {other:?}"),
     }
 }
@@ -10005,7 +10044,7 @@ fn a_statement_kilit_could_not_read_earlier_makes_a_case_only_statement_unclear(
     let sql = "RENAME TABLES archive TO ORDERS;
         ALTER TABLE ORDERS ADD FULLTEXT ft (note);
         ALTER TABLE orders ADD COLUMN x INT NULL;";
-    assert_eq!(case_answers(&schema, sql), [UNKNOWN, UNKNOWN, INSTANT]);
+    assert_eq!(case_answers(&schema, sql), [UNKNOWN, UNKNOWN, UNKNOWN]);
     let reason = case_reason_at(&schema, sql, 1);
     assert_eq!(
         reason,
@@ -10038,7 +10077,7 @@ fn a_table_of_another_database_with_the_written_name_makes_a_case_only_statement
         ALTER TABLE orders ADD COLUMN x INT NULL;";
     assert_eq!(
         case_answers(&schema, sql),
-        ["not checked", UNKNOWN, INSTANT]
+        ["not checked", UNKNOWN, UNKNOWN]
     );
     assert!(
         case_reason_at(&schema, sql, 1).ends_with(CASE_ENDING_LOST),
@@ -10092,7 +10131,7 @@ fn renaming_a_table_in_another_case_to_a_name_some_table_has_is_unclear() {
         );
         assert_eq!(
             case_trust_after(statement, "orders"),
-            INSTANT,
+            UNKNOWN,
             "{statement}"
         );
     }
@@ -10261,9 +10300,20 @@ impl Said {
     }
 }
 
+/// The notes of an answer that is unknown: B1c puts the table-decided
+/// exceptions of an answer on a table kilit does not know there.
+fn unknown_notes(prediction: &Prediction) -> Vec<String> {
+    match prediction {
+        Prediction::Unknown { notes, .. } => notes.clone(), // new-api
+        _ => Vec::new(),
+    }
+}
+
 /// What `server` says about the last statement of `sql`.
 fn said_on(server: &str, schema: &str, sql: &str) -> Said {
-    match predictions_on(server, schema, sql).pop().unwrap() {
+    let prediction = predictions_on(server, schema, sql).pop().unwrap();
+    let unknown_notes = unknown_notes(&prediction);
+    match prediction {
         Prediction::Measured {
             case,
             verdict,
@@ -10279,11 +10329,11 @@ fn said_on(server: &str, schema: &str, sql: &str) -> Said {
             notes,
             reason: String::new(),
         },
-        Prediction::Unknown { reason } => Said {
+        Prediction::Unknown { reason, .. } => Said {
             case: None,
             answer: "unknown".into(),
             evidence: Vec::new(),
-            notes: Vec::new(),
+            notes: unknown_notes,
             reason,
         },
         Prediction::NotChecked { reason } => Said {
@@ -10291,6 +10341,22 @@ fn said_on(server: &str, schema: &str, sql: &str) -> Said {
             answer: "not checked".into(),
             evidence: Vec::new(),
             notes: Vec::new(),
+            reason,
+        },
+        Prediction::DependsOnTable {
+            case,
+            shared,
+            evidence,
+            reason,
+            notes,
+        } => Said {
+            case: Some(case),
+            answer: match shared {
+                Shared::WritesWait => "depends on the table: writes wait".into(),
+                Shared::Fails => "depends on the table: fails".into(),
+            },
+            evidence,
+            notes,
             reason,
         },
     }
@@ -10308,7 +10374,7 @@ fn said(schema: &str, sql: &str) -> Said {
 /// The tables of the lab, then `ALTER TABLE orders AUTO_INCREMENT = 1000`,
 /// which kilit cannot follow: it stops trusting `orders`.
 fn lab_with_lost_orders() -> String {
-    format!("{LAB_TABLES}\nALTER TABLE orders AUTO_INCREMENT = 1000;\n")
+    format!("{LAB_TABLES}\nALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4;\n")
 }
 
 /// The ways kilit can be without a table it is asked about: no table at all
@@ -10667,18 +10733,23 @@ fn the_variants_of_an_expression_default_on_text_are_the_lab_s() {
 }
 
 #[test]
-fn an_expression_default_on_a_text_column_waits_for_writes_without_a_table_too() {
+fn an_expression_default_on_a_text_column_is_unknown_without_a_table() {
     for (label, schema) in tables_kilit_does_not_know() {
         let answer = said(
             &schema,
             "ALTER TABLE orders ADD COLUMN c TEXT NOT NULL DEFAULT ('')",
         );
-        assert_eq!(
-            answer.case,
-            Some("add-column-blob-expression-default"),
-            "{label}"
+        // The lab's COPY is the likely answer, shown in the
+        // reason; a table kilit does not know could change it.
+        assert_eq!(answer.answer, UNKNOWN, "{label}");
+        assert!(
+            answer.reason.contains("add-column-blob-expression-default")
+                && answer
+                    .reason
+                    .contains("on a plain InnoDB table the lab measured"),
+            "{label}: {}",
+            answer.reason
         );
-        assert_eq!(answer.answer, COPY, "{label}");
     }
 }
 
@@ -10855,11 +10926,18 @@ fn setting_a_quoted_default_on_a_known_varchar_column_keeps_its_answer() {
 }
 
 #[test]
-fn setting_a_quoted_default_on_a_table_kilit_does_not_know_is_instant_with_a_note_about_1101() {
+fn setting_a_quoted_default_on_a_table_kilit_does_not_know_is_unknown_with_a_note_about_1101() {
     for (label, schema) in tables_kilit_does_not_know() {
         let answer = said(&schema, "ALTER TABLE orders ALTER COLUMN c SET DEFAULT ''");
-        assert_eq!(answer.case, Some("set-column-default"), "{label}");
-        assert_eq!(answer.answer, INSTANT, "{label}");
+        assert!(
+            answer.reason.contains("set-column-default")
+                && answer
+                    .reason
+                    .contains("on a plain InnoDB table the lab measured"),
+            "{label}: {}",
+            answer.reason
+        );
+        assert_eq!(answer.answer, UNKNOWN, "{label}");
         assert!(
             answer.has_note_starting("if the column is TEXT, BLOB or JSON: fails with error 1101"),
             "{label}: {:?}",
@@ -10925,13 +11003,20 @@ fn dropping_a_column_that_is_not_the_primary_key_keeps_its_answer() {
 }
 
 #[test]
-fn dropping_a_column_of_a_table_kilit_does_not_know_is_instant_with_a_note_about_the_primary_key() {
+fn dropping_a_column_of_a_table_kilit_does_not_know_is_unknown_with_a_note_about_the_primary_key() {
     // 0.1.0 said INSTANT with nothing about the primary key; MySQL copies the
     // table (drop-primary-key-column).
     for (label, schema) in tables_kilit_does_not_know() {
         let answer = said(&schema, "ALTER TABLE orders DROP COLUMN id");
-        assert_eq!(answer.case, Some("drop-column"), "{label}");
-        assert_eq!(answer.answer, INSTANT, "{label}");
+        assert!(
+            answer.reason.contains("drop-column")
+                && answer
+                    .reason
+                    .contains("on a plain InnoDB table the lab measured"),
+            "{label}: {}",
+            answer.reason
+        );
+        assert_eq!(answer.answer, UNKNOWN, "{label}");
         assert!(
             answer.has_note_with(&[
                 "if the column is the primary key: ",
@@ -10944,14 +11029,14 @@ fn dropping_a_column_of_a_table_kilit_does_not_know_is_instant_with_a_note_about
 }
 
 #[test]
-fn forcing_algorithm_instant_on_a_drop_without_a_known_table_notes_the_error_1846() {
+fn forcing_algorithm_instant_on_a_drop_without_a_known_table_is_unknown_and_notes_the_error_1846() {
     // drop-primary-key-column: ALGORITHM=INSTANT is refused with 1846.
     for (label, schema) in tables_kilit_does_not_know() {
         let answer = said(
             &schema,
             "ALTER TABLE orders DROP COLUMN id, ALGORITHM=INSTANT",
         );
-        assert_eq!(answer.answer, INSTANT, "{label}");
+        assert_eq!(answer.answer, UNKNOWN, "{label}");
         assert!(
             answer.has_note_with(&["fails with error 1846", "drop-primary-key-column"]),
             "{label}: {:?}",
@@ -11039,7 +11124,7 @@ fn the_notes_of_a_drop_without_a_known_table_say_what_is_not_measured_about_keys
     // table would decide, kilit cannot see it, so the answer carries a note.
     for (label, schema) in tables_kilit_does_not_know() {
         let answer = said(&schema, "ALTER TABLE orders DROP COLUMN note");
-        assert_eq!(answer.answer, INSTANT, "{label}");
+        assert_eq!(answer.answer, UNKNOWN, "{label}");
         assert!(
             answer.has_note_with(&[
                 "if the column is in a foreign key or a unique index with other columns",
@@ -11077,7 +11162,8 @@ fn a_drop_of_a_column_in_a_multi_column_unique_index_of_a_known_table_stays_unkn
 }
 
 #[test]
-fn an_index_on_a_table_kilit_does_not_know_notes_that_a_json_column_is_not_measured() {
+fn an_index_on_a_table_kilit_does_not_know_is_unknown_and_notes_that_a_json_column_is_not_measured()
+{
     // ALTER TABLE ... ADD INDEX over a JSON column is unknown on a known
     // table (see below); without the table the measured answer carries a note.
     for (label, schema) in tables_kilit_does_not_know() {
@@ -11087,7 +11173,7 @@ fn an_index_on_a_table_kilit_does_not_know_notes_that_a_json_column_is_not_measu
             "alter table `orders` add index `orders_note_index`(`note`)",
         ] {
             let answer = said(&schema, sql);
-            assert!(answer.case.is_some(), "{label}: {sql}: {answer:?}");
+            assert_eq!(answer.answer, UNKNOWN, "{label}: {sql}: {answer:?}");
             assert!(
                 answer.has_note_with(&["if a column of the index is JSON", "not measured"]),
                 "{label}: {sql}: {:?}",
@@ -11118,7 +11204,7 @@ fn an_index_on_a_known_table_has_no_note_about_json() {
 }
 
 #[test]
-fn a_check_on_a_table_kilit_does_not_know_notes_what_it_cannot_see() {
+fn a_check_on_a_table_kilit_does_not_know_is_unknown_and_notes_what_it_cannot_see() {
     // A taken name, a column that is not there, an AUTO_INCREMENT column, a
     // generated column, a foreign key column: the table would decide.
     for (label, schema) in tables_kilit_does_not_know() {
@@ -11127,7 +11213,7 @@ fn a_check_on_a_table_kilit_does_not_know_notes_what_it_cannot_see() {
             "ALTER TABLE orders ADD CONSTRAINT ck_amount CHECK (amount > 0) NOT ENFORCED",
         ] {
             let answer = said(&schema, sql);
-            assert!(answer.case.is_some(), "{label}: {sql}: {answer:?}");
+            assert_eq!(answer.answer, UNKNOWN, "{label}: {sql}: {answer:?}");
             assert!(
                 answer.has_note_with(&["AUTO_INCREMENT", "generated", "not measured"]),
                 "{label}: {sql}: {:?}",
@@ -11167,14 +11253,13 @@ const ADD_FOREIGN_KEY_USER: &str =
     "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)";
 
 #[test]
-fn a_foreign_key_with_a_table_kilit_does_not_know_notes_what_it_cannot_see() {
+fn a_foreign_key_with_a_table_kilit_does_not_know_is_unknown_and_names_the_lab_answer() {
     // A missing column, NOT NULL with ON DELETE SET NULL, a MyISAM table: the
     // tables would decide. (The notes about the parent's index differ per
     // server, so each server is looked at on its own.)
-    let note_parts = ["ON DELETE SET NULL", "MyISAM", "not measured"];
     let child_lost = "CREATE TABLE users (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL);
          CREATE TABLE orders (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL);
-         ALTER TABLE orders AUTO_INCREMENT = 1000;";
+         ALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4;";
     let parent_missing = "CREATE TABLE orders (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL);";
     let lab_lost = lab_with_lost_orders();
     for server in [MYSQL_80, MYSQL_84] {
@@ -11185,12 +11270,13 @@ fn a_foreign_key_with_a_table_kilit_does_not_know_notes_what_it_cannot_see() {
             ("the child is known, the parent is not", parent_missing),
         ] {
             let answer = said_on(server, schema, ADD_FOREIGN_KEY_USER);
-            assert_eq!(answer.case, Some("add-foreign-key"), "{label} on {server}");
-            assert_eq!(answer.answer, COPY, "{label} on {server}");
+            // Unknown, with the case in the reason. The notes
+            // about what the tables would decide are checked in the CLI's JSON.
+            assert_eq!(answer.answer, UNKNOWN, "{label} on {server}");
             assert!(
-                answer.has_note_with(&note_parts),
-                "{label} on {server}: {:?}",
-                answer.notes
+                answer.reason.contains("add-foreign-key"),
+                "{label} on {server}: {}",
+                answer.reason
             );
         }
     }
@@ -11214,11 +11300,16 @@ fn a_foreign_key_that_sets_a_not_null_column_to_null_stays_unknown_on_known_tabl
 }
 
 #[test]
-fn a_default_set_on_a_table_kilit_does_not_know_notes_an_expression_default() {
+fn a_default_set_on_a_table_kilit_does_not_know_is_unknown_and_notes_an_expression_default() {
     // If the old default is an expression, changing it was not measured.
     for (label, schema) in tables_kilit_does_not_know() {
         let answer = said(&schema, "ALTER TABLE orders ALTER COLUMN x SET DEFAULT 'v'");
-        assert_eq!(answer.case, Some("set-column-default"), "{label}");
+        assert_eq!(answer.answer, UNKNOWN, "{label}");
+        assert!(
+            answer.reason.contains("set-column-default"),
+            "{label}: {}",
+            answer.reason
+        );
         assert!(
             answer.has_note_with(&["has an expression default", "not measured"]),
             "{label}: {:?}",
@@ -11255,7 +11346,7 @@ fn a_default_set_on_a_known_column_has_no_note_about_an_expression_default() {
 const ROW_GROWS_NOTE: &str = "if the row grows past the 65,535 bytes MySQL allows";
 
 #[test]
-fn a_new_column_on_a_table_kilit_does_not_know_notes_the_row_size_limit() {
+fn a_new_column_on_a_table_kilit_does_not_know_is_unknown_and_notes_the_row_size_limit() {
     // B1: a real migration (snipe-it, settings) failed with 1118 where kilit
     // said INSTANT.
     for (label, schema) in tables_kilit_does_not_know() {
@@ -11263,8 +11354,12 @@ fn a_new_column_on_a_table_kilit_does_not_know_notes_the_row_size_limit() {
             &schema,
             "ALTER TABLE orders ADD COLUMN link_color VARCHAR(255) NULL",
         );
-        assert_eq!(answer.case, Some("add-column"), "{label}");
-        assert_eq!(answer.answer, INSTANT, "{label}");
+        assert_eq!(answer.answer, UNKNOWN, "{label}");
+        assert!(
+            answer.reason.contains("add-column"),
+            "{label}: {}",
+            answer.reason
+        );
         assert!(
             answer.has_note_starting(ROW_GROWS_NOTE),
             "{label}: {:?}",
@@ -11467,12 +11562,17 @@ fn dropping_a_column_in_another_letter_case_is_the_column_and_keeps_its_answer()
 }
 
 #[test]
-fn dropping_what_a_table_kilit_does_not_know_may_have_keeps_the_measured_answer() {
+fn dropping_what_a_table_kilit_does_not_know_may_have_is_unknown() {
     // Without the table kilit cannot tell that the column is not there.
     for (label, schema) in tables_kilit_does_not_know() {
         let answer = said(&schema, "ALTER TABLE orders DROP COLUMN nosuch");
-        assert_eq!(answer.case, Some("drop-column"), "{label}");
-        assert_eq!(answer.answer, INSTANT, "{label}");
+        // The likely answer is in the reason, not the headline.
+        assert_eq!(answer.answer, UNKNOWN, "{label}");
+        assert!(
+            answer.reason.contains("drop-column"),
+            "{label}: {}",
+            answer.reason
+        );
     }
 }
 
@@ -11626,12 +11726,13 @@ fn the_column_of_a_foreign_key_mysql_named_itself_is_not_refused_with_1828_after
  {
     // Both statements are accepted by MySQL 8.0.46 and 8.4.13. kilit does
     // not know the key under the name MySQL gave it, so it stops trusting
-    // the table and cannot call the second statement a failure.
+    // the table and cannot call the second statement a failure; it is
+    // unknown, like any statement on a table kilit lost.
     let sql = "ALTER TABLE orders DROP FOREIGN KEY orders_ibfk_1;
                ALTER TABLE orders DROP COLUMN user_id";
     let after = said(UNNAMED_FOREIGN_KEY_TABLES, sql);
     assert_ne!(after.answer, FAILS_1828, "{after:?}");
-    assert_ne!(after.answer, "unknown", "{after:?}");
+    assert_eq!(after.answer, "unknown", "{after:?}");
     // The answer is the one for a table kilit does not know.
     let lost = said(
         &lab_with_lost_orders(),
@@ -11767,7 +11868,7 @@ fn a_varchar_at_the_longest_a_row_can_hold_keeps_its_answer() {
 const PAGE_RECORD_NOTE: &str = "if the record grows past what InnoDB keeps in a page (8126 bytes)";
 
 #[test]
-fn a_new_column_on_a_table_kilit_does_not_know_notes_the_record_in_a_page_too() {
+fn a_new_column_on_a_table_kilit_does_not_know_is_unknown_and_notes_the_record_in_a_page_too() {
     // By hand on MySQL 8.0.46 and 8.4.13 (add-column-over-page-row-size-limit):
     // 8.0.46 fails with 1118, 8.4.13 rebuilds the table.
     for (label, schema) in tables_kilit_does_not_know() {
@@ -11776,7 +11877,7 @@ fn a_new_column_on_a_table_kilit_does_not_know_notes_the_record_in_a_page_too() 
             "alter table `orders` add `link_color` varchar(255) null",
         ] {
             let answer = said(&schema, sql);
-            assert_eq!(answer.answer, INSTANT, "{label}: {sql}");
+            assert_eq!(answer.answer, UNKNOWN, "{label}: {sql}");
             assert!(
                 answer.has_note_starting(PAGE_RECORD_NOTE),
                 "{label}: {sql}: {:?}",
@@ -12186,11 +12287,2438 @@ fn a_column_too_long_for_any_table_is_unknown_without_a_table_to_look_at() {
 }
 
 #[test]
-fn the_longest_char_without_a_table_to_look_at_keeps_its_answer() {
-    // Regression: CHAR(255) is the longest CHAR; it is the lab's add-column.
+fn the_longest_char_without_a_table_to_look_at_is_unknown_with_the_lab_answer_in_the_reason() {
+    // CHAR(255) is the longest CHAR; it is the lab's add-column. B1c,
+    // The headline is unknown without the table.
     for (label, schema) in tables_kilit_does_not_know() {
         let answer = said(&schema, "ALTER TABLE orders ADD COLUMN d CHAR(255) NULL");
-        assert_eq!(answer.case, Some("add-column"), "{label}");
-        assert_eq!(answer.answer, INSTANT, "{label}");
+        assert_eq!(answer.answer, UNKNOWN, "{label}");
+        assert!(
+            answer.reason.contains("add-column"),
+            "{label}: {}",
+            answer.reason
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Step B1c: no measured answer on a table kilit does not know.
+//
+// The expectations come from the lab (the scenarios named in each test), from
+// hand tests on MySQL 8.0.46 and 8.4.13 (each comment says "By hand on MySQL
+// 8.0.46 and 8.4.13") and from the decisions of the step. A table kilit does
+// not know is a Lost table, or a Missing one when no --schema was given; with
+// a --schema, a table the dump does not have stays unknown as before.
+
+/// A statement MySQL accepts on `orders` and kilit does not read: it loses the
+/// table.
+const B1C_LOSES_ORDERS: &str = "ALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4;";
+
+/// What every answer on a table kilit does not know says about the lab.
+const B1C_LIKELY: &str = "on a plain InnoDB table the lab measured";
+
+/// The prediction for the last statement of `sql`.
+fn b1c_last(server: &str, schema: &Schema, sql: &str) -> Prediction {
+    let results = Knowledge::built_in().server(server).unwrap();
+    check(&parse(sql), schema, results)
+        .pop()
+        .unwrap()
+        .prediction
+}
+
+/// The reason for the last statement of `sql`; the test fails if kilit has an
+/// answer.
+fn b1c_reason(server: &str, schema: &Schema, sql: &str) -> String {
+    match b1c_last(server, schema, sql) {
+        Prediction::Unknown { reason, .. } => reason,
+        other => panic!("{server}: {sql}\n    expected unknown, got {other:?}"),
+    }
+}
+
+/// What kilit says about the last statement of `sql`, in the words of the
+/// other tests: `unknown`, `fails with error N`, or the verdict.
+fn b1c_answer(server: &str, schema: &Schema, sql: &str) -> String {
+    match b1c_last(server, schema, sql) {
+        Prediction::Measured {
+            verdict: Verdict::Fails { code, .. },
+            ..
+        } => format!("fails with error {code}"),
+        Prediction::Measured { verdict, .. } => verdict.to_string(),
+        Prediction::Unknown { .. } => "unknown".to_owned(),
+        Prediction::NotChecked { .. } => "not checked".to_owned(),
+        Prediction::DependsOnTable { shared, .. } => match shared {
+            Shared::WritesWait => "depends on the table: writes wait".to_owned(),
+            Shared::Fails => "depends on the table: fails".to_owned(),
+        },
+    }
+}
+
+/// The same on both servers, or the test fails.
+fn b1c_both(schema: &Schema, sql: &str) -> String {
+    let on_80 = b1c_answer(MYSQL_80, schema, sql);
+    let on_84 = b1c_answer(MYSQL_84, schema, sql);
+    assert_eq!(on_80, on_84, "{sql}");
+    on_84
+}
+
+fn b1c_is_lost(schema: &Schema, table: &str) -> bool {
+    matches!(schema.table(table), TableState::Lost { .. })
+}
+
+/// The lab's tables, with `orders` lost to a statement kilit cannot read: from
+/// SQL (no --schema) and from a dump.
+fn b1c_lost_schemas() -> [(&'static str, Schema); 2] {
+    let text = format!("{LAB_TABLES}{B1C_LOSES_ORDERS}\n");
+    let from_sql = Schema::from_sql(&text);
+    let from_dump = Schema::from_dump(&text);
+    assert!(b1c_is_lost(&from_sql, "orders"));
+    assert!(b1c_is_lost(&from_dump, "orders"));
+    [
+        ("lost, no --schema", from_sql),
+        ("lost in a dump", from_dump),
+    ]
+}
+
+/// Every way kilit can be without `orders` and still answer with the plain
+/// table's measurement today: lost, and missing with no --schema.
+fn b1c_tables_kilit_does_not_know() -> Vec<(&'static str, Schema)> {
+    let mut all = b1c_lost_schemas().into_iter().collect::<Vec<_>>();
+    all.push(("no --schema", Schema::from_sql("")));
+    all
+}
+
+#[derive(Clone, Copy, Debug)]
+enum B1cState {
+    Lost,
+    LostInADump,
+    WithoutASchema,
+    NotInTheDump,
+}
+
+/// The lab's tables as a scenario measured them, as SQL text.
+fn b1c_lab_text(scenario: &ScenarioResult) -> String {
+    let mut sql = lab_tables_with(scenario.engine.as_deref(), &lab_options(scenario));
+    for statement in &scenario.setup {
+        sql.push_str(statement);
+        sql.push_str(";\n");
+    }
+    sql
+}
+
+/// The table the scenario's statement alters.
+fn b1c_table_of(scenario: &ScenarioResult) -> String {
+    match &parse(&scenario.statement)[0].kind {
+        kilit_core::StatementKind::Alter(alter) => alter.table.clone(),
+        other => panic!("{}: expected an ALTER TABLE, got {other:?}", scenario.id),
+    }
+}
+
+/// What kilit knows about the table the scenario alters.
+fn b1c_schema(state: B1cState, scenario: &ScenarioResult) -> Schema {
+    let table = b1c_table_of(scenario);
+    let loses = format!("ALTER TABLE {table} CONVERT TO CHARACTER SET utf8mb4;\n");
+    match state {
+        B1cState::Lost => {
+            let schema = Schema::from_sql(&format!("{}{loses}", b1c_lab_text(scenario)));
+            assert!(b1c_is_lost(&schema, &table), "{}", scenario.id);
+            schema
+        }
+        B1cState::LostInADump => {
+            let schema = Schema::from_dump(&format!("{}{loses}", b1c_lab_text(scenario)));
+            assert!(b1c_is_lost(&schema, &table), "{}", scenario.id);
+            schema
+        }
+        B1cState::WithoutASchema => Schema::from_sql(""),
+        B1cState::NotInTheDump => {
+            Schema::from_dump("CREATE TABLE unrelated (id INT PRIMARY KEY) ENGINE=InnoDB;")
+        }
+    }
+}
+
+/// What one lab result does, in the words of the answer kilit gives for a
+/// table it does not know.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum B1cWord {
+    WritesContinue,
+    WritesWait,
+    Fails,
+    /// The lab could not tell.
+    Unclear,
+}
+
+fn b1c_word(verdict: Option<Verdict>) -> B1cWord {
+    match verdict {
+        Some(Verdict::Fails { .. }) => B1cWord::Fails,
+        Some(Verdict::Runs {
+            writes: Writes::Blocked,
+            ..
+        }) => B1cWord::WritesWait,
+        Some(Verdict::Runs {
+            writes: Writes::Allowed,
+            ..
+        }) => B1cWord::WritesContinue,
+        _ => B1cWord::Unclear,
+    }
+}
+
+/// The case with this id, whichever list it is in.
+fn b1c_case(id: &str) -> Option<&'static kilit_core::Case> {
+    every_case().into_iter().find(|case| case.id == id)
+}
+
+/// What the lab measured for `variant` on `server` in each situation a table
+/// kilit does not know may be in, worked out from the matrix and the case's
+/// name alone: the case on a plain table, each of its exceptions that a table
+/// decides (not the hidden ones: rows and history), and the same change on a
+/// MyISAM, COMPRESSED, COMPACT and REDUNDANT table (`myisam-<case>`, ...),
+/// each with its own exceptions. `None` when one of those four was never
+/// measured: such a change cannot be answered for an unknown table.
+fn b1c_what_every_table_may_do(
+    results: &kilit_core::ServerResults,
+    case_id: &str,
+    variant: Variant,
+) -> Option<Vec<B1cWord>> {
+    let mut words = Vec::new();
+    let mut add_case = |case: &kilit_core::Case| {
+        let first = case.scenarios[0];
+        words.push(b1c_word(results.scenario(first)?.verdict_for(variant)));
+        for exception in case.exceptions {
+            if exception.conditions.contains(&Condition::Hidden) {
+                continue;
+            }
+            let first = exception.scenarios[0];
+            words.push(b1c_word(results.scenario(first)?.verdict_for(variant)));
+        }
+        Some(())
+    };
+    add_case(b1c_case(case_id)?)?;
+    for prefix in ["myisam", "compressed", "compact", "redundant"] {
+        add_case(b1c_case(&format!("{prefix}-{case_id}"))?)?;
+    }
+    Some(words)
+}
+
+/// For every scenario of every case and exception, on both
+/// servers, in all six variants: the statement on a table kilit does not know
+/// is unknown; or a failure that comes from the statement alone (1674, and
+/// 1101 where the type is in the statement); or the answer every table it may
+/// be shares. That last one is worked out again here from the matrix: the
+/// case and each exception a table decides and the change on MyISAM,
+/// COMPRESSED, COMPACT and REDUNDANT tables are all measured, and none lets
+/// writes continue; it fails only when every one of them fails. Where the
+/// table is not in a --schema dump it is unknown, whatever the failure.
+fn b1c_assert_nothing_runs_on(state: B1cState) {
+    let mut shared_answers = 0;
+    for results in Knowledge::built_in().servers() {
+        let server = results.server.name();
+        for case in every_case() {
+            let groups = std::iter::once(case.scenarios)
+                .chain(case.exceptions.iter().map(|exception| exception.scenarios));
+            for scenarios in groups {
+                for id in scenarios {
+                    let scenario = results.scenario(id).unwrap();
+                    let schema = b1c_schema(state, scenario);
+                    for variant in Variant::ALL {
+                        let prediction = predict(scenario, variant, &server, &schema);
+                        let fine = match &prediction {
+                            Prediction::Unknown { .. } => true,
+                            Prediction::Measured {
+                                case: found,
+                                verdict: Verdict::Fails { code, .. },
+                                ..
+                            } if !matches!(state, B1cState::NotInTheDump) => {
+                                (*code == 1674 && *found == "add-column-binlog-unsafe-default")
+                                    || (*code == 1101
+                                        && [
+                                            "add-column-blob-literal-default",
+                                            "modify-column-blob-literal-default",
+                                        ]
+                                        .contains(found))
+                            }
+                            Prediction::DependsOnTable {
+                                case: found,
+                                shared,
+                                ..
+                            } if !matches!(state, B1cState::NotInTheDump) => {
+                                match b1c_what_every_table_may_do(results, found, variant) {
+                                    Some(words) => {
+                                        let all_fail =
+                                            words.iter().all(|word| *word == B1cWord::Fails);
+                                        let all_wait_or_fail = words.iter().all(|word| {
+                                            matches!(word, B1cWord::Fails | B1cWord::WritesWait)
+                                        });
+                                        all_wait_or_fail
+                                            && *shared
+                                                == if all_fail {
+                                                    Shared::Fails
+                                                } else {
+                                                    Shared::WritesWait
+                                                }
+                                    }
+                                    None => false,
+                                }
+                            }
+                            _ => false,
+                        };
+                        if matches!(prediction, Prediction::DependsOnTable { .. }) {
+                            shared_answers += 1;
+                        }
+                        assert!(
+                            fine,
+                            "{id} as {variant} on {server}, {state:?}: {prediction:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // The check above is not empty: the FULLTEXT scenarios get that answer.
+    assert_eq!(
+        shared_answers > 0,
+        !matches!(state, B1cState::NotInTheDump),
+        "{state:?}"
+    );
+}
+
+#[test]
+fn a_table_kilit_lost_gets_only_unknown_a_failure_from_the_statement_or_what_every_table_shares() {
+    b1c_assert_nothing_runs_on(B1cState::Lost);
+}
+
+#[test]
+fn a_table_lost_in_a_dump_gets_only_unknown_a_failure_from_the_statement_or_what_every_table_shares()
+ {
+    b1c_assert_nothing_runs_on(B1cState::LostInADump);
+}
+
+#[test]
+fn a_table_without_a_schema_gets_only_unknown_a_failure_from_the_statement_or_what_every_table_shares()
+ {
+    b1c_assert_nothing_runs_on(B1cState::WithoutASchema);
+}
+
+#[test]
+fn a_table_missing_from_a_dump_is_unknown_for_every_scenario_whatever_the_failure() {
+    // Regression: the dump decides, so the table is not there.
+    b1c_assert_nothing_runs_on(B1cState::NotInTheDump);
+}
+
+#[test]
+fn a_new_column_on_a_table_kilit_lost_is_unknown_and_shows_what_the_lab_measured() {
+    // The loser comes first in the input, so the reason can name its line.
+    let sql = format!("{B1C_LOSES_ORDERS}\nALTER TABLE orders ADD COLUMN c INT NULL;");
+    for (how, schema) in [
+        ("no --schema", Schema::from_sql(LAB_TABLES)),
+        ("a dump", Schema::from_dump(LAB_TABLES)),
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            let reason = b1c_reason(server, &schema, &sql);
+            for part in [
+                "orders",
+                "kilit lost track of",
+                "line 1",
+                B1C_LIKELY,
+                "add-column",
+            ] {
+                assert!(reason.contains(part), "{how}, {server}: {part}: {reason}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_new_column_without_a_schema_is_unknown_and_says_no_schema_was_given() {
+    let schema = Schema::from_sql("");
+    for server in [MYSQL_80, MYSQL_84] {
+        let reason = b1c_reason(server, &schema, "ALTER TABLE orders ADD COLUMN c INT NULL;");
+        for part in ["orders", "no --schema was given", B1C_LIKELY, "add-column"] {
+            assert!(reason.contains(part), "{server}: {part}: {reason}");
+        }
+    }
+}
+
+#[test]
+fn a_table_dropped_or_renamed_earlier_in_the_input_is_unknown_without_a_schema_and_the_reason_says_which()
+ {
+    // Dropped, then altered: MySQL refuses the second statement (1146). A
+    // table created in the input and then dropped is not known either.
+    let schema = Schema::from_sql(LAB_TABLES);
+    for server in [MYSQL_80, MYSQL_84] {
+        let dropped = b1c_reason(
+            server,
+            &schema,
+            "DROP TABLE orders;\nALTER TABLE orders ADD COLUMN c INT NULL;",
+        );
+        for part in ["orders", "drops", "line 1", B1C_LIKELY, "add-column"] {
+            assert!(dropped.contains(part), "{server}: {part}: {dropped}");
+        }
+        let renamed = b1c_reason(
+            server,
+            &schema,
+            "RENAME TABLE orders TO purchases;\nALTER TABLE orders ADD COLUMN c INT NULL;",
+        );
+        for part in ["orders", "renames", "purchases", "line 1", B1C_LIKELY] {
+            assert!(renamed.contains(part), "{server}: {part}: {renamed}");
+        }
+    }
+}
+
+#[test]
+fn nothing_but_a_failure_from_the_statement_alone_fails_on_a_table_kilit_does_not_know() {
+    // The failures that stay on such a table: 1674 (a default that is not safe
+    // for the binary log) and 1101 where the TEXT, BLOB, JSON or GEOMETRY type
+    // and its quoted default are both in the statement. The type is written in
+    // MODIFY and CHANGE too.
+    for (how, schema) in b1c_tables_kilit_does_not_know() {
+        for column in BINLOG_UNSAFE_COLUMNS {
+            assert_eq!(
+                b1c_both(&schema, &format!("ALTER TABLE orders ADD COLUMN {column};")),
+                "fails with error 1674",
+                "{how}: {column}"
+            );
+        }
+        for (column, _) in QUOTED_DEFAULT_SHAPES {
+            assert_eq!(
+                b1c_both(&schema, &format!("ALTER TABLE orders ADD COLUMN {column};")),
+                FAILS_1101,
+                "{how}: {column}"
+            );
+        }
+        for statement in [
+            "ALTER TABLE orders MODIFY note TEXT NULL DEFAULT ''",
+            "ALTER TABLE orders MODIFY note TEXT NULL DEFAULT 'x'",
+            "ALTER TABLE orders CHANGE note note TEXT NULL DEFAULT ''",
+            "alter table `orders` modify `note` text not null default ''",
+        ] {
+            assert_eq!(
+                b1c_both(&schema, statement),
+                FAILS_1101,
+                "{how}: {statement}"
+            );
+        }
+    }
+}
+
+#[test]
+fn renaming_a_column_or_setting_a_default_on_a_table_kilit_does_not_know_is_unknown() {
+    // The lab's rename-column has exceptions (3108, 3959) and so has
+    // set-column-default (1101): neither is an answer without the table.
+    for (how, schema) in b1c_tables_kilit_does_not_know() {
+        for statement in [
+            "ALTER TABLE orders RENAME COLUMN note TO memo",
+            "ALTER TABLE orders ALTER COLUMN amount SET DEFAULT 0",
+            "ALTER TABLE orders ALTER COLUMN note SET DEFAULT 'x'",
+            "alter table `orders` rename column `note` to `memo`",
+        ] {
+            assert_eq!(b1c_both(&schema, statement), UNKNOWN, "{how}: {statement}");
+        }
+    }
+}
+
+#[test]
+fn a_forced_algorithm_or_lock_on_a_table_kilit_does_not_know_is_unknown() {
+    // A table can change what a forced ALGORITHM does (ADD INDEX with
+    // ALGORITHM=INSTANT is 1845, or 1170 on a TEXT column).
+    for (how, schema) in b1c_tables_kilit_does_not_know() {
+        for statement in [
+            "ALTER TABLE orders ADD INDEX ix_amount (amount), ALGORITHM=INSTANT",
+            "ALTER TABLE orders ADD INDEX ix_amount (amount), ALGORITHM=INPLACE, LOCK=NONE",
+            "ALTER TABLE orders ADD COLUMN c INT NULL, ALGORITHM=INPLACE, LOCK=NONE",
+            "ALTER TABLE orders ADD COLUMN c INT NULL, ALGORITHM=COPY",
+            "ALTER TABLE orders DROP COLUMN note, ALGORITHM=COPY",
+            "ALTER TABLE orders DROP COLUMN note, LOCK=NONE",
+        ] {
+            assert_eq!(b1c_both(&schema, statement), UNKNOWN, "{how}: {statement}");
+        }
+    }
+}
+
+#[test]
+fn a_table_created_earlier_in_the_input_stays_known() {
+    // Regression: nothing about a new table is lost, so its answers are the
+    // lab's, and a FULLTEXT index it was created with still makes a new
+    // column a copy.
+    let schema = Schema::from_sql("");
+    let create = "CREATE TABLE tags (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, \
+                  body TEXT NULL, FULLTEXT KEY ft_body (body)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n";
+    assert_eq!(
+        b1c_both(
+            &schema,
+            &format!("{create}ALTER TABLE tags ADD COLUMN c INT NULL;")
+        ),
+        COPY
+    );
+    let plain = "CREATE TABLE tags (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, \
+                 body TEXT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n";
+    assert_eq!(
+        b1c_both(
+            &schema,
+            &format!("{plain}ALTER TABLE tags ADD COLUMN c INT NULL;")
+        ),
+        INSTANT
+    );
+}
+
+#[test]
+fn a_table_missing_from_a_dump_stays_unknown_whatever_the_statement() {
+    // Regression: with a --schema the dump decides; the table is not
+    // there, so even a failure from the statement alone is unknown.
+    let dump = Schema::from_dump(LAB_TABLES);
+    for server in [MYSQL_80, MYSQL_84] {
+        for statement in [
+            "ALTER TABLE coupons ADD COLUMN c INT NULL",
+            "ALTER TABLE coupons ADD COLUMN token CHAR(36) NOT NULL DEFAULT (UUID())",
+            "ALTER TABLE coupons ADD COLUMN c TEXT NOT NULL DEFAULT ''",
+        ] {
+            let reason = b1c_reason(server, &dump, statement);
+            assert!(reason.contains("the dump may be out of date"), "{reason}");
+        }
+    }
+}
+
+#[test]
+fn a_qualified_table_name_whose_table_part_kilit_has_is_unknown_and_names_both_spellings() {
+    // With a dump, without one, and for a table the input
+    // creates. kilit does not know which database `shop` is.
+    let created =
+        "CREATE TABLE orders (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB;\n";
+    for (how, schema, input) in [
+        ("a dump", Schema::from_dump(LAB_TABLES), String::new()),
+        ("no --schema", Schema::from_sql(LAB_TABLES), String::new()),
+        ("created here", Schema::from_sql(""), created.to_owned()),
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            let sql = format!("{input}ALTER TABLE shop.orders ADD COLUMN c INT NULL;");
+            let reason = b1c_reason(server, &schema, &sql);
+            assert!(reason.contains("shop.orders"), "{how}, {server}: {reason}");
+            assert!(
+                reason.matches("orders").count() >= 2,
+                "{how}, {server}: {reason}"
+            );
+            assert!(
+                !reason.contains("which database"),
+                "{how}, {server}: {reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_qualified_name_whose_table_part_kilit_does_not_have_is_unknown_as_any_unseen_table() {
+    // Regression: `shop.coupons` next to no `coupons`.
+    for (how, schema) in [
+        ("no --schema", Schema::from_sql(LAB_TABLES)),
+        ("a dump", Schema::from_dump(LAB_TABLES)),
+    ] {
+        assert_eq!(
+            b1c_both(&schema, "ALTER TABLE shop.coupons ADD COLUMN c INT NULL;"),
+            UNKNOWN,
+            "{how}"
+        );
+    }
+}
+
+/// Every form of DROP CHECK, DROP CONSTRAINT, ALTER CHECK and ALTER
+/// CONSTRAINT of a name no table has, with the error MySQL gave by hand on
+/// 8.0.46 and 8.4.13 and the lab scenario that measured it.
+const B1C_MISSING_CHECKS: [(&str, &str, &str); 7] = [
+    (
+        "ALTER TABLE orders DROP CHECK nosuch",
+        "3821",
+        "drop-check-missing",
+    ),
+    (
+        "ALTER TABLE orders ALTER CHECK nosuch NOT ENFORCED",
+        "3821",
+        "alter-check-missing",
+    ),
+    (
+        "ALTER TABLE orders ALTER CHECK nosuch ENFORCED",
+        "3821",
+        "alter-check-missing",
+    ),
+    (
+        "ALTER TABLE orders DROP CONSTRAINT nosuch",
+        "3940",
+        "drop-constraint-missing",
+    ),
+    (
+        "ALTER TABLE orders ALTER CONSTRAINT nosuch NOT ENFORCED",
+        "3940",
+        "alter-constraint-missing",
+    ),
+    (
+        "ALTER TABLE orders ALTER CONSTRAINT nosuch ENFORCED",
+        "3940",
+        "alter-constraint-missing",
+    ),
+    (
+        "alter table `orders` drop check `nosuch`",
+        "3821",
+        "drop-check-missing",
+    ),
+];
+
+#[test]
+fn dropping_or_altering_a_check_the_known_table_does_not_have_is_unknown_with_its_error() {
+    // By hand on MySQL 8.0.46 and 8.4.13, with no CHECK and next to a CHECK of
+    // another name, as written and with every ALGORITHM and LOCK: DROP CHECK
+    // and ALTER CHECK fail with 3821, DROP CONSTRAINT and ALTER CONSTRAINT
+    // with 3940.
+    let with_check =
+        lab_after(&["ALTER TABLE orders ADD CONSTRAINT chk_amount CHECK (amount > 0)"]);
+    for schema in [LAB_TABLES.to_owned(), with_check] {
+        for (statement, error, scenario) in B1C_MISSING_CHECKS {
+            for variant in Variant::ALL {
+                let sql = format!("{statement}{}", variant.clause());
+                for server in [MYSQL_80, MYSQL_84] {
+                    let reason = b1c_reason(server, &Schema::from_sql(&schema), &sql);
+                    assert!(reason.contains(error), "{server}: {sql}: {reason}");
+                    assert!(reason.contains(scenario), "{server}: {sql}: {reason}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_table_stays_known_after_a_check_it_does_not_have_is_dropped_or_altered() {
+    // A FULLTEXT index makes a new column a copy (add-column-with-fulltext):
+    // the table is still known, so the next statement gets that answer, not a
+    // lost table's.
+    let schema = Schema::from_sql(&lab_after(&[
+        "ALTER TABLE orders ADD COLUMN body TEXT NULL",
+        "ALTER TABLE orders ADD FULLTEXT INDEX ft_body (body)",
+    ]));
+    for (statement, _, _) in B1C_MISSING_CHECKS {
+        let sql = format!("{statement};\nALTER TABLE orders ADD COLUMN c INT NULL;");
+        for server in [MYSQL_80, MYSQL_84] {
+            assert_eq!(b1c_answer(server, &schema, &sql), COPY, "{server}: {sql}");
+        }
+    }
+}
+
+#[test]
+fn dropping_a_check_on_a_table_kilit_does_not_know_is_unknown() {
+    // The table is not known, so neither is the name.
+    for (how, schema) in b1c_tables_kilit_does_not_know() {
+        for (statement, _, _) in B1C_MISSING_CHECKS {
+            assert_eq!(b1c_both(&schema, statement), UNKNOWN, "{how}: {statement}");
+        }
+    }
+}
+
+/// An `orders` with an automatic default, a plain index and a FULLTEXT index,
+/// as mysqldump writes it. A new column on it is a copy.
+const B1C_FULLTEXT_ORDERS: &str = "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL DEFAULT '0',
+  `email` varchar(255) DEFAULT NULL,
+  `note` text,
+  PRIMARY KEY (`id`),
+  KEY `ix_amount` (`amount`),
+  FULLTEXT KEY `ft_note` (`note`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+
+#[test]
+fn the_five_statements_kilit_follows_are_unknown_themselves_and_keep_their_table_known() {
+    // By hand on MySQL 8.0.46 and 8.4.13 (SHOW CREATE TABLE before
+    // and after): none of them changes anything kilit models, or only what
+    // the effect says. The next ADD COLUMN gets the FULLTEXT table's answer.
+    let schema = Schema::from_dump(B1C_FULLTEXT_ORDERS);
+    let mut problems = Vec::new();
+    for statement in [
+        "ALTER TABLE orders AUTO_INCREMENT = 100",
+        "ALTER TABLE orders AUTO_INCREMENT=5000",
+        "ALTER TABLE orders ALTER COLUMN amount DROP DEFAULT",
+        "ALTER TABLE orders ALTER COLUMN email DROP DEFAULT",
+        "ALTER TABLE orders RENAME INDEX ix_amount TO ix_total",
+        "ALTER TABLE orders RENAME KEY ix_amount TO ix_total",
+        "ALTER TABLE orders RENAME INDEX ft_note TO ft_text",
+        "CREATE FULLTEXT INDEX ft_email ON orders (email)",
+        "ALTER TABLE orders ENGINE = 'InnoDB'",
+        "ALTER TABLE orders ENGINE = `InnoDB`",
+        "ALTER TABLE orders ENGINE=innodb",
+        "alter table `orders` auto_increment = 100",
+        "alter table `orders` alter column `amount` drop default",
+    ] {
+        let sql = format!("{statement};\nALTER TABLE orders ADD COLUMN c INT NULL;");
+        for server in [MYSQL_80, MYSQL_84] {
+            let answers: Vec<String> = check(
+                &parse(&sql),
+                &schema,
+                Knowledge::built_in().server(server).unwrap(),
+            )
+            .into_iter()
+            .map(|finding| match finding.prediction {
+                Prediction::Unknown { .. } => "unknown".to_owned(),
+                Prediction::Measured { verdict, .. } => verdict.to_string(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+            if answers != [UNKNOWN, COPY] {
+                problems.push(format!("{server}: {statement}\n    got {answers:?}"));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "\n{}", problems.join("\n"));
+}
+
+#[test]
+fn dropping_a_default_leaves_the_column_without_one_and_the_others_alone() {
+    // By hand on MySQL 8.0.46 and 8.4.13: ALTER COLUMN c DROP DEFAULT leaves
+    // the column with no default (a column without one is accepted too).
+    let schema = Schema::from_sql(&format!(
+        "{B1C_FULLTEXT_ORDERS}ALTER TABLE orders ALTER COLUMN amount DROP DEFAULT;
+         ALTER TABLE orders ALTER COLUMN email DROP DEFAULT;"
+    ));
+    let TableState::Known(table) = schema.table("orders") else {
+        panic!("orders was lost");
+    };
+    assert_eq!(table.column("amount").unwrap().default, None);
+    assert_eq!(table.column("email").unwrap().default, None);
+    assert_eq!(table.columns.len(), 5);
+    assert_eq!(table.indexes.len(), 2);
+}
+
+#[test]
+fn renaming_an_index_changes_its_name_and_a_refusal_changes_nothing() {
+    // By hand on MySQL 8.0.46 and 8.4.13: RENAME INDEX a TO b renames; a
+    // missing index is 1176, a taken name 1061 (letter case does not matter),
+    // PRIMARY 1280; renaming to the same name or to another case is accepted.
+    let base = lab_after(&[
+        "ALTER TABLE orders ADD INDEX ix_amount (amount)",
+        "ALTER TABLE orders ADD UNIQUE INDEX uq_email (email)",
+    ]);
+    let schema = Schema::from_sql(&base);
+    let drop_old = "ALTER TABLE orders DROP INDEX ix_amount";
+    let drop_new = "ALTER TABLE orders DROP INDEX ix_total";
+    for server in [MYSQL_80, MYSQL_84] {
+        // Control: the index has its name; dropping it is the lab's answer.
+        assert_eq!(b1c_answer(server, &schema, drop_old), INPLACE, "{server}");
+        for rename in [
+            "ALTER TABLE orders RENAME INDEX ix_amount TO ix_total",
+            "ALTER TABLE orders RENAME KEY ix_amount TO ix_total",
+            "ALTER TABLE orders RENAME INDEX IX_AMOUNT TO ix_total",
+            "ALTER TABLE orders RENAME INDEX ix_amount TO ix_total, ALGORITHM=INPLACE",
+        ] {
+            let sql = format!("{rename};\n{drop_new}");
+            assert_eq!(
+                b1c_answer(server, &schema, &sql),
+                INPLACE,
+                "{server}: {sql}"
+            );
+            // The old name is gone: dropping it is the 1091 unknown.
+            let sql = format!("{rename};\n{drop_old}");
+            assert_eq!(
+                b1c_answer(server, &schema, &sql),
+                UNKNOWN,
+                "{server}: {sql}"
+            );
+        }
+        for (rename, error) in [
+            ("ALTER TABLE orders RENAME INDEX nosuch TO ix_total", "1176"),
+            ("ALTER TABLE orders RENAME KEY nosuch TO ix_total", "1176"),
+            (
+                "ALTER TABLE orders RENAME INDEX ix_amount TO uq_email",
+                "1061",
+            ),
+            (
+                "ALTER TABLE orders RENAME INDEX ix_amount TO UQ_EMAIL",
+                "1061",
+            ),
+            (
+                "ALTER TABLE orders RENAME INDEX ix_amount TO `PRIMARY`",
+                "1280",
+            ),
+            (
+                "ALTER TABLE orders RENAME INDEX `PRIMARY` TO ix_total",
+                "1280",
+            ),
+        ] {
+            let reason = b1c_reason(server, &schema, rename);
+            assert!(reason.contains(error), "{server}: {rename}: {reason}");
+            // The table is as it was: the index keeps its name.
+            let sql = format!("{rename};\n{drop_old}");
+            assert_eq!(
+                b1c_answer(server, &schema, &sql),
+                INPLACE,
+                "{server}: {sql}"
+            );
+            let sql = format!("{rename};\n{drop_new}");
+            assert_eq!(
+                b1c_answer(server, &schema, &sql),
+                UNKNOWN,
+                "{server}: {sql}"
+            );
+        }
+        for rename in [
+            "ALTER TABLE orders RENAME INDEX ix_amount TO ix_amount",
+            "ALTER TABLE orders RENAME INDEX ix_amount TO IX_AMOUNT",
+        ] {
+            let sql = format!("{rename};\n{drop_old}");
+            assert_eq!(
+                b1c_answer(server, &schema, &sql),
+                INPLACE,
+                "{server}: {sql}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_fulltext_index_made_with_create_index_is_the_same_index_as_with_alter_table() {
+    // By hand on MySQL 8.0.46 and 8.4.13: CREATE FULLTEXT INDEX gives the same
+    // SHOW CREATE TABLE as ALTER TABLE ... ADD FULLTEXT. A new column on the
+    // table is then a copy, whichever statement made the index.
+    let then = "ALTER TABLE orders ADD COLUMN c INT NULL;";
+    for create in [
+        "CREATE FULLTEXT INDEX ft_note ON orders (note)",
+        "create fulltext index `ft_note` on `orders` (`note`)",
+        "ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note)",
+    ] {
+        let schema = Schema::from_sql(LAB_TABLES);
+        let sql = format!("{create};\n{then}");
+        for server in [MYSQL_80, MYSQL_84] {
+            assert_eq!(
+                b1c_answer(server, &schema, &sql),
+                COPY,
+                "{server}: {create}"
+            );
+        }
+        // The same index is a second FULLTEXT index for the next one.
+        let more = "CREATE FULLTEXT INDEX ft_note2 ON orders (note)";
+        let sql = format!("{create};\n{more}");
+        assert_eq!(
+            b1c_both(&schema, &sql),
+            b1c_both(
+                &schema,
+                &format!("ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note);\n{more}")
+            ),
+            "{create}"
+        );
+    }
+}
+
+#[test]
+fn a_create_index_that_mysql_refuses_changes_no_table() {
+    // By hand on MySQL 8.0.46 and 8.4.13: a taken name is 1061, a column the
+    // table lacks 1072, a table that is not there 1146.
+    let schema = Schema::from_sql(&lab_after(&["ALTER TABLE orders ADD INDEX ix (amount)"]));
+    for create in [
+        "CREATE INDEX ix ON orders (email)",
+        "CREATE INDEX IX ON orders (email)",
+        "CREATE UNIQUE INDEX ix ON orders (email)",
+        "CREATE FULLTEXT INDEX ix ON orders (note)",
+        "CREATE INDEX iy ON orders (nosuch)",
+        "CREATE FULLTEXT INDEX fy ON orders (nosuch)",
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            assert_eq!(
+                b1c_answer(server, &schema, create),
+                UNKNOWN,
+                "{server}: {create}"
+            );
+            // The table is as it was: the one index `ix` still drops with the
+            // lab's answer, and a new column is still the plain table's.
+            let sql = format!("{create};\nALTER TABLE orders DROP INDEX ix");
+            assert_eq!(
+                b1c_answer(server, &schema, &sql),
+                INPLACE,
+                "{server}: {sql}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dropping_a_default_of_a_column_the_table_lacks_is_unknown_and_changes_no_table() {
+    // By hand on MySQL 8.0.46 and 8.4.13: 1054.
+    let schema = Schema::from_dump(B1C_FULLTEXT_ORDERS);
+    let sql = "ALTER TABLE orders ALTER COLUMN nosuch DROP DEFAULT;
+               ALTER TABLE orders ADD COLUMN c INT NULL;";
+    for server in [MYSQL_80, MYSQL_84] {
+        let answers = b1c_answer(server, &schema, sql);
+        assert_eq!(answers, COPY, "{server}");
+        let reason = b1c_reason(
+            server,
+            &schema,
+            "ALTER TABLE orders ALTER COLUMN nosuch DROP DEFAULT",
+        );
+        assert!(reason.contains("1054"), "{server}: {reason}");
+    }
+}
+
+#[test]
+fn a_varchar_or_varbinary_past_what_a_row_holds_changes_no_table_after_a_strict_set_in_the_input() {
+    // By hand on MySQL 8.0.46 and 8.4.13: strict mode refuses VARCHAR(70000)
+    // and VARBINARY(70000) in ADD and MODIFY (1074), so the table is as it
+    // was and a later column is INSTANT, not 1118. The input has to say it
+    // is strict: kilit does not guess the server's sql_mode.
+    let schema = Schema::from_sql(LAB_TABLES);
+    let then = "ALTER TABLE orders ADD COLUMN c INT NULL;";
+    for strict in [
+        "SET sql_mode = 'STRICT_TRANS_TABLES';\n",
+        "SET sql_mode = 'STRICT_ALL_TABLES';\n",
+        "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION,STRICT_TRANS_TABLES';\n",
+    ] {
+        for statement in [
+            "ALTER TABLE orders ADD COLUMN big VARCHAR(70000) NULL",
+            "ALTER TABLE orders ADD COLUMN big VARBINARY(70000) NULL",
+            "ALTER TABLE orders ADD COLUMN big VARCHAR(16384) CHARACTER SET utf8mb4 NULL",
+            "ALTER TABLE orders MODIFY note VARCHAR(70000) NULL",
+            "alter table `orders` add `big` varchar(70000) null",
+        ] {
+            for server in [MYSQL_80, MYSQL_84] {
+                let answers = [
+                    b1c_answer(server, &schema, &format!("{strict}{statement}")),
+                    b1c_answer(server, &schema, &format!("{strict}{statement};\n{then}")),
+                ];
+                assert_eq!(answers[0], UNKNOWN, "{server}: {strict}{statement}");
+                assert_eq!(answers[1], INSTANT, "{server}: {strict}{statement}");
+            }
+        }
+    }
+    // The column was never added: dropping it is the 1091 unknown, where a
+    // table that took the column would say INSTANT.
+    for server in [MYSQL_80, MYSQL_84] {
+        let sql = "SET sql_mode = 'STRICT_TRANS_TABLES';
+                   ALTER TABLE orders ADD COLUMN big VARCHAR(70000) NULL;
+                   ALTER TABLE orders DROP COLUMN big;";
+        assert_eq!(b1c_answer(server, &schema, sql), UNKNOWN, "{server}");
+    }
+}
+
+#[test]
+fn a_varchar_or_varbinary_past_what_a_row_holds_loses_the_table_when_the_input_sets_no_strict_mode()
+{
+    // Without a SET in the input the server's sql_mode is not known: in a
+    // non-strict mode the column becomes MEDIUMTEXT or MEDIUMBLOB, so kilit
+    // stops trusting the table.
+    let schema = Schema::from_sql(LAB_TABLES);
+    for statement in [
+        "ALTER TABLE orders ADD COLUMN big VARCHAR(70000) NULL",
+        "ALTER TABLE orders ADD COLUMN big VARBINARY(70000) NULL",
+        "ALTER TABLE orders MODIFY note VARCHAR(70000) NULL",
+        "alter table `orders` add `big` varchar(70000) null",
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            let sql = format!("{statement};\nALTER TABLE orders ADD COLUMN c INT NULL;");
+            let reason = b1c_reason(server, &schema, &sql);
+            assert!(
+                reason.contains("orders") && reason.contains("kilit lost track of"),
+                "{server}: {statement}: {reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_strict_set_in_an_earlier_session_does_not_make_a_later_session_strict() {
+    // Each input file is a session of its own: the SET in the first does
+    // not count for the second.
+    let schema = Schema::from_sql(LAB_TABLES);
+    let first = parse("SET sql_mode = 'STRICT_TRANS_TABLES';");
+    let second = parse(
+        "ALTER TABLE orders ADD COLUMN big VARCHAR(70000) NULL;
+         ALTER TABLE orders ADD COLUMN c INT NULL;",
+    );
+    for server in [MYSQL_80, MYSQL_84] {
+        let results = Knowledge::built_in().server(server).unwrap();
+        let findings = check_sessions(&[&first, &second], &schema, results);
+        match &findings.last().unwrap().prediction {
+            Prediction::Unknown { reason, .. } => assert!(
+                reason.contains("orders") && reason.contains("kilit lost track of"),
+                "{server}: {reason}"
+            ),
+            other => panic!("{server}: expected unknown, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_varchar_past_what_a_row_holds_loses_the_table_after_a_sql_mode_that_is_not_strict() {
+    // By hand on MySQL 8.0.46 and 8.4.13: with sql_mode = '' (or
+    // NO_ENGINE_SUBSTITUTION) VARCHAR(70000) becomes MEDIUMTEXT and
+    // VARBINARY(70000) MEDIUMBLOB, so kilit cannot follow the column.
+    let schema = Schema::from_sql(LAB_TABLES);
+    for set in [
+        "SET sql_mode = ''",
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'",
+        "SET SESSION sql_mode = ''",
+    ] {
+        for statement in [
+            "ALTER TABLE orders ADD COLUMN big VARCHAR(70000) NULL",
+            "ALTER TABLE orders ADD COLUMN big VARBINARY(70000) NULL",
+            "ALTER TABLE orders MODIFY note VARCHAR(70000) NULL",
+        ] {
+            let sql = format!("{set};\n{statement};\nALTER TABLE orders ADD COLUMN c INT NULL;");
+            for server in [MYSQL_80, MYSQL_84] {
+                let reason = b1c_reason(server, &schema, &sql);
+                assert!(
+                    reason.contains("orders") && reason.contains("kilit lost track of"),
+                    "{server}: {set}; {statement}: {reason}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_char_or_binary_past_255_changes_no_table_in_any_sql_mode() {
+    // By hand on MySQL 8.0.46 and 8.4.13: CHAR(300) and BINARY(300) are 1074
+    // with every sql_mode. The answer to the later column is the same as
+    // without the statement.
+    let schema = Schema::from_sql(LAB_TABLES);
+    let then = "ALTER TABLE orders ADD COLUMN c INT NULL;";
+    for set in [
+        "",
+        "SET sql_mode = '';\n",
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION';\n",
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            let alone = b1c_answer(server, &schema, &format!("{set}{then}"));
+            assert_ne!(alone, UNKNOWN, "{server}: {set}");
+            for statement in [
+                "ALTER TABLE orders ADD COLUMN d CHAR(300) NULL",
+                "ALTER TABLE orders ADD COLUMN d BINARY(300) NULL",
+                "ALTER TABLE orders MODIFY note CHAR(300) NULL",
+            ] {
+                let sql = format!("{set}{statement};\n{then}");
+                assert_eq!(
+                    b1c_answer(server, &schema, &sql),
+                    alone,
+                    "{server}: {set}{statement}"
+                );
+            }
+            // The column was never added: dropping it is the 1091 unknown.
+            let sql = format!(
+                "{set}ALTER TABLE orders ADD COLUMN d CHAR(300) NULL;
+                 ALTER TABLE orders DROP COLUMN d;"
+            );
+            assert_eq!(
+                b1c_answer(server, &schema, &sql),
+                UNKNOWN,
+                "{server}: {set}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_modify_that_strict_mode_refuses_leaves_the_column_as_it_was() {
+    // By hand on MySQL 8.0.46 and 8.4.13: MODIFY note VARCHAR(70000) is 1074
+    // in strict mode, so note stays VARCHAR(50) and a later change from 50 to
+    // 60 is the lab's INPLACE, as without the statement.
+    let schema = Schema::from_sql(LAB_TABLES);
+    let strict = "SET sql_mode = 'STRICT_TRANS_TABLES';\n";
+    let later = "ALTER TABLE orders MODIFY note VARCHAR(60) NULL;";
+    for server in [MYSQL_80, MYSQL_84] {
+        let alone = b1c_answer(server, &schema, later);
+        assert_ne!(alone, UNKNOWN, "{server}");
+        let sql = format!("{strict}ALTER TABLE orders MODIFY note VARCHAR(70000) NULL;\n{later}");
+        assert_eq!(b1c_answer(server, &schema, &sql), alone, "{server}");
+        // Without a strict SET in the input the column may have become
+        // MEDIUMTEXT, and kilit stops trusting the table.
+        let sql = format!("ALTER TABLE orders MODIFY note VARCHAR(70000) NULL;\n{later}");
+        let reason = b1c_reason(server, &schema, &sql);
+        assert!(reason.contains("kilit lost track of"), "{server}: {reason}");
+    }
+}
+
+#[test]
+fn a_foreign_key_column_of_a_length_kilit_cannot_count_is_unknown_and_does_not_panic() {
+    // 4611686018427387904 characters of utf8mb4 are more bytes than a u64
+    // holds. A debug build panicked on the multiplication, a release build
+    // wrapped and said "fails with error 6125".
+    let schema = Schema::from_sql(LAB_TABLES);
+    let sql = "ALTER TABLE users ADD UNIQUE INDEX uq_name (name);
+               ALTER TABLE orders ADD COLUMN big VARCHAR(4611686018427387904) NULL;
+               ALTER TABLE orders ADD CONSTRAINT fk_big FOREIGN KEY (big) REFERENCES users (name);";
+    for server in [MYSQL_80, MYSQL_84] {
+        let results = Knowledge::built_in().server(server).unwrap();
+        let findings = check(&parse(sql), &schema, results);
+        assert_eq!(findings.len(), 3);
+        assert!(
+            matches!(findings[2].prediction, Prediction::Unknown { .. }),
+            "{server}: {:?}",
+            findings[2].prediction
+        );
+    }
+}
+
+#[test]
+fn a_byte_count_kilit_cannot_make_is_written_as_more_bytes_than_kilit_can_count() {
+    // Small fix b: the number is not printed as 18446744073709551615.
+    let schema = Schema::from_sql(LAB_TABLES);
+    for server in [MYSQL_80, MYSQL_84] {
+        let reason = b1c_reason(
+            server,
+            &schema,
+            "ALTER TABLE orders ADD COLUMN big VARCHAR(4611686018427387904) NULL",
+        );
+        assert!(
+            reason.contains("more bytes than kilit can count"),
+            "{server}: {reason}"
+        );
+        assert!(
+            !reason.contains("18446744073709551615"),
+            "{server}: {reason}"
+        );
+        // A count kilit can make is still printed.
+        let reason = b1c_reason(
+            server,
+            &schema,
+            "ALTER TABLE orders ADD COLUMN big VARCHAR(70000) NULL",
+        );
+        assert!(reason.contains("280000"), "{server}: {reason}");
+    }
+}
+
+#[test]
+fn the_four_shapes_the_lab_never_measured_are_unknown_on_a_known_table() {
+    // By hand on MySQL 8.0.46 and 8.4.13 MySQL refuses some of
+    // them and runs others; the lab has none of them, so kilit has no answer.
+    let wide = Schema::from_sql(
+        "CREATE TABLE w (id BIGINT UNSIGNED PRIMARY KEY, a VARCHAR(255) NOT NULL, \
+         b VARCHAR(255) NOT NULL, c VARCHAR(255) NOT NULL, d VARCHAR(255) NOT NULL, \
+         note VARCHAR(50) NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+         ",
+    );
+    let lab = Schema::from_sql(&lab_after(&[
+        "ALTER TABLE orders ADD INDEX ix_amount (amount)",
+    ]));
+    let mut problems = Vec::new();
+    for (statement, schema) in [
+        // a NOT NULL date or time column without a default.
+        ("ALTER TABLE orders ADD COLUMN d DATE NOT NULL", &lab),
+        ("ALTER TABLE orders ADD COLUMN d DATETIME NOT NULL", &lab),
+        ("ALTER TABLE orders ADD COLUMN d TIMESTAMP NOT NULL", &lab),
+        ("alter table `orders` add `d` date not null", &lab),
+        // a column the table lacks, a name the table has, a key past
+        // 3072 bytes, a prefix longer than its column.
+        ("ALTER TABLE orders ADD INDEX ix_x (nosuch)", &lab),
+        ("CREATE INDEX ix_x ON orders (nosuch)", &lab),
+        ("ALTER TABLE orders ADD INDEX ix_amount (email)", &lab),
+        ("CREATE INDEX ix_amount ON orders (email)", &lab),
+        ("ALTER TABLE w ADD INDEX ix_big (a, b, c, d)", &wide),
+        ("ALTER TABLE w ADD INDEX ix_note (note(100))", &wide),
+        ("ALTER TABLE orders ADD INDEX ix_note (note(100))", &lab),
+        // a column moved after itself.
+        (
+            "ALTER TABLE orders MODIFY note VARCHAR(50) NULL AFTER note",
+            &lab,
+        ),
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            let got = b1c_answer(server, schema, statement);
+            if got != UNKNOWN {
+                problems.push(format!("{server}: {statement}\n    got {got}"));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "\n{}", problems.join("\n"));
+    // Their neighbors keep their answers.
+    for (statement, answer) in [
+        ("ALTER TABLE orders ADD COLUMN d DATE NULL", INSTANT),
+        ("ALTER TABLE orders ADD INDEX ix_email (email)", INPLACE),
+        ("ALTER TABLE orders ADD INDEX ix_note (note(10))", INPLACE),
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            assert_eq!(
+                b1c_answer(server, &lab, statement),
+                answer,
+                "{server}: {statement}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dropping_a_fulltext_or_a_unique_index_is_the_measured_drop_index_answer_with_its_own_scenario() {
+    // The lab: drop-fulltext-index and drop-unique-index are INPLACE, no
+    // rebuild, writes allowed on both servers, the same as drop-index.
+    for (setup, drop, scenario) in [
+        (
+            "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)",
+            "DROP INDEX ft_orders_note",
+            "drop-fulltext-index",
+        ),
+        (
+            "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_amount (amount)",
+            "DROP INDEX uq_orders_amount",
+            "drop-unique-index",
+        ),
+    ] {
+        let schema = lab_after(&[setup]);
+        let answer = said(&schema, &format!("ALTER TABLE orders {drop}"));
+        assert_eq!(answer.case, Some("drop-index"), "{scenario}");
+        assert_eq!(answer.answer, INPLACE, "{scenario}");
+        assert!(
+            answer.evidence.contains(&scenario),
+            "{scenario} is missing from {:?}",
+            answer.evidence
+        );
+    }
+}
+
+/// users and orders as mysqldump writes them for a foreign key MySQL named
+/// `orders_ibfk_abc` (a name a person gave it), with the index that serves it
+/// written as a KEY of the same name.
+fn b1c_ibfk_tables(name: &str) -> String {
+    format!(
+        "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `{name}` (`user_id`),
+  CONSTRAINT `{name}` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+"
+    )
+}
+
+#[test]
+fn an_index_named_like_a_foreign_key_stays_unknown_to_drop_after_the_table_is_renamed() {
+    // By hand on MySQL 8.0.46 and 8.4.13: the key MySQL made for the
+    // foreign key keeps a hidden flag after RENAME TABLE (the foreign key
+    // becomes purchases_ibfk_abc, the index keeps its name). ADD INDEX ix then
+    // drops that automatic index, and DROP INDEX ix is 1553. A KEY a person
+    // wrote is never dropped, and a dump cannot tell the two apart.
+    for name in ["orders_ibfk_abc", "orders_ibfk_1"] {
+        let schema = Schema::from_dump(&b1c_ibfk_tables(name));
+        for rename in [
+            "RENAME TABLE orders TO purchases",
+            "ALTER TABLE orders RENAME TO purchases",
+        ] {
+            let sql = format!(
+                "{rename};
+                 ALTER TABLE purchases ADD INDEX ix (user_id);
+                 ALTER TABLE purchases DROP INDEX ix;"
+            );
+            for server in [MYSQL_80, MYSQL_84] {
+                assert_eq!(
+                    b1c_answer(server, &schema, &sql),
+                    UNKNOWN,
+                    "{server}: {name}, {rename}"
+                );
+            }
+        }
+        // Control, as before the rename: unknown too.
+        let sql = "ALTER TABLE orders ADD INDEX ix (user_id);
+                   ALTER TABLE orders DROP INDEX ix;";
+        for server in [MYSQL_80, MYSQL_84] {
+            assert_eq!(
+                b1c_answer(server, &schema, sql),
+                UNKNOWN,
+                "{server}: {name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_index_renamed_by_hand_is_no_longer_the_automatic_one_after_the_table_is_renamed() {
+    // By hand on MySQL 8.0.46 and 8.4.13: RENAME INDEX of the foreign key's
+    // index takes the hidden flag away, so ADD INDEX ix then DROP INDEX ix is
+    // accepted, and the foreign key keeps its serving index.
+    let schema = Schema::from_dump(&b1c_ibfk_tables("orders_ibfk_abc"));
+    let sql = "ALTER TABLE orders RENAME INDEX orders_ibfk_abc TO ix_renamed;
+               RENAME TABLE orders TO purchases;
+               ALTER TABLE purchases ADD INDEX ix (user_id);
+               ALTER TABLE purchases DROP INDEX ix;";
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(b1c_answer(server, &schema, sql), INPLACE, "{server}");
+        // The old name is gone.
+        let sql = "ALTER TABLE orders RENAME INDEX orders_ibfk_abc TO ix_renamed;
+                   ALTER TABLE orders DROP INDEX orders_ibfk_abc;";
+        assert_eq!(b1c_answer(server, &schema, sql), UNKNOWN, "{server}");
+    }
+}
+
+/// `q` has no primary key, a UNIQUE index on a prefix of the nullable-free
+/// column `a`, and a UNIQUE index on `k`, a VARCHAR(700) utf8mb4: with the
+/// filler of CHAR(255) latin1 columns it is the lab's shape of the hand test.
+fn b1c_table_q(unique_on_a: &str) -> String {
+    let filler: Vec<String> = (1..=20)
+        .map(|n| format!("f{n} CHAR(255) CHARACTER SET latin1 NOT NULL"))
+        .collect();
+    format!(
+        "CREATE TABLE q (a VARCHAR(20) NOT NULL, k VARCHAR(700) NOT NULL, {}, \
+         UNIQUE KEY u1 ({unique_on_a}), UNIQUE KEY u2 (k)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n",
+        filler.join(", ")
+    )
+}
+
+#[test]
+fn a_unique_index_on_a_prefix_does_not_key_the_rows_so_a_page_full_table_is_unknown() {
+    // By hand on MySQL 8.0.46 and 8.4.13: InnoDB skips the prefix index
+    // and keys the rows by u2, so with 5,100 bytes of filler ADD x CHAR(200)
+    // latin1 NOT NULL fails with 1118 on 8.0.46 and rebuilds the table on
+    // 8.4.13. The two servers differ, so kilit has no answer.
+    let schema = Schema::from_sql(&b1c_table_q("a(10)"));
+    let add = "ALTER TABLE q ADD COLUMN x CHAR(200) CHARACTER SET latin1 NOT NULL DEFAULT ''";
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(b1c_answer(server, &schema, add), UNKNOWN, "{server}");
+    }
+}
+
+#[test]
+fn a_unique_index_on_a_whole_column_keys_the_rows_and_the_same_column_is_instant() {
+    // Control. By hand on MySQL 8.0.46 and 8.4.13: u1 on all of `a` keys the
+    // rows, and the same ADD COLUMN is INSTANT on both servers.
+    let schema = Schema::from_sql(&b1c_table_q("a"));
+    let add = "ALTER TABLE q ADD COLUMN x CHAR(200) CHARACTER SET latin1 NOT NULL DEFAULT ''";
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(b1c_answer(server, &schema, add), INSTANT, "{server}");
+    }
+}
+
+#[test]
+fn dropping_a_temporary_table_with_a_comment_inside_is_read_as_without_it() {
+    // A comment between DROP and TEMPORARY does not make it a drop of the
+    // base table. By hand on MySQL 8.0.46 and 8.4.13: DROP TEMPORARY TABLE
+    // leaves a base table of the same name alone.
+    let dump = Schema::from_dump(LAB_TABLES);
+    let alter = "ALTER TABLE orders ADD COLUMN c INT NULL;";
+    for drop in [
+        "DROP TEMPORARY TABLE IF EXISTS orders",
+        "DROP TEMPORARY TABLE orders",
+    ] {
+        let commented = drop.replacen("DROP ", "DROP /* x */ ", 1);
+        for server in [MYSQL_80, MYSQL_84] {
+            let plain = b1c_reason(server, &dump, &format!("{drop};\n{alter}"));
+            let with = b1c_reason(server, &dump, &format!("{commented};\n{alter}"));
+            assert_eq!(with, plain, "{server}: {commented}");
+        }
+    }
+    for server in [MYSQL_80, MYSQL_84] {
+        let reason = b1c_reason(
+            server,
+            &dump,
+            &format!("DROP /* x */ TEMPORARY TABLE IF EXISTS orders;\n{alter}"),
+        );
+        assert!(
+            reason.contains("may have dropped only a temporary table"),
+            "{server}: {reason}"
+        );
+    }
+}
+
+#[test]
+fn making_a_primary_key_column_nullable_is_unknown_and_does_not_panic() {
+    // By hand on MySQL 8.0.46 and 8.4.13 a primary key
+    // column cannot be NULL; the lab has no scenario for the MODIFY, so
+    // kilit has no answer, and its row size sums must not fail on the shape.
+    let schema = Schema::from_sql(
+        "CREATE TABLE p (id INT NOT NULL, note VARCHAR(10) NULL, PRIMARY KEY (id)) \
+         ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
+    );
+    for statement in [
+        "ALTER TABLE p MODIFY id INT NULL",
+        "alter table `p` modify `id` int null",
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            assert_eq!(
+                b1c_answer(server, &schema, statement),
+                UNKNOWN,
+                "{server}: {statement}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Step B1c, fix round: one test for each shape found in review. Each MySQL
+// fact below was run by hand on MySQL 8.0.46 and 8.4.13.
+
+/// A parent with a unique index on `email` and a child with a foreign key to
+/// each of `id` and `email`.
+const FIX_USERS_AND_ORDERS: &str = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `email` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `users_email_unique` (`email`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `user_email` varchar(100) NOT NULL,
+  `note` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `orders_user_id_foreign` (`user_id`),
+  KEY `orders_user_email_foreign` (`user_email`),
+  CONSTRAINT `orders_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`),
+  CONSTRAINT `orders_user_email_foreign` FOREIGN KEY (`user_email`) REFERENCES `users` (`email`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+";
+
+#[test]
+fn a_child_kilit_lost_still_keeps_the_parent_index_and_the_parent_column_type() {
+    // By hand: with the child's foreign keys in place, dropping the unique
+    // index users_email_unique is 1553 and MODIFY users.id INT UNSIGNED is
+    // 3780. A child kilit stopped trusting may still have them, so the lab's
+    // answer for the plain table must not be given.
+    let lose = "ALTER TABLE orders CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\n";
+    let drop_index = "ALTER TABLE users DROP INDEX users_email_unique";
+    let modify = "ALTER TABLE users MODIFY id INT UNSIGNED NOT NULL AUTO_INCREMENT";
+    for (how, schema) in [
+        ("from SQL", Schema::from_sql(FIX_USERS_AND_ORDERS)),
+        ("from a dump", Schema::from_dump(FIX_USERS_AND_ORDERS)),
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            // Control: with the child known, both are unknown too (the lab
+            // has not measured a referenced index or column).
+            for statement in [drop_index, modify] {
+                assert_eq!(
+                    b1c_answer(server, &schema, statement),
+                    UNKNOWN,
+                    "{how}, {server}: {statement}"
+                );
+            }
+            for statement in [drop_index, modify] {
+                let sql = format!("{lose}{statement};");
+                assert_eq!(
+                    b1c_answer(server, &schema, &sql),
+                    UNKNOWN,
+                    "{how}, {server}: {sql}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_foreign_key_added_to_a_table_kilit_does_not_know_makes_the_parent_index_drop_unknown() {
+    // No --schema: users is created here, orders is in no schema. The key
+    // from orders.user_email makes dropping users_email_unique 1553.
+    let schema = Schema::from_sql(
+        "CREATE TABLE users (id BIGINT UNSIGNED NOT NULL PRIMARY KEY, \
+         email VARCHAR(100) NOT NULL, UNIQUE KEY users_email_unique (email)) ENGINE=InnoDB;",
+    );
+    let key = "ALTER TABLE orders ADD CONSTRAINT fk_e FOREIGN KEY (user_email) \
+               REFERENCES users (email);\n";
+    let drop_index = "ALTER TABLE users DROP INDEX users_email_unique";
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(
+            b1c_answer(server, &schema, drop_index),
+            INPLACE,
+            "{server}: control"
+        );
+        assert_eq!(
+            b1c_answer(server, &schema, &format!("{key}{drop_index}")),
+            UNKNOWN,
+            "{server}"
+        );
+    }
+}
+
+#[test]
+fn create_table_if_not_exists_without_a_schema_may_keep_a_table_kilit_cannot_see() {
+    // No --schema: a table named posts may exist, and then the statement does
+    // nothing. After a DROP TABLE posts it creates the table.
+    let schema = Schema::from_sql("");
+    let create = "CREATE TABLE IF NOT EXISTS posts (id INT PRIMARY KEY, body TEXT NULL);\n";
+    let add = "ALTER TABLE posts ADD COLUMN c INT NULL;";
+    for server in [MYSQL_80, MYSQL_84] {
+        let reason = b1c_reason(server, &schema, &format!("{create}{add}"));
+        assert!(
+            reason.contains(
+                "kilit lost track of posts (line 1: CREATE TABLE IF NOT EXISTS keeps a table \
+                 of the name that no --schema shows, if there is one)"
+            ),
+            "{server}: {reason}"
+        );
+    }
+}
+
+#[test]
+fn create_table_if_not_exists_after_a_drop_of_the_name_creates_the_table() {
+    // The DROP TABLE ran, so no table of the name is left and the statement
+    // creates it: it is known, and a table created here.
+    let create = "CREATE TABLE IF NOT EXISTS posts (id INT PRIMARY KEY, body TEXT NULL);\n";
+    let add = "ALTER TABLE posts ADD COLUMN c INT NULL;";
+    let dump = Schema::from_dump(
+        "CREATE TABLE `posts` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB;",
+    );
+    let mut problems = Vec::new();
+    for (how, schema, before) in [
+        (
+            "a table the input made",
+            Schema::from_sql(""),
+            "CREATE TABLE posts (id INT PRIMARY KEY);\nDROP TABLE posts;\n",
+        ),
+        (
+            "a table no schema shows",
+            Schema::from_sql(""),
+            "DROP TABLE posts;\n",
+        ),
+        ("a table of the dump", dump, "DROP TABLE posts;\n"),
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            let got = b1c_answer(server, &schema, &format!("{before}{create}{add}"));
+            if got != INSTANT {
+                problems.push(format!("{how}, {server}: got {got}"));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "\n{}", problems.join("\n"));
+}
+
+#[test]
+fn two_indexes_renamed_into_each_others_names_lose_the_table() {
+    // By hand: RENAME INDEX a TO b, RENAME INDEX b TO a swaps the names, so
+    // DROP INDEX a drops what was b, the index of the foreign key: 1553.
+    let schema = Schema::from_dump(
+        "CREATE TABLE `users` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, PRIMARY KEY (`id`)) \
+         ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+         CREATE TABLE `orders` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, \
+         `user_id` bigint unsigned NOT NULL, `amount` int NOT NULL, PRIMARY KEY (`id`), \
+         KEY `a` (`amount`), KEY `b` (`user_id`), \
+         CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)) \
+         ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
+    );
+    let swap = "ALTER TABLE orders RENAME INDEX a TO b, RENAME INDEX b TO a;\n";
+    for server in [MYSQL_80, MYSQL_84] {
+        let sql = format!("{swap}ALTER TABLE orders DROP INDEX a;");
+        let predictions = predictions_on_schema(server, &schema, &sql);
+        assert!(
+            matches!(predictions[0], Prediction::Unknown { .. }),
+            "{server}"
+        );
+        match &predictions[1] {
+            Prediction::Unknown { reason, notes } => {
+                assert!(reason.contains("kilit lost track of orders"), "{reason}");
+                assert!(
+                    notes.iter().any(|note| note.contains("1553")),
+                    "{server}: {notes:?}"
+                );
+            }
+            other => panic!("{server}: {other:?}"),
+        }
+        // A RENAME INDEX beside any other clause loses the table too.
+        for clause in [
+            "ALTER TABLE orders RENAME INDEX a TO c, ADD COLUMN x INT NULL",
+            "ALTER TABLE orders ADD COLUMN x INT NULL, RENAME INDEX a TO c",
+            "ALTER TABLE orders RENAME INDEX a TO c, RENAME INDEX b TO d",
+        ] {
+            let reason = b1c_reason(
+                server,
+                &schema,
+                &format!("{clause};\nALTER TABLE orders ADD COLUMN y INT NULL;"),
+            );
+            assert!(
+                reason.contains("kilit lost track of orders"),
+                "{server}: {clause}: {reason}"
+            );
+        }
+        // Alone, one rename keeps the table.
+        assert_eq!(
+            b1c_answer(
+                server,
+                &schema,
+                "ALTER TABLE orders RENAME INDEX a TO c;\nALTER TABLE orders DROP INDEX c;"
+            ),
+            INPLACE,
+            "{server}"
+        );
+    }
+}
+
+/// kilit's predictions for every statement of `sql` against `schema`.
+fn predictions_on_schema(server: &str, schema: &Schema, sql: &str) -> Vec<Prediction> {
+    let results = Knowledge::built_in().server(server).unwrap();
+    check(&parse(sql), schema, results)
+        .into_iter()
+        .map(|finding| finding.prediction)
+        .collect()
+}
+
+#[test]
+fn dropping_a_unique_index_of_not_null_columns_on_a_table_without_a_primary_key_is_unknown() {
+    // By hand: the unique index of NOT NULL columns keys the rows, so dropping
+    // it is 1846 for INSTANT and INPLACE and copies the table as written. The
+    // lab dropped a unique index on a table with a primary key.
+    let schema = Schema::from_sql(
+        "CREATE TABLE `codes` (`code` int NOT NULL, `note` varchar(50) DEFAULT NULL, \
+         UNIQUE KEY `codes_code_unique` (`code`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
+    );
+    for server in [MYSQL_80, MYSQL_84] {
+        for sql in [
+            "ALTER TABLE codes DROP INDEX codes_code_unique",
+            "ALTER TABLE codes DROP INDEX codes_code_unique, ALGORITHM=INSTANT",
+            "ALTER TABLE codes DROP INDEX codes_code_unique, ALGORITHM=INPLACE",
+        ] {
+            assert_eq!(b1c_answer(server, &schema, sql), UNKNOWN, "{server}: {sql}");
+        }
+    }
+}
+
+#[test]
+fn a_prefix_that_makes_a_key_past_3072_bytes_is_unknown() {
+    // By hand: 1071 for body(800) and for summary(500), body(400) in utf8mb4.
+    let schema = Schema::from_sql(
+        "CREATE TABLE `posts` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, \
+         `title` varchar(255) NOT NULL, `summary` varchar(600) NOT NULL, \
+         `body` varchar(1000) NOT NULL, `content` text, PRIMARY KEY (`id`)) \
+         ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
+    );
+    for server in [MYSQL_80, MYSQL_84] {
+        for sql in [
+            "ALTER TABLE posts ADD INDEX i (body(800))",
+            "ALTER TABLE posts ADD INDEX i2 (summary(500), body(400))",
+        ] {
+            let reason = b1c_reason(server, &schema, sql);
+            assert!(
+                reason.contains("past the 3072 bytes"),
+                "{server}: {sql}: {reason}"
+            );
+        }
+        // Control: a prefix that fits keeps the lab's answer.
+        assert_eq!(
+            b1c_answer(
+                server,
+                &schema,
+                "ALTER TABLE posts ADD INDEX i3 (body(100))"
+            ),
+            INPLACE,
+            "{server}"
+        );
+    }
+}
+
+#[test]
+fn a_prefix_longer_than_its_column_or_on_an_integer_is_unknown() {
+    // By hand: 1089 for a prefix longer than a CHAR or a VARBINARY column,
+    // and for any prefix on an INT.
+    let schema = Schema::from_sql(
+        "CREATE TABLE `codes` (`id` int NOT NULL, `code` char(10) NOT NULL, \
+         `bin` varbinary(10) NOT NULL, `n` int NOT NULL, PRIMARY KEY (`id`)) \
+         ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
+    );
+    for server in [MYSQL_80, MYSQL_84] {
+        for sql in [
+            "ALTER TABLE codes ADD INDEX i1 (code(20))",
+            "ALTER TABLE codes ADD INDEX i2 (bin(20))",
+            "ALTER TABLE codes ADD INDEX i3 (n(2))",
+        ] {
+            assert_eq!(b1c_answer(server, &schema, sql), UNKNOWN, "{server}: {sql}");
+        }
+        // Control: a prefix inside the column.
+        assert_eq!(
+            b1c_answer(server, &schema, "ALTER TABLE codes ADD INDEX i4 (code(5))"),
+            INPLACE,
+            "{server}"
+        );
+    }
+}
+
+#[test]
+fn dropping_the_constraint_mysql_named_for_an_unnamed_foreign_key_is_unknown_and_loses_the_table() {
+    // By hand: both statements run (DROP CONSTRAINT orders_ibfk_1 drops the
+    // key, then user_id goes). kilit does not give the key its automatic name
+    // in CREATE TABLE, so it must not call the column drop a failure.
+    let sql = "CREATE TABLE users (id BIGINT UNSIGNED NOT NULL PRIMARY KEY);
+        CREATE TABLE orders (id BIGINT UNSIGNED NOT NULL PRIMARY KEY, \
+        user_id BIGINT UNSIGNED NOT NULL, FOREIGN KEY (user_id) REFERENCES users (id));
+        ALTER TABLE orders DROP CONSTRAINT orders_ibfk_1;
+        ALTER TABLE orders DROP COLUMN user_id;";
+    let schema = Schema::from_sql("");
+    for server in [MYSQL_80, MYSQL_84] {
+        let predictions = predictions_on_schema(server, &schema, sql);
+        assert!(
+            matches!(predictions[2], Prediction::Unknown { .. }),
+            "{server}: {:?}",
+            predictions[2]
+        );
+        match &predictions[3] {
+            Prediction::Unknown { reason, .. } => {
+                assert!(
+                    reason.contains("kilit lost track of orders"),
+                    "{server}: {reason}"
+                )
+            }
+            other => panic!("{server}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn fulltext_indexes_past_3072_bytes_keep_the_measured_answer() {
+    // By hand: FULLTEXT has no 3072-byte limit. A VARCHAR(1000) in utf8mb4 is
+    // 4000 bytes, and title (1020) with summary (2400) is 3420: MySQL accepts
+    // both, and the lab measured add-fulltext-index.
+    let schema = Schema::from_sql(
+        "CREATE TABLE `posts` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, \
+         `title` varchar(255) NOT NULL, `summary` varchar(600) NOT NULL, \
+         `body` varchar(1000) NOT NULL, `content` text, PRIMARY KEY (`id`)) \
+         ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
+    );
+    for server in [MYSQL_80, MYSQL_84] {
+        for sql in [
+            "ALTER TABLE posts ADD FULLTEXT INDEX ft_b (body)",
+            "ALTER TABLE posts ADD FULLTEXT INDEX ft_ts (title, summary)",
+        ] {
+            assert_eq!(
+                b1c_answer(server, &schema, sql),
+                "INPLACE, rebuilds the table, writes wait",
+                "{server}: {sql}"
+            );
+        }
+    }
+}
+
+#[test]
+fn create_fulltext_index_with_a_forced_algorithm_or_lock_is_unknown_and_adds_no_index() {
+    // By hand: CREATE FULLTEXT INDEX ... ALGORITHM=INSTANT and LOCK=NONE fail
+    // with 1846, as ADD FULLTEXT does (the lab's add-fulltext-index), so the
+    // table has no FULLTEXT index afterwards and a new column is INSTANT.
+    let schema = Schema::from_dump(
+        "CREATE TABLE `orders` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, \
+         `amount` int NOT NULL, `note` varchar(50) DEFAULT NULL, \
+         `email` varchar(100) DEFAULT NULL, PRIMARY KEY (`id`), KEY `i_amount` (`amount`)) \
+         ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;",
+    );
+    let then = "ALTER TABLE orders ADD COLUMN y INT NULL;";
+    for server in [MYSQL_80, MYSQL_84] {
+        for forced in ["ALGORITHM=INSTANT", "LOCK=NONE"] {
+            let create = format!("CREATE FULLTEXT INDEX ft ON orders (note) {forced}");
+            let reason = b1c_reason(server, &schema, &create);
+            assert!(
+                reason.contains("fails with error 1846 (add-fulltext-index)"),
+                "{server}: {create}: {reason}"
+            );
+            assert_eq!(
+                b1c_answer(server, &schema, &format!("{create};\n{then}")),
+                INSTANT,
+                "{server}: {create}"
+            );
+        }
+        // ADD FULLTEXT with the same algorithm fails the same way.
+        let sql =
+            format!("ALTER TABLE orders ADD FULLTEXT INDEX ft (note), ALGORITHM=INSTANT;\n{then}");
+        assert_eq!(b1c_answer(server, &schema, &sql), INSTANT, "{server}");
+        // Without a forced variant: unknown, the lab's answer in the reason,
+        // and the table has the index afterwards.
+        let reason = b1c_reason(server, &schema, "CREATE FULLTEXT INDEX ft ON orders (note)");
+        assert!(
+            reason.contains(
+                "CREATE FULLTEXT INDEX has not been measured itself; MySQL runs it as ALTER \
+                 TABLE ... ADD FULLTEXT, by hand on MySQL 8.0.46 and 8.4.13, and the lab \
+                 measured that: INPLACE, rebuilds the table, writes wait (add-fulltext-index)"
+            ),
+            "{server}: {reason}"
+        );
+        assert_eq!(
+            b1c_answer(
+                server,
+                &schema,
+                &format!("CREATE FULLTEXT INDEX ft ON orders (note);\n{then}")
+            ),
+            COPY,
+            "{server}"
+        );
+    }
+}
+
+#[test]
+fn an_engine_alter_on_a_table_the_dump_lacks_is_unknown_and_never_a_1674_failure() {
+    // By hand: with a dump, the table orders is not there, so MySQL refuses
+    // the first statement and the migration stops: nothing after it runs.
+    let dump = Schema::from_dump(
+        "CREATE TABLE `posts` (`id` int NOT NULL, `body` text, PRIMARY KEY (`id`), \
+         FULLTEXT KEY `ft` (`body`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
+    );
+    let sql = "ALTER TABLE orders ENGINE=InnoDB;
+        ALTER TABLE orders ADD COLUMN t CHAR(36) NULL DEFAULT (UUID());
+        ALTER TABLE orders2 ADD COLUMN t CHAR(36) NULL DEFAULT (UUID());";
+    for server in [MYSQL_80, MYSQL_84] {
+        let predictions = predictions_on_schema(server, &dump, sql);
+        assert_eq!(predictions.len(), 3);
+        for (n, prediction) in predictions.iter().enumerate() {
+            match prediction {
+                Prediction::Unknown { reason, .. } => assert!(
+                    reason.contains("the dump may be out of date"),
+                    "{server}: statement {n}: {reason}"
+                ),
+                other => panic!("{server}: statement {n}: {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn a_temporary_table_named_like_the_child_does_not_hide_the_real_child_keys() {
+    // By hand on MySQL 8.0.46 and 8.4.13: CREATE TEMPORARY TABLE orders
+    // leaves the real orders alone, so its foreign key to users.email still
+    // makes DROP INDEX users_email_unique fail with 1553.
+    let schema = Schema::from_dump(FIX_USERS_AND_ORDERS);
+    for create in [
+        "CREATE TEMPORARY TABLE orders (id INT)",
+        "CREATE TEMPORARY TABLE IF NOT EXISTS orders (id INT)",
+    ] {
+        let sql = format!("{create};\nALTER TABLE users DROP INDEX users_email_unique;");
+        for server in [MYSQL_80, MYSQL_84] {
+            let reason = b1c_reason(server, &schema, &sql);
+            assert!(
+                reason.contains(
+                    "a foreign key of a table kilit does not know or lost track of may point at users"
+                ),
+                "{server}: {create}: {reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_key_of_a_text_prefix_and_a_char_column_past_3072_bytes_is_unknown() {
+    // By hand on MySQL 8.0.46 and 8.4.13: t(767) is 3068 bytes in utf8mb4, and
+    // with c CHAR(20) (80 bytes) the key is 3148 bytes: 1071. With id INT
+    // (4 bytes) it is 3072: accepted. Integers count their size, CHAR and
+    // VARCHAR their character set, BINARY and VARBINARY their bytes.
+    let schema = Schema::from_sql(
+        "CREATE TABLE `p` (`id` int NOT NULL, `t` text, `c` char(20) NOT NULL, \
+         `bn` binary(20) NOT NULL, `vb` varbinary(100) NOT NULL, `j` json DEFAULT NULL, \
+         PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 \
+         COLLATE=utf8mb4_unicode_ci;",
+    );
+    for server in [MYSQL_80, MYSQL_84] {
+        let reason = b1c_reason(server, &schema, "ALTER TABLE p ADD INDEX i16 (t(767), c)");
+        assert!(
+            reason.contains("the key takes 3148 bytes"),
+            "{server}: {reason}"
+        );
+        assert_eq!(
+            b1c_answer(server, &schema, "ALTER TABLE p ADD INDEX i21 (t(767), id)"),
+            INPLACE,
+            "{server}"
+        );
+        for sql in [
+            "ALTER TABLE p ADD INDEX i19 (vb(100), t(750))",
+            "ALTER TABLE p ADD INDEX i20 (j(10))",
+        ] {
+            assert_eq!(b1c_answer(server, &schema, sql), UNKNOWN, "{server}: {sql}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What every table it may be shares: ADD FULLTEXT INDEX on a table kilit does
+// not know.
+//
+// The expectations come from the lab's matrix (add-fulltext-index,
+// add-second-fulltext-index and the MyISAM, COMPRESSED, COMPACT and REDUNDANT
+// scenarios, both servers identical), from hand tests on MySQL 8.0.46 and
+// 8.4.13 (1072 for a column the table lacks, 1061 for a taken index name) and
+// from the owner's rules: every answer makes writes wait: writes wait; every
+// answer fails: fails; anything else is unknown.
+
+const INPLACE_REBUILD_WAIT: &str = "INPLACE, rebuilds the table, writes wait";
+
+/// The answer of the last statement of `sql`, which must be "depends on the
+/// table": what every table shares, its notes and its reason.
+fn b1c_depends(server: &str, schema: &Schema, sql: &str) -> (Shared, Vec<String>, String) {
+    match b1c_last(server, schema, sql) {
+        Prediction::DependsOnTable {
+            shared,
+            notes,
+            reason,
+            ..
+        } => (shared, notes, reason),
+        other => panic!("{server}: {sql}\n    expected depends-on-the-table, got {other:?}"),
+    }
+}
+
+/// Every way kilit can lack `orders` and still say what all tables share:
+/// no --schema, a table it lost, a table it lost in a dump.
+fn b1c_tables_kilit_does_not_know_with_dump() -> Vec<(&'static str, Schema)> {
+    b1c_tables_kilit_does_not_know()
+}
+
+/// ALGORITHM and LOCK clauses, in the order of the lab's variants, with what
+/// the lab measured for ADD FULLTEXT INDEX on every table: the default and
+/// ALGORITHM=INPLACE make writes wait (a MyISAM table refuses INPLACE with
+/// 1845, the others accept it); INSTANT, INPLACE with LOCK=NONE and LOCK=NONE
+/// fail on every one (1845 or 1846). ALGORITHM=COPY runs everywhere, but on
+/// the InnoDB tables the lab did not see whether writes wait for a forced
+/// COPY, so one answer is "writes not measured" and no word is shared.
+const B1C_FULLTEXT_VARIANTS: [(&str, Option<Shared>); 6] = [
+    ("", Some(Shared::WritesWait)),
+    (", ALGORITHM=INSTANT", Some(Shared::Fails)),
+    (", ALGORITHM=INPLACE", Some(Shared::WritesWait)),
+    (", ALGORITHM=INPLACE, LOCK=NONE", Some(Shared::Fails)),
+    (", ALGORITHM=COPY", None),
+    (", LOCK=NONE", Some(Shared::Fails)),
+];
+
+#[test]
+fn adding_a_fulltext_index_to_a_table_kilit_does_not_know_makes_writes_wait() {
+    // $table->fullText('note');
+    for (how, schema) in b1c_tables_kilit_does_not_know_with_dump() {
+        for server in [MYSQL_80, MYSQL_84] {
+            let (shared, notes, reason) = b1c_depends(
+                server,
+                &schema,
+                "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)",
+            );
+            assert_eq!(shared, Shared::WritesWait, "{how}, {server}");
+            assert!(reason.contains("writes wait"), "{how}, {server}: {reason}");
+            assert!(
+                reason.contains("add-fulltext-index"),
+                "{how}, {server}: {reason}"
+            );
+            // Each table it may be is a note.
+            for part in [
+                "if the table is MyISAM",
+                "if the table is COMPRESSED",
+                "if the table is COMPACT",
+                "if the table is REDUNDANT",
+                "if the table already has a FULLTEXT index",
+                "if the table has no column note: fails with error 1072",
+                "fails with error 1061",
+            ] {
+                assert!(
+                    notes.iter().any(|note| note.contains(part)),
+                    "{how}, {server}: {part}: {notes:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_forced_algorithm_or_lock_on_a_fulltext_index_of_a_table_kilit_does_not_know_follows_the_lab() {
+    for (how, schema) in b1c_tables_kilit_does_not_know_with_dump() {
+        for (clause, expected) in B1C_FULLTEXT_VARIANTS {
+            let sql =
+                format!("ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note){clause}");
+            for server in [MYSQL_80, MYSQL_84] {
+                match expected {
+                    Some(expected) => {
+                        let (shared, _, _) = b1c_depends(server, &schema, &sql);
+                        assert_eq!(shared, expected, "{how}, {server}: {sql}");
+                    }
+                    None => assert_eq!(
+                        b1c_answer(server, &schema, &sql),
+                        UNKNOWN,
+                        "{how}, {server}: {sql}"
+                    ),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_myisam_table_that_refuses_inplace_is_a_failing_note_not_the_headline() {
+    // ALGORITHM=INPLACE: the MyISAM scenarios fail with 1845, every other
+    // table accepts it and makes writes wait, so the headline is "writes
+    // wait" and the failure is a note.
+    let schema = Schema::from_sql("");
+    for server in [MYSQL_80, MYSQL_84] {
+        let (shared, notes, _) = b1c_depends(
+            server,
+            &schema,
+            "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note), ALGORITHM=INPLACE",
+        );
+        assert_eq!(shared, Shared::WritesWait, "{server}");
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("if the table is MyISAM") && note.contains("1845")),
+            "{server}: {notes:?}"
+        );
+    }
+}
+
+#[test]
+fn a_fulltext_index_on_a_table_missing_from_a_dump_is_unknown() {
+    // The dump decides: the table is not there, so the answer is not what
+    // any table would do.
+    let dump = Schema::from_dump("CREATE TABLE unrelated (id INT PRIMARY KEY) ENGINE=InnoDB;");
+    for (clause, _) in B1C_FULLTEXT_VARIANTS {
+        let sql = format!("ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note){clause}");
+        for server in [MYSQL_80, MYSQL_84] {
+            assert_eq!(b1c_answer(server, &dump, &sql), UNKNOWN, "{server}: {sql}");
+        }
+    }
+}
+
+#[test]
+fn a_column_an_index_or_a_foreign_key_on_a_table_kilit_does_not_know_stays_unknown() {
+    // Some table it may be lets writes continue (ADD COLUMN, ADD INDEX), or
+    // a form of the change has not been measured on every format (ADD FOREIGN
+    // KEY with the checks on), so no word is shared.
+    for (how, schema) in b1c_tables_kilit_does_not_know_with_dump() {
+        for statement in [
+            "ALTER TABLE orders ADD COLUMN c INT NULL",
+            "ALTER TABLE orders ADD INDEX ix_amount (amount)",
+            "ALTER TABLE orders ADD UNIQUE INDEX uq_email (email)",
+            "ALTER TABLE orders ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users (id)",
+        ] {
+            for server in [MYSQL_80, MYSQL_84] {
+                assert_eq!(
+                    b1c_answer(server, &schema, statement),
+                    UNKNOWN,
+                    "{how}, {server}: {statement}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn create_fulltext_index_on_a_table_kilit_does_not_know_stays_unknown() {
+    // The statement itself is not measured.
+    for (how, schema) in b1c_tables_kilit_does_not_know_with_dump() {
+        for server in [MYSQL_80, MYSQL_84] {
+            assert_eq!(
+                b1c_answer(
+                    server,
+                    &schema,
+                    "CREATE FULLTEXT INDEX ft_orders_note ON orders (note)"
+                ),
+                UNKNOWN,
+                "{how}, {server}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_statement_after_a_fulltext_index_on_a_table_kilit_does_not_know_is_still_unknown() {
+    // Nothing is learned about the table: a new column is no more known than
+    // before.
+    for (how, schema) in b1c_tables_kilit_does_not_know_with_dump() {
+        let sql = "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note);
+                   ALTER TABLE orders ADD COLUMN c INT NULL;";
+        for server in [MYSQL_80, MYSQL_84] {
+            assert_eq!(b1c_answer(server, &schema, sql), UNKNOWN, "{how}, {server}");
+        }
+    }
+}
+
+#[test]
+fn adding_a_fulltext_index_to_a_known_dynamic_table_keeps_the_lab_answer() {
+    // Regression: add-fulltext-index, INPLACE with a rebuild, writes wait.
+    let schema = Schema::from_sql(LAB_TABLES);
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(
+            b1c_answer(
+                server,
+                &schema,
+                "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)"
+            ),
+            INPLACE_REBUILD_WAIT,
+            "{server}"
+        );
+    }
+}
+
+/// The lab's tables with `orders` on `engine` with `options`, and a TEXT
+/// column `body` when `column` is given (the lab's setup of the new
+/// scenarios, with the column type changed for the shapes it did not
+/// measure).
+fn b1c_fulltext_table(engine: Option<&str>, options: &str, column: Option<&str>) -> Schema {
+    let mut sql = lab_tables_with(engine, options);
+    if let Some(column) = column {
+        sql.push_str(&format!(
+            "ALTER TABLE orders ADD COLUMN body {column} NULL;\n"
+        ));
+    }
+    Schema::from_sql(&sql)
+}
+
+#[test]
+fn a_fulltext_index_on_a_known_myisam_table_is_the_lab_answer_for_text_and_for_varchar() {
+    // myisam-add-fulltext-index (VARCHAR) and myisam-add-fulltext-index-text:
+    // COPY, every row copied, writes wait; the default and COPY run, and the
+    // other four variants fail with 1845.
+    let expected = [COPY, FAILS_1845, FAILS_1845, FAILS_1845, COPY, FAILS_1845];
+    for (column, statement) in [
+        (
+            Some("TEXT"),
+            "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_body (body)",
+        ),
+        (None, "ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note)"),
+    ] {
+        let schema = b1c_fulltext_table(Some("MyISAM"), "", column);
+        for ((clause, _), expected) in B1C_FULLTEXT_VARIANTS.iter().zip(expected) {
+            for server in [MYSQL_80, MYSQL_84] {
+                assert_eq!(
+                    b1c_answer(server, &schema, &format!("{statement}{clause}")),
+                    expected,
+                    "{server}: {statement}{clause}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_fulltext_index_on_a_text_column_of_a_known_compressed_compact_or_redundant_table_is_the_lab_answer()
+ {
+    // compressed-, compact- and redundant-add-fulltext-index: INPLACE with a
+    // rebuild, nothing copied, writes wait; INSTANT, INPLACE with LOCK=NONE
+    // and LOCK=NONE fail with 1846; ALGORITHM=COPY runs, and the lab did not
+    // see whether writes wait for it.
+    let expected = [
+        INPLACE_REBUILD_WAIT,
+        FAILS_1846,
+        INPLACE_REBUILD_WAIT,
+        FAILS_1846,
+        COPY_NOT_MEASURED,
+        FAILS_1846,
+    ];
+    for options in [
+        " ROW_FORMAT=COMPRESSED",
+        " KEY_BLOCK_SIZE=8",
+        " ROW_FORMAT=COMPACT",
+        " ROW_FORMAT=REDUNDANT",
+    ] {
+        let schema = b1c_fulltext_table(None, options, Some("TEXT"));
+        for ((clause, _), expected) in B1C_FULLTEXT_VARIANTS.iter().zip(expected) {
+            let sql =
+                format!("ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_body (body){clause}");
+            for server in [MYSQL_80, MYSQL_84] {
+                assert_eq!(
+                    b1c_answer(server, &schema, &sql),
+                    expected,
+                    "{server}:{options}: {sql}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn other_fulltext_shapes_on_a_known_compressed_compact_redundant_or_myisam_table_stay_unknown() {
+    // The lab measured one TEXT column (MyISAM: one VARCHAR or TEXT column)
+    // on a table with no FULLTEXT index. A second index, two columns and
+    // MEDIUMTEXT are not measured there.
+    for (engine, options) in [
+        (Some("MyISAM"), ""),
+        (None, " ROW_FORMAT=COMPRESSED"),
+        (None, " KEY_BLOCK_SIZE=8"),
+        (None, " ROW_FORMAT=COMPACT"),
+        (None, " ROW_FORMAT=REDUNDANT"),
+    ] {
+        let text = b1c_fulltext_table(engine, options, Some("TEXT"));
+        let medium = b1c_fulltext_table(engine, options, Some("MEDIUMTEXT"));
+        for server in [MYSQL_80, MYSQL_84] {
+            let cases = [
+                (
+                    "a second FULLTEXT index",
+                    &text,
+                    "ALTER TABLE orders ADD FULLTEXT INDEX ft_a (body);
+                     ALTER TABLE orders ADD FULLTEXT INDEX ft_b (note)",
+                ),
+                (
+                    "two columns",
+                    &text,
+                    "ALTER TABLE orders ADD FULLTEXT INDEX ft_both (body, note)",
+                ),
+                (
+                    "a MEDIUMTEXT column",
+                    &medium,
+                    "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_body (body)",
+                ),
+            ];
+            for (what, schema, sql) in cases {
+                assert_eq!(
+                    b1c_answer(server, schema, sql),
+                    UNKNOWN,
+                    "{server}:{engine:?}{options}: {what}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_fulltext_index_on_a_varchar_column_of_a_known_compressed_compact_or_redundant_table_stays_unknown()
+ {
+    // Only a TEXT column was measured on these row formats.
+    let statement = "ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note)";
+    for options in [
+        " ROW_FORMAT=COMPRESSED",
+        " KEY_BLOCK_SIZE=8",
+        " ROW_FORMAT=COMPACT",
+        " ROW_FORMAT=REDUNDANT",
+    ] {
+        let schema = b1c_fulltext_table(None, options, None);
+        for server in [MYSQL_80, MYSQL_84] {
+            assert_eq!(
+                b1c_answer(server, &schema, statement),
+                UNKNOWN,
+                "{server}:{options}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Step B1c, fix round 3: a binary TEXT column cannot be FULLTEXT, a table the
+// input dropped is gone, and DROP INDEX has shapes the lab has not measured.
+//
+// The expectations come from hand tests on MySQL 8.0.46 and 8.4.13 (the round
+// 3 records: TEXT CHARACTER SET binary is a BLOB, ADD FULLTEXT on it fails
+// with 1283 on MyISAM, COMPACT and DYNAMIC tables; ALTER on a dropped or
+// renamed-away table fails with 1146; DROP INDEX with ALGORITHM=INSTANT fails
+// with 1846 or 1845 for shapes the lab has not measured) and from the owner's
+// decisions for the step.
+
+/// The lab's tables with the default charset of `orders` changed to binary.
+fn round3_lab_tables_with_a_binary_orders(engine: Option<&str>, options: &str) -> Schema {
+    let text = lab_tables_with(engine, options);
+    let at = text.find("CREATE TABLE orders").unwrap();
+    let (users, orders) = text.split_at(at);
+    let orders = orders.replacen("DEFAULT CHARSET=utf8mb4", "DEFAULT CHARSET=binary", 1);
+    assert!(orders.contains("DEFAULT CHARSET=binary"));
+    Schema::from_sql(&format!(
+        "{users}{orders}ALTER TABLE orders ADD COLUMN body TEXT NULL;\n"
+    ))
+}
+
+#[test]
+fn a_fulltext_index_on_a_text_column_with_character_set_binary_is_unknown_on_every_known_row_format_and_myisam()
+ {
+    // MySQL makes TEXT CHARACTER SET binary a BLOB; ADD FULLTEXT then fails with
+    // 1283 (by hand, both servers, MyISAM, COMPACT and DYNAMIC). The lab
+    // measured a utf8mb4 TEXT column only, so kilit gives no measured answer.
+    // $table->text('body')->charset('binary'); $table->fullText('body');
+    for (engine, options) in [
+        (Some("MyISAM"), ""),
+        (None, " ROW_FORMAT=COMPRESSED"),
+        (None, " KEY_BLOCK_SIZE=8"),
+        (None, " ROW_FORMAT=COMPACT"),
+        (None, " ROW_FORMAT=REDUNDANT"),
+    ] {
+        let schema = b1c_fulltext_table(engine, options, Some("TEXT CHARACTER SET binary"));
+        for ((clause, _), _) in B1C_FULLTEXT_VARIANTS.iter().zip(0..) {
+            let sql =
+                format!("ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_body (body){clause}");
+            for server in [MYSQL_80, MYSQL_84] {
+                assert_eq!(
+                    b1c_answer(server, &schema, &sql),
+                    UNKNOWN,
+                    "{server}:{engine:?}{options}: {sql}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_fulltext_index_on_a_text_column_of_a_binary_table_is_unknown_on_every_known_row_format_and_myisam()
+ {
+    // The column has no charset of its own, so it takes the table's: binary.
+    for (engine, options) in [
+        (Some("MyISAM"), ""),
+        (None, " ROW_FORMAT=COMPRESSED"),
+        (None, " KEY_BLOCK_SIZE=8"),
+        (None, " ROW_FORMAT=COMPACT"),
+        (None, " ROW_FORMAT=REDUNDANT"),
+    ] {
+        let schema = round3_lab_tables_with_a_binary_orders(engine, options);
+        for server in [MYSQL_80, MYSQL_84] {
+            assert_eq!(
+                b1c_answer(
+                    server,
+                    &schema,
+                    "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_body (body)"
+                ),
+                UNKNOWN,
+                "{server}:{engine:?}{options}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_fulltext_index_on_a_plain_utf8mb4_text_column_keeps_the_measured_answer_next_to_a_binary_one()
+{
+    // Regression: the binary column is the exception, the utf8mb4 TEXT column
+    // of the same kind of table keeps the lab's answer (COPY on MyISAM,
+    // INPLACE with a rebuild on COMPACT; both tested above).
+    let myisam = b1c_fulltext_table(Some("MyISAM"), "", Some("TEXT"));
+    let compact = b1c_fulltext_table(None, " ROW_FORMAT=COMPACT", Some("TEXT"));
+    for server in [MYSQL_80, MYSQL_84] {
+        let sql = "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_body (body)";
+        assert_eq!(b1c_answer(server, &myisam, sql), COPY, "{server}");
+        assert_eq!(
+            b1c_answer(server, &compact, sql),
+            "INPLACE, rebuilds the table, writes wait",
+            "{server}"
+        );
+    }
+}
+
+#[test]
+fn a_fulltext_index_on_a_table_the_input_dropped_is_unknown() {
+    // By hand on both servers: CREATE TABLE y; DROP TABLE y; ALTER TABLE y ADD
+    // FULLTEXT ... gives 1146. Without --schema the table is gone, not unseen.
+    let schema = Schema::from_sql("");
+    for server in [MYSQL_80, MYSQL_84] {
+        for sql in [
+            "CREATE TABLE y (id INT PRIMARY KEY, note TEXT);
+             DROP TABLE y;
+             ALTER TABLE y ADD FULLTEXT INDEX ft (note)",
+            "DROP TABLE y;
+             ALTER TABLE y ADD FULLTEXT INDEX ft (note)",
+            "CREATE TABLE y (id INT PRIMARY KEY, note TEXT);
+             DROP TABLE y;
+             ALTER TABLE y ADD FULLTEXT INDEX ft (note), ALGORITHM=INPLACE",
+        ] {
+            assert_eq!(b1c_answer(server, &schema, sql), UNKNOWN, "{server}: {sql}");
+        }
+    }
+}
+
+#[test]
+fn a_fulltext_index_on_a_table_the_input_renamed_away_is_unknown() {
+    // By hand on both servers: CREATE TABLE r; RENAME TABLE r TO z; ALTER TABLE
+    // r ADD FULLTEXT ... gives 1146.
+    let schema = Schema::from_sql("");
+    for server in [MYSQL_80, MYSQL_84] {
+        for sql in [
+            "CREATE TABLE r (id INT PRIMARY KEY, note TEXT);
+             RENAME TABLE r TO z;
+             ALTER TABLE r ADD FULLTEXT INDEX ft (note)",
+            "RENAME TABLE r TO z;
+             ALTER TABLE r ADD FULLTEXT INDEX ft (note)",
+        ] {
+            assert_eq!(b1c_answer(server, &schema, sql), UNKNOWN, "{server}: {sql}");
+        }
+    }
+}
+
+#[test]
+fn a_fulltext_index_on_the_new_name_of_a_renamed_table_keeps_the_measured_answer() {
+    // The table is there under its new name: known, the lab's answer.
+    let schema = Schema::from_sql("");
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(
+            b1c_answer(
+                server,
+                &schema,
+                "CREATE TABLE r (id INT PRIMARY KEY, note TEXT);
+                 RENAME TABLE r TO z;
+                 ALTER TABLE z ADD FULLTEXT INDEX ft (note)"
+            ),
+            "INPLACE, rebuilds the table, writes wait",
+            "{server}"
+        );
+    }
+}
+
+#[test]
+fn a_table_created_dropped_and_created_again_is_known_and_keeps_its_answer() {
+    let schema = Schema::from_sql("");
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(
+            b1c_answer(
+                server,
+                &schema,
+                "CREATE TABLE y (id INT PRIMARY KEY, note TEXT);
+                 DROP TABLE y;
+                 CREATE TABLE y (id INT PRIMARY KEY, note TEXT);
+                 ALTER TABLE y ADD FULLTEXT INDEX ft (note)"
+            ),
+            "INPLACE, rebuilds the table, writes wait",
+            "{server}"
+        );
+    }
+}
+
+#[test]
+fn dropping_an_index_of_a_table_kilit_does_not_know_is_unknown_in_every_variant() {
+    // DROP INDEX has shapes the lab has not measured: by hand, ALGORITHM=INSTANT
+    // is 1846 for a NOT NULL UNIQUE index on a table without a primary key and
+    // 1845 for a multi-column UNIQUE and for one of several FULLTEXT indexes,
+    // so not even the forced variants may be answered for a table that may be
+    // any of these.
+    // $table->dropUnique('orders_email_unique');
+    const CLAUSES: [&str; 6] = [
+        "",
+        ", ALGORITHM=INSTANT",
+        ", ALGORITHM=INPLACE",
+        ", ALGORITHM=INPLACE, LOCK=NONE",
+        ", ALGORITHM=COPY",
+        ", LOCK=NONE",
+    ];
+    for (how, schema) in b1c_tables_kilit_does_not_know() {
+        for clause in CLAUSES {
+            for index in ["ix_orders_amount", "orders_email_unique"] {
+                let sql = format!("ALTER TABLE orders DROP INDEX {index}{clause}");
+                for server in [MYSQL_80, MYSQL_84] {
+                    assert_eq!(
+                        b1c_answer(server, &schema, &sql),
+                        UNKNOWN,
+                        "{how}, {server}: {sql}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn dropping_an_index_of_a_table_missing_from_a_dump_is_unknown_in_every_variant() {
+    let dump = Schema::from_dump("CREATE TABLE unrelated (id INT PRIMARY KEY) ENGINE=InnoDB;");
+    for clause in ["", ", ALGORITHM=INSTANT", ", ALGORITHM=INPLACE, LOCK=NONE"] {
+        let sql = format!("ALTER TABLE orders DROP INDEX ix_orders_amount{clause}");
+        for server in [MYSQL_80, MYSQL_84] {
+            assert_eq!(b1c_answer(server, &dump, &sql), UNKNOWN, "{server}: {sql}");
+        }
+    }
+}
+
+#[test]
+fn dropping_an_index_the_lab_measured_on_a_known_table_keeps_its_answer() {
+    // Regression: drop-index on the lab's own table is INPLACE, no rebuild,
+    // writes continue (matrix: drop-index).
+    let schema = Schema::from_sql(&format!(
+        "{LAB_TABLES}ALTER TABLE orders ADD INDEX idx_orders_amount (amount);\n"
+    ));
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(
+            b1c_answer(
+                server,
+                &schema,
+                "ALTER TABLE orders DROP INDEX idx_orders_amount"
+            ),
+            INPLACE,
+            "{server}"
+        );
+    }
+}
+
+#[test]
+fn the_reason_of_a_writes_wait_answer_on_a_table_kilit_does_not_know_names_the_hand_tests() {
+    // Every answer the lab measured, or a hand test showed, for the tables it
+    // may be makes writes wait or fails.
+    for (how, schema) in b1c_tables_kilit_does_not_know() {
+        for server in [MYSQL_80, MYSQL_84] {
+            let (shared, _, reason) = b1c_depends(
+                server,
+                &schema,
+                "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)",
+            );
+            assert_eq!(shared, Shared::WritesWait, "{how}, {server}");
+            assert!(
+                reason.contains(
+                    "every answer the lab measured, or a hand test showed, for the tables it \
+                     may be makes writes wait or fails: on a plain InnoDB table"
+                ),
+                "{how}, {server}: {reason}"
+            );
+        }
     }
 }

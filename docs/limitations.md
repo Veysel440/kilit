@@ -6,7 +6,8 @@ safe.
 
 - [Input](#input)
 - [What is measured](#what-is-measured)
-- [Tables kilit cannot see](#tables-kilit-cannot-see)
+- [Tables kilit does not know](#tables-kilit-does-not-know)
+- [Columns and keys kilit does not judge](#columns-and-keys-kilit-does-not-judge)
 - [Defaults and row size](#defaults-and-row-size)
 - [The server kilit cannot see](#the-server-kilit-cannot-see)
 - [Sessions and several files](#sessions-and-several-files)
@@ -15,10 +16,10 @@ safe.
 
 ## Input
 
-- sqlparser 0.63 cannot read `CONVERT TO CHARACTER SET`, `RENAME INDEX`,
-  `ALGORITHM=NOCOPY`, `OPTIMIZE TABLE` or `CREATE FULLTEXT INDEX`. Each is
-  `UNKNOWN: kilit cannot read it`. A table named in such a statement is lost
-  from then on.
+- sqlparser 0.63 cannot read `CONVERT TO CHARACTER SET`,
+  `ALGORITHM=NOCOPY`, `OPTIMIZE TABLE` or `DROP INDEX ... ON t ALGORITHM=...`.
+  Each is `UNKNOWN: kilit cannot read it`. A table named in such a statement
+  is lost from then on.
 - kilit reads `DROP CHECK name`, `ALTER CHECK name [NOT] ENFORCED` and
   `ALTER CONSTRAINT name [NOT] ENFORCED` itself, alone or with `ALGORITHM` and
   `LOCK`. Several changes in one statement stay `UNKNOWN`. A name that is an
@@ -60,8 +61,9 @@ safe.
 
 ## What is measured
 
-- `MODIFY` and `CHANGE` need the table's current definition. Without a schema,
-  kilit lists what the lab measured instead of answering.
+- `MODIFY` and `CHANGE` need the table's current definition. Without it,
+  the statement is `UNKNOWN`: see
+  [Tables kilit does not know](#tables-kilit-does-not-know).
 - A statement with several changes, including a `MODIFY` that changes several
   things about a column, is `UNKNOWN`. The lab has measured single changes
   only, and MySQL picks one algorithm for the whole statement.
@@ -78,34 +80,129 @@ safe.
 - The cases of 64 instant column changes and of duplicate values were measured
   on DYNAMIC tables only; on other row formats the answer carries a note.
 
-## Tables kilit cannot see
+## Tables kilit does not know
 
-- With `--schema`, a statement on a table kilit does not have at that point
-  is `UNKNOWN`, and so is an `ADD FOREIGN KEY` whose parent table is missing,
-  with the checks on. The reason says which statement dropped or renamed the
-  table, with its line; for a name with a database, such as `shop.orders`,
-  that kilit has `orders` but does not know which database `shop.orders` is
-  in; otherwise that the dump may be out of date, or that the table does not
+kilit knows a table when the `--schema` file has it or an earlier statement of
+the input creates it. It does not know a table when no `--schema` was given,
+when the dump lacks the name, or when it lost track of the table: it could not
+follow one statement, or the table was dropped or renamed. On such a table
+kilit gives no answer that the table could change.
+
+- kilit looks at every table the name may be: a plain InnoDB table, one with a
+  FULLTEXT index, an indexed column, a foreign key on either side, a `TEXT` or
+  `BLOB` column, the primary key, a generated column or CHECK that uses the
+  column, the row size, and a MyISAM, COMPRESSED, COMPACT or REDUNDANT table
+  where the lab measured the change. Then, in plain words:
+  1. A failure that comes from the statement alone stays the answer.
+  2. If one of these has no measured answer, the statement is `UNKNOWN`.
+  3. If all give the same word, kilit keeps it, except "writes continue":
+     another engine or row format that nobody measured may apply.
+  4. If none lets writes continue, the answer is "writes wait" (or "fails"),
+     and the algorithm and the rebuild depend on the table.
+  5. Otherwise the statement is `UNKNOWN`. No case reaches this rule today.
+- The reason says why kilit does not know the table (no `--schema`, not in the
+  dump, lost at a line and why, dropped or renamed at a line) and gives the
+  answer the lab measured on a plain InnoDB table with the DYNAMIC row format,
+  with its case. The notes list the other situations and their answers. Even
+  `RENAME COLUMN` and `SET DEFAULT` are `UNKNOWN`, and so is `ADD FOREIGN KEY`
+  when either table is unknown.
+- Today only `ADD FULLTEXT` reaches rules 3 and 4: it makes writes wait, so a
+  run without `--schema` exits 1 for it. A forced `ALGORITHM=INSTANT` or
+  `LOCK=NONE` fails, and `ALGORITHM=COPY` is `UNKNOWN`. A table that an
+  earlier statement dropped or renamed away is `UNKNOWN` for every statement
+  (MySQL gives error 1146), and so is every `DROP INDEX`.
+- A Lost table whose engine is known to be MyISAM, or whose row format is not
+  DYNAMIC, or after `old_alter_table` or `innodb_default_row_format` is named,
+  stays `UNKNOWN` for these statements, where rules 3 and 4 could answer. It
+  is cautious.
+- The only failures kept on such a table come from the statement alone: error
+  1674 for a nondeterministic default and error 1101 for a quoted default on
+  a `TEXT`, `BLOB`, `JSON` or `GEOMETRY` column named in the statement. Every
+  other failure (1828, 1553, 3959, 1091, 3780, 1822, 6125, 1118) is a note.
+- With `--schema`, a table the dump lacks is `UNKNOWN` for every statement,
+  1674 and 1101 included. The reason says which statement dropped or renamed
+  it, with its line, or that the dump may be out of date or the table does not
   exist and MySQL refuses the statement.
+- Without `--schema`, the text report says once, at the top, how many
+  statements are on tables kilit does not know and how to get a dump
+  (`php artisan schema:dump`, or `mysqldump --no-data`). Tables the input
+  creates stay known. `CREATE TABLE IF NOT EXISTS` of a name kilit does not
+  hold loses the table, because MySQL keeps an existing one.
+- The default exit status does not count `UNKNOWN`, so a run without
+  `--schema` exits 0 where it used to exit 1 for a foreign key. A FULLTEXT
+  index still exits 1. Use `--strict` in CI (exit 3 when only unknown
+  statements are found).
+- A `RENAME TABLE` of a table kilit has never seen (no `--schema`) records the
+  old name as gone, as `DROP TABLE` does.
+- A foreign key of a table kilit does not know may point at a table kilit
+  knows. Then dropping an index that serves it, or changing or dropping an
+  indexed column of the known table, is `UNKNOWN`.
+- A name with a database, such as `shop.orders`, next to a table `orders` that
+  kilit has, is `UNKNOWN` with or without a dump: kilit does not know which
+  database the statements run in. A single backticked name that holds a dot,
+  such as `a.orders`, is read as a qualified name too.
 - `DROP COLUMN`, `DROP INDEX` and `DROP FOREIGN KEY` of a name the known table
   does not have are `UNKNOWN`. The reason names error 1091 and the scenarios
   `drop-column-missing`, `drop-index-missing` and `drop-foreign-key-missing`.
-  The table stays known, since kilit's view of it is right whether the name
-  existed or not. The exception: when the table holds an index or a foreign
-  key without a name (MySQL named it, such as `orders_ibfk_1`), kilit does not
-  know which names it has, so the drop keeps its measured answer and the table
-  is lost. kilit gives no names to the keys of a `CREATE TABLE`.
-- Without a table kilit knows (no `--schema`, a table that is missing or lost),
-  what the table would decide becomes a note under the answer: the primary key
-  and the key shapes of `DROP COLUMN` that are not measured, error 1091 for a
-  name that may not exist, a `JSON` column under `ADD INDEX` and `ADD UNIQUE`,
-  `ADD CHECK`, `ADD FOREIGN KEY` (either table unknown), an expression default
-  under `SET DEFAULT`, and the row size and the record kept in a page under
-  `ADD COLUMN`.
-- A table that kilit does not know is still answered as an InnoDB table with
-  the DYNAMIC row format, the defaults. This is a decision: a table that is
-  MyISAM, COMPRESSED, or another engine gets the answer for InnoDB with
-  DYNAMIC when its `CREATE TABLE` is not in the input or the dump.
+  `DROP CHECK` and `ALTER CHECK` of a name it does not have name error 3821
+  (`drop-check-missing`, `alter-check-missing`), and `DROP CONSTRAINT` and
+  `ALTER CONSTRAINT` name error 3940 (`drop-constraint-missing`,
+  `alter-constraint-missing`). The table stays known, since kilit's view of it
+  is right whether the name existed or not. The exception: when the table
+  holds an index or a foreign key without a name (MySQL named it, such as
+  `orders_ibfk_1`), kilit does not know which names it has, so the drop keeps
+  its measured answer and the table is lost. kilit gives no names to the keys
+  of a `CREATE TABLE`.
+- Five statements are followed, and the table stays known, but the statement
+  itself is `UNKNOWN` because the lab has not measured it: `ALTER TABLE ...
+  AUTO_INCREMENT = n` (nothing kilit models changes), `ALTER COLUMN ... DROP
+  DEFAULT`, `RENAME INDEX` and `RENAME KEY` (alone), `CREATE FULLTEXT INDEX`
+  (the same index as `ALTER TABLE ... ADD FULLTEXT`, whose measured answer the
+  reason gives; `CREATE [UNIQUE] INDEX` keeps the answer of `ADD INDEX`), and
+  `ENGINE = 'InnoDB'` on an InnoDB table. Each effect was checked by hand on
+  MySQL 8.0.46 and 8.4.13. When MySQL refuses the statement on the known table
+  (a missing index or column, a name already taken, `RENAME INDEX` of
+  `PRIMARY`), the table stays as it is and the reason names the error. Beside
+  other clauses in one statement, `RENAME INDEX` loses the table. Because
+  `AUTO_INCREMENT = n` and `DROP DEFAULT` do not put rows in a table, a later
+  `ALTER` of a table the input created still drops the row notes.
+
+## Columns and keys kilit does not judge
+
+- A `MODIFY`, `CHANGE` or `ADD COLUMN` that makes a column longer than its
+  type holds is not followed as written. A `VARCHAR` or `VARBINARY` over
+  65,535 bytes is refused by MySQL in strict `sql_mode` (error 1074) and the
+  table stays as it was; but kilit takes that only when the input itself set a
+  strict mode earlier in the same file (`STRICT_TRANS_TABLES` or
+  `STRICT_ALL_TABLES` in a list it reads). The server's own `sql_mode` may not
+  be strict, and Laravel's `'strict' => false` sets a non-strict one that
+  `--pretend` does not print. Without that `SET`, and after a non-strict or
+  unclear `sql_mode`, MySQL turns the column into `MEDIUMTEXT` or
+  `MEDIUMBLOB`, and kilit loses the table. A `CHAR` or `BINARY` over 255 is
+  refused in every mode (1074; run by hand on both servers). A `CREATE TABLE`
+  with such a column loses the table too.
+- Some shapes on a known table are `UNKNOWN` because the lab has not measured
+  them. The reason names an error only where a hand test on both servers
+  recorded it: `ADD COLUMN ... NOT NULL` of a `DATE`, `DATETIME` or
+  `TIMESTAMP` without a default; an index on a column the table does not have
+  (1072) or under a name the table has (1061); a key that kilit counts past
+  3072 bytes; a prefix longer than its column (1089 on a `VARCHAR`); dropping
+  one of several `FULLTEXT` indexes, a `UNIQUE` index on several columns, or a
+  `UNIQUE` index of `NOT NULL` columns on a table without a primary key; a
+  `MODIFY` that makes a primary key column nullable; and a `MODIFY` or
+  `CHANGE` that moves a column `AFTER` itself.
+- A `SET sql_mode` inside a `/*! */` comment is not seen, so a strict mode set
+  earlier stays in force for kilit after `/*!40101 SET SQL_MODE='' */`. The
+  over-long column rule above then keeps a table that MySQL changed.
+- `ADD FULLTEXT INDEX (col DESC)` is refused by MySQL (error 1221) and kilit
+  answers it and follows it. A FULLTEXT index on a `TEXT` column with
+  `CHARACTER SET binary` on a DYNAMIC table gets the lab's answer where MySQL
+  gives error 1283. Both are older than this version.
+- The 3072-byte count does not cover a `DATE`, `DATETIME` or `TIMESTAMP` key
+  part, so a key that holds one runs when MySQL may refuse it (1071). A key
+  that names a column twice (error 1060) runs too. Adding a `UNIQUE` index of
+  `NOT NULL` columns to a table without a primary key makes it the clustered
+  key, and kilit says no rebuild.
 
 ## Defaults and row size
 
