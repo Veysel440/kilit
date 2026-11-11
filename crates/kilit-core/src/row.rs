@@ -175,14 +175,14 @@ struct Field {
 fn page(format: Format, fields: &[Field], nullable: u64, clustered: bool) -> (u64, u64) {
     let dynamic = |field: &Field| match field.page {
         Page::Fixed(size) => size,
-        Page::Variable(length) | Page::Char(length) if length <= 255 => length + 1,
+        Page::Variable(length) | Page::Char(length) if length <= 255 => length.saturating_add(1),
         Page::Variable(length) | Page::Char(length) if field.key => length.saturating_add(2),
         Page::Variable(_) | Page::Char(_) | Page::Off => 41,
     };
     let compact = |field: &Field| match field.page {
         Page::Fixed(size) => size,
-        Page::Variable(length) | Page::Char(length) if length <= 255 => length + 1,
-        Page::Variable(length) | Page::Char(length) if length <= 788 => length + 2,
+        Page::Variable(length) | Page::Char(length) if length <= 255 => length.saturating_add(1),
+        Page::Variable(length) | Page::Char(length) if length <= 788 => length.saturating_add(2),
         Page::Variable(_) | Page::Char(_) | Page::Off => 790,
     };
     let redundant = |field: &Field| match field.page {
@@ -191,9 +191,12 @@ fn page(format: Format, fields: &[Field], nullable: u64, clustered: bool) -> (u6
         Page::Char(length) if length < 768 => length,
         Page::Char(_) | Page::Off => 788,
     };
-    // The row id, or nothing, and the transaction id and roll pointer.
-    let hidden = if clustered { 0 } else { 6 } + 6 + 7;
-    let count = fields.len() as u64 + if clustered { 2 } else { 3 };
+    // The row id (6), or nothing, and the transaction id (6) and roll
+    // pointer (7).
+    let hidden: u64 = if clustered { 13 } else { 19 };
+    let count = u64::try_from(fields.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(if clustered { 2 } else { 3 });
     let bitmap = nullable.div_ceil(8);
     debug_assert!(fields.iter().all(|field| !(field.key && field.nullable)));
     let sum = |each: &dyn Fn(&Field) -> u64| {
@@ -202,11 +205,27 @@ fn page(format: Format, fields: &[Field], nullable: u64, clustered: bool) -> (u6
             .map(each)
             .fold(hidden, |total: u64, bytes| total.saturating_add(bytes))
     };
+    // Every sum saturates, and so does the COMPRESSED limit: a column kilit
+    // reads may be longer, and a table wider, than any MySQL takes.
     match format {
-        Format::Dynamic => (5 + bitmap + sum(&dynamic), 8_125),
-        Format::Compressed => (2 + bitmap + sum(&dynamic), 8_069 - 2 * count),
-        Format::Compact => (5 + bitmap + sum(&compact), 8_125),
-        Format::Redundant => (6 + 2 * count + sum(&redundant), 8_122),
+        Format::Dynamic => (
+            5_u64.saturating_add(bitmap).saturating_add(sum(&dynamic)),
+            8_125,
+        ),
+        Format::Compressed => (
+            2_u64.saturating_add(bitmap).saturating_add(sum(&dynamic)),
+            8_069_u64.saturating_sub(count.saturating_mul(2)),
+        ),
+        Format::Compact => (
+            5_u64.saturating_add(bitmap).saturating_add(sum(&compact)),
+            8_125,
+        ),
+        Format::Redundant => (
+            6_u64
+                .saturating_add(count.saturating_mul(2))
+                .saturating_add(sum(&redundant)),
+            8_122,
+        ),
     }
 }
 
@@ -634,6 +653,43 @@ mod tests {
         assert_eq!(counts.row, u64::MAX);
         // DYNAMIC keeps such long columns out of the page: 41 bytes each.
         assert_eq!(counts.page, Some((5 + 1 + 4 + 13 + 41 + 41, 8_125)));
+    }
+
+    #[test]
+    fn a_key_column_whose_bytes_overflow_is_counted_without_wrapping_in_every_format() {
+        // No such table exists in MySQL; DYNAMIC and COMPRESSED count a key
+        // column whole, so its bytes reach the record and must saturate.
+        let sql = "CREATE TABLE q (id VARCHAR(4611686018427387904) NOT NULL PRIMARY KEY) \
+                   DEFAULT CHARSET=utf8mb4";
+        for (format, page) in [
+            (Format::Dynamic, (u64::MAX, 8_125)),
+            (Format::Compressed, (u64::MAX, 8_069 - 2 * 3)),
+            (Format::Compact, (5 + 13 + 790, 8_125)),
+            (Format::Redundant, (6 + 2 * 3 + 13 + 788, 8_122)),
+        ] {
+            assert_eq!(
+                counts(sql, "q", Some(format)).page,
+                Some(page),
+                "{format:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_of_more_fields_than_a_compressed_page_allows_has_a_limit_of_zero() {
+        // No such table exists in MySQL (InnoDB takes at most 1,017
+        // columns); kilit must still not wrap or panic: 4,100 fields leave
+        // no room in a COMPRESSED page.
+        let columns: Vec<String> = (1..=4_100)
+            .map(|n| format!("c{n} TINYINT NOT NULL"))
+            .collect();
+        let sql = format!(
+            "CREATE TABLE q (id INT PRIMARY KEY, {})",
+            columns.join(", ")
+        );
+        let (record, limit) = counts(&sql, "q", Some(Format::Compressed)).page.unwrap();
+        assert_eq!(limit, 0);
+        assert!(record > limit);
     }
 
     #[test]

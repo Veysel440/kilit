@@ -2191,7 +2191,7 @@ fn a_foreign_key_without_a_name_gets_the_same_answers() {
     );
 }
 
-// Regression tests for what the review found.
+// Regression tests: inputs kilit once answered wrongly.
 
 /// The same answer on both servers for the last statement of `sql`.
 fn assert_answer(name: &str, schema: &str, sql: &str, answer: &str) {
@@ -3526,8 +3526,8 @@ fn a_schema_file_is_not_scanned_for_default_storage_engine_so_its_tables_get_the
     );
 }
 
-// Regression tests for what the step 9a review found. The inputs and the
-// server results are the review's proofs (p1 to p15).
+// Step 9a, regression tests: inputs kilit once answered wrongly. Each was run
+// by hand on MySQL 8.0.46 and 8.4.13; the results below are what both did.
 
 /// What kilit says about every statement of `sql`, on both servers.
 fn assert_every_answer(name: &str, schema: &str, sql: &str, expected: &[&str]) {
@@ -4028,11 +4028,11 @@ fn laravel_s_expression_default_with_uuid_short_sysdate_or_user_fails_with_1674(
     }
 }
 
-// Regression tests for what the step 9c review found.
+// Step 9c, regression tests: inputs kilit once answered wrongly.
 
 #[test]
 fn a_space_or_comment_between_a_function_name_and_its_parenthesis_is_unknown() {
-    // Measured on both servers (manual/step9c/review/t1): `(SYSDATE ())`,
+    // By hand on MySQL 8.0.46 and 8.4.13: `(SYSDATE ())`,
     // `( SYSDATE ( ) )`, `(SYSDATE /*x*/ ())` and `(NOW ())` fail with 3770,
     // because MySQL reads the name with a space as another function. A space
     // only inside the parentheses, `(sysdate( ))`, is 1674.
@@ -4068,7 +4068,7 @@ fn a_space_or_comment_between_a_function_name_and_its_parenthesis_is_unknown() {
 
 #[test]
 fn an_earlier_statement_naming_binlog_format_makes_every_expression_default_unknown() {
-    // Measured on both servers (manual/step9c/review/t2): after SET SESSION
+    // By hand on MySQL 8.0.46 and 8.4.13: after SET SESSION
     // binlog_format = 'STATEMENT' the server accepts UUID(), RAND(), USER()
     // and UUID_SHORT() defaults and copies the table.
     let reason = "names binlog_format";
@@ -5469,8 +5469,8 @@ fn laravel_s_foreign_key_checks_lines_are_not_mistaken_for_old_alter_table() {
     );
 }
 
-// Regression tests for what the step 9b review found. The server runs are
-// the review's: the results below are what MySQL 8.0.46 and 8.4.13 did.
+// Step 9b, regression tests: inputs kilit once answered wrongly. Each was run
+// by hand on MySQL 8.0.46 and 8.4.13; the results below are what both did.
 
 #[test]
 fn a_global_keyword_in_front_of_a_list_carries_to_old_alter_table_and_makes_it_unknown() {
@@ -5592,8 +5592,8 @@ fn a_1071_on_a_compact_table_has_no_note_about_duplicate_values() {
 // Step 11b: ALTER TABLE statements that only set table options, and how a SET
 // reaches the session.
 //
-// The answers for COMMENT come from the lab's hand tests on both servers
-// (manual/step11b, results.tsv) and the scenario set-table-comment: as written,
+// The answers for COMMENT come from hand tests on MySQL 8.0.46 and 8.4.13 and
+// from the scenario set-table-comment: as written,
 // ALGORITHM=INPLACE, INPLACE with LOCK=NONE and LOCK=NONE run INPLACE with no
 // rebuild and writes continue; ALGORITHM=INSTANT fails with 1845; COPY
 // rebuilds and writes wait. Laravel's `$table->comment('...')` writes
@@ -6311,8 +6311,8 @@ fn a_global_keyword_carries_to_old_alter_table_in_every_position_and_a_scope_of_
     }
 }
 
-// foreign_key_checks = DEFAULT. Hand tests of step 11a's review: the session
-// ends with the checks off on both servers (the inverse of the global value);
+// foreign_key_checks = DEFAULT. By hand on MySQL 8.0.46 and 8.4.13: the
+// session ends with the checks off on both (the inverse of the global value);
 // the lab has not measured it, so every answer that depends on the checks is
 // unknown until a readable session SET of the variable.
 
@@ -6485,8 +6485,8 @@ fn changing_the_type_of_a_foreign_key_column_after_a_default_of_the_checks_is_un
     );
 }
 
-// Regression tests for what the step 11b review found. The server runs are
-// the review's hand tests (both servers, session only): MySQL 1628 for a
+// Step 11b, regression tests: inputs kilit once answered wrongly. By hand on
+// MySQL 8.0.46 and 8.4.13 (session only): MySQL 1628 for a
 // comment over 2048 characters, 1228 for a GLOBAL sql_log_bin, 1193 for an
 // unknown variable (and, on 8.0.46, restrict_fk_on_non_standard_key), 1071 for
 // a key too long for the new engine or row format, 1231 for a quoted DEFAULT.
@@ -6567,7 +6567,8 @@ fn a_set_that_mysql_refuses_as_a_whole_leaves_foreign_key_checks_unknown() {
     }
 }
 
-/// The review's `t1`: utf8mb4 VARCHAR(255) columns, one of them indexed.
+/// The table `t1` of those hand tests: utf8mb4 VARCHAR(255) columns, one of
+/// them indexed.
 const T1_TABLE: &str = "CREATE TABLE t1 (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   email VARCHAR(255) NULL,
@@ -6834,7 +6835,7 @@ fn when_no_answer_of_a_run_depends_on_the_server_every_other_server_answers_the_
 
 // Step 13a: forms MySQL 8.0.46 and 8.4.13 reject, which kilit used to answer.
 // Every refused statement below was run by hand on both servers (error 1064,
-// 1067, 1294 or 1391 on each; manual/step13a.sql), and so was every twin that
+// 1067, 1294 or 1391 on each), and so was every twin that
 // must keep its answer. A refused statement changes no table.
 
 /// What every refusal of this step starts with. The rest of the reason is the
@@ -7707,12 +7708,11 @@ fn a_refused_statement_is_unknown_in_the_impact_on_both_servers() {
     }
 }
 
-// Step 13a, review findings: key parts that look like a function call but are
-// a column name with a prefix length, or a column name that looks like a
-// number. Hand tests on MySQL 8.0.46 and 8.4.13 (same result on both):
-// manual/step13a/review/h1.sql, h2.sql and h3.sql.
+// Step 13a, regression tests: key parts that look like a function call but
+// are a column name with a prefix length, or a column name that looks like a
+// number. By hand on MySQL 8.0.46 and 8.4.13, with the same result on both.
 
-/// The table of the review hand tests: the names are words MySQL reads as a
+/// The table of those hand tests: the names are words MySQL reads as a
 /// function in some places, or as a number.
 const KW_TABLE: &str = "\
 CREATE TABLE kw (id INT PRIMARY KEY, ceil VARCHAR(20), floor VARCHAR(20), substr VARCHAR(20), trim VARCHAR(20), `2e` VARCHAR(20), `1e` VARCHAR(20));
@@ -10227,8 +10227,8 @@ fn a_rename_of_a_table_in_another_case_makes_the_new_name_the_table_made_here() 
 // (error 1091).
 //
 // The expectations come from the lab (the scenarios named in each test), from
-// the hand tests (manual/B1b) and from the decisions of the step. A test
-// that names a lab scenario needs that scenario in matrix/.
+// hand tests on MySQL 8.0.46 and 8.4.13 and from the decisions of the step.
+// A test that names a lab scenario needs that scenario in matrix/.
 
 const FAILS_1101: &str = "fails with error 1101";
 const FAILS_1118: &str = "fails with error 1118";
@@ -10827,9 +10827,10 @@ fn setting_a_quoted_default_on_a_known_text_column_fails_after_an_empty_sql_mode
 
 #[test]
 fn setting_a_quoted_default_on_a_known_json_column_after_an_empty_sql_mode_is_unknown() {
-    // The lab ran set-column-default-json-literal-sql-mode-empty and
-    // ...-not-strict (1101 on both servers); kilit stays cautious and does not
-    // bind them: unknown (decision of the step).
+    // By hand on MySQL 8.0.46 and 8.4.13 (set-column-default-json-literal
+    // with sql_mode '' and a non-strict mode, kept out of the lab's
+    // scenarios): 1101 on both. kilit stays cautious and does not bind them:
+    // unknown (decision of the step).
     let schema = lab_with_text_json_and_varchar();
     for set in [
         "SET sql_mode = ''",
@@ -11314,9 +11315,10 @@ fn a_new_column_that_takes_a_known_table_past_65535_bytes_fails_with_1118() {
 
 #[test]
 fn a_new_column_that_takes_a_known_table_to_65534_bytes_is_instant() {
-    // add-column-at-row-size-limit: VARCHAR(229) NULL (918 bytes) ends at
-    // 65,525 bytes of columns plus 9 of NULL flags, 65,534 in all; the lab
-    // ran it INSTANT on both servers.
+    // By hand on MySQL 8.0.46 and 8.4.13 (add-column-at-row-size-limit, not
+    // among the lab's scenarios): VARCHAR(229) NULL (918 bytes) ends at
+    // 65,525 bytes of columns plus 9 of NULL flags, 65,534 in all, and runs
+    // INSTANT on both.
     let schema = lab_with_62_wide_columns(&[]);
     let answer = said(
         &schema,
@@ -11354,8 +11356,9 @@ fn a_column_that_fails_with_1118_leaves_the_table_as_it_was() {
 #[test]
 fn widening_a_varchar_past_65535_bytes_in_a_known_table_fails_with_1118() {
     // lengthen-varchar-over-row-size-limit: s63 VARCHAR(200) -> VARCHAR(230)
-    // ends at 65,538. lengthen-varchar-at-row-size-limit: VARCHAR(229) ends
-    // at 65,534 and runs INPLACE with no rebuild.
+    // ends at 65,538. By hand on MySQL 8.0.46 and 8.4.13
+    // (lengthen-varchar-at-row-size-limit, not among the lab's scenarios):
+    // VARCHAR(229) ends at 65,534 and runs INPLACE with no rebuild on both.
     let schema = lab_with_62_wide_columns(&["ALTER TABLE orders ADD COLUMN s63 VARCHAR(200) NULL"]);
     let over = said(&schema, "ALTER TABLE orders MODIFY s63 VARCHAR(230) NULL");
     assert_eq!(over.answer, FAILS_1118);
@@ -11474,9 +11477,9 @@ fn dropping_what_a_table_kilit_does_not_know_may_have_keeps_the_measured_answer(
 }
 
 /// The lab's tables with 30 CHAR(255) latin1 NOT NULL columns more on
-/// `orders` (a utf8mb4 table): 255 bytes each in the page, as the scenarios
+/// `orders` (a utf8mb4 table): 255 bytes each in the page, as the hand tests
 /// add-column-at-page-row-size-limit and add-column-over-page-row-size-limit
-/// set them up.
+/// on MySQL 8.0.46 and 8.4.13 set them up.
 fn lab_with_30_latin1_columns() -> String {
     let columns: Vec<String> = (1..=30)
         .map(|n| format!("ADD COLUMN f{n} CHAR(255) CHARACTER SET latin1 NOT NULL DEFAULT ''"))
@@ -11486,8 +11489,8 @@ fn lab_with_30_latin1_columns() -> String {
 
 #[test]
 fn a_column_that_brings_a_row_to_the_most_innodb_keeps_in_a_page_is_instant() {
-    // Lab-verified boundary (both servers): CHAR(194) latin1 NOT NULL is the
-    // last one that fits.
+    // By hand on MySQL 8.0.46 and 8.4.13 (add-column-at-page-row-size-limit):
+    // CHAR(194) latin1 NOT NULL is the last one that fits.
     let answer = said(
         &lab_with_30_latin1_columns(),
         "ALTER TABLE orders ADD x CHAR(194) CHARACTER SET latin1 NOT NULL DEFAULT ''",
@@ -11555,9 +11558,9 @@ fn a_laravel_migration_that_adds_three_string_columns_to_a_wide_table_fails_at_t
 // Step B1b, fix phase: keys MySQL names itself, VARCHAR columns longer than
 // MySQL accepts, and the note about a record past what a page keeps.
 // The expectations come from the lab (drop-foreign-key, drop-index and the
-// scenarios of the row size limit), from the hand tests of the review (a
-// foreign key written without a name is called orders_ibfk_1, an index
-// without a name takes its first column's name, and MySQL 8.0.46 and 8.4.13
+// scenarios of the row size limit), from hand tests on MySQL 8.0.46 and
+// 8.4.13 (a foreign key written without a name is called orders_ibfk_1, an
+// index without a name takes its first column's name, and both servers
 // accept the drops of both and the drop of the column afterwards; a VARCHAR
 // that cannot fit in 65,535 bytes at all is refused with 1074 in strict mode
 // and converted to TEXT otherwise) and from the decisions of the step.
@@ -11765,8 +11768,8 @@ const PAGE_RECORD_NOTE: &str = "if the record grows past what InnoDB keeps in a 
 
 #[test]
 fn a_new_column_on_a_table_kilit_does_not_know_notes_the_record_in_a_page_too() {
-    // add-column-over-page-row-size-limit: 8.0.46 fails with 1118, 8.4.13
-    // rebuilds the table (scenarios of the review, expected-B1b).
+    // By hand on MySQL 8.0.46 and 8.4.13 (add-column-over-page-row-size-limit):
+    // 8.0.46 fails with 1118, 8.4.13 rebuilds the table.
     for (label, schema) in tables_kilit_does_not_know() {
         for sql in [
             "ALTER TABLE orders ADD COLUMN link_color VARCHAR(255) NULL",
@@ -11837,11 +11840,12 @@ fn only_the_plain_new_column_carries_the_note_about_the_record_in_a_page() {
 // Step B1b, second fix phase: rows that other things key, foreign keys MySQL
 // renames with their table, FTS_DOC_ID, TEXT and JSON defaults after
 // `SET sql_mode = ''`, and columns too long for any table.
-// The expectations come from the hand tests of the review (the files
-// pkprefix-*, nopkuniq-*, fk-*, md-* and toolong.sql of the second review),
-// the lab's add-column and drop-column scenarios, and the step's decisions.
+// The expectations come from hand tests on MySQL 8.0.46 and 8.4.13 (keys on a
+// prefix, tables without a primary key, renamed foreign keys, MODIFY with a
+// quoted default, columns too long for any table), the lab's add-column and
+// drop-column scenarios, and the step's decisions.
 
-/// `CREATE TABLE q (...)` as the review's hand tests built it: the columns of
+/// `CREATE TABLE q (...)` as those hand tests built it: the columns of
 /// `head`, then CHAR(255) latin1 NOT NULL columns that add up to `filler`
 /// bytes (the last one shorter), then the definitions of `tail`, in a utf8mb4
 /// InnoDB table.
@@ -11884,7 +11888,7 @@ fn table_q_keyed_by_a_unique_index(filler: usize) -> String {
 
 #[test]
 fn a_new_column_on_a_table_keyed_by_a_column_prefix_is_unknown_where_mysql_8_0_46_refuses_it() {
-    // pkprefix: 7,500 bytes of filler and CHAR(200) is past the 7,646 bytes
+    // By hand: 7,500 bytes of filler and CHAR(200) is past the 7,646 bytes
     // (of filler, with an INT added) that MySQL 8.0.46 accepts; the prefix
     // key does not make the record shorter. kilit said INSTANT.
     let schema = table_q_keyed_by_a_prefix(7500);
@@ -11898,7 +11902,7 @@ fn a_new_column_on_a_table_keyed_by_a_column_prefix_is_unknown_where_mysql_8_0_4
 #[test]
 fn a_new_column_on_a_table_without_a_primary_key_keyed_by_a_unique_index_is_unknown_where_mysql_8_0_46_refuses_it()
  {
-    // nopkuniq: the unique index of NOT NULL columns keys the rows, so the
+    // By hand: the unique index of NOT NULL columns keys the rows, so the
     // record holds its columns again (8.0.46 accepts 5,301 bytes of filler
     // with an INT added, this has 5,200 and CHAR(200)). kilit said INSTANT.
     let schema = table_q_keyed_by_a_unique_index(5200);
@@ -11984,7 +11988,7 @@ const RENAMES: [&str; 2] = [
 
 #[test]
 fn dropping_the_foreign_key_by_its_renamed_name_and_then_its_column_is_not_a_failure() {
-    // Hand test (fk-m.sql, fk-m2.sql), both servers: MySQL renames
+    // By hand on MySQL 8.0.46 and 8.4.13: MySQL renames
     // orders_ibfk_1 to purchases_ibfk_1 with the table and runs all three
     // statements. kilit said 1091 for the drop and 1828 for the column.
     for rename in RENAMES {
@@ -12017,8 +12021,9 @@ fn dropping_the_index_of_a_renamed_foreign_key_after_the_key_is_not_a_failure() 
 
 #[test]
 fn changing_the_type_of_the_column_of_a_renamed_foreign_key_after_the_key_is_not_a_failure() {
-    // fk-t.sql: MODIFY user_id INT NOT NULL after the key is gone is
-    // accepted (no 3780). kilit kept the key under its old name.
+    // By hand on MySQL 8.0.46 and 8.4.13: MODIFY user_id INT NOT NULL after
+    // the key is gone is accepted (no 3780). kilit kept the key under its old
+    // name.
     for rename in RENAMES {
         let sql = format!(
             "{rename};\nALTER TABLE purchases DROP FOREIGN KEY purchases_ibfk_1;\nALTER TABLE purchases MODIFY user_id INT NOT NULL"
@@ -12084,7 +12089,7 @@ fn dropping_a_foreign_key_named_after_its_table_that_the_known_table_does_not_ha
 #[test]
 fn dropping_a_foreign_key_by_the_old_name_after_a_rename_is_the_1091_unknown_and_the_column_still_fails_with_1828()
  {
-    // Hand test ibfk-rename.txt, both servers: after the rename the key is
+    // By hand on MySQL 8.0.46 and 8.4.13: after the rename the key is
     // purchases_ibfk_1; DROP FOREIGN KEY orders_ibfk_1 gives 1091, and
     // DROP COLUMN user_id then gives 1828.
     for rename in RENAMES {
@@ -12140,8 +12145,8 @@ fn dropping_a_foreign_key_whose_name_is_not_one_mysql_makes_is_still_the_1091_un
 #[test]
 fn changing_a_text_or_json_column_to_a_quoted_default_after_an_empty_sql_mode_is_unknown_without_saying_mysql_drops_it()
  {
-    // md-m.sql, both servers: with sql_mode = '' the statement fails with
-    // 1101, it does not drop the default.
+    // By hand on MySQL 8.0.46 and 8.4.13: with sql_mode = '' the statement
+    // fails with 1101, it does not drop the default.
     let schema = "CREATE TABLE t (id INT PRIMARY KEY, c TEXT NULL, j JSON NULL) ENGINE=InnoDB;";
     for statement in [
         "ALTER TABLE t MODIFY c TEXT NULL DEFAULT 'x'",
@@ -12162,8 +12167,8 @@ fn changing_a_text_or_json_column_to_a_quoted_default_after_an_empty_sql_mode_is
 
 #[test]
 fn a_column_too_long_for_any_table_is_unknown_without_a_table_to_look_at() {
-    // toolong.sql, both servers: VARCHAR(70000) and CHAR(300) fail with 1074
-    // in strict mode, whatever the table is.
+    // By hand on MySQL 8.0.46 and 8.4.13: VARCHAR(70000) and CHAR(300) fail
+    // with 1074 in strict mode, whatever the table is.
     for (label, schema) in tables_kilit_does_not_know() {
         for sql in [
             "ALTER TABLE orders ADD COLUMN c VARCHAR(70000) NULL",

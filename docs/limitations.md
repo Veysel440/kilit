@@ -123,12 +123,13 @@ safe.
 - `ALTER COLUMN ... SET DEFAULT` with a quoted literal on a `JSON` column
   fails in strict mode (error 1101) and is also refused in a non-strict mode;
   kilit answers `UNKNOWN` there. A `MODIFY` to `TEXT` with a quoted default
-  after a non-strict `sql_mode` is `UNKNOWN`. Both were run in the lab, but
-  are not among kilit's scenarios.
+  after a non-strict `sql_mode` is `UNKNOWN`. Both were run by hand on MySQL
+  8.0.46 and 8.4.13, but are not among kilit's scenarios.
 - MySQL renames foreign key names `<table>_ibfk_<suffix>` and CHECK names
   `<table>_chk_<suffix>`, whatever the suffix, with their table (by hand on
-  both servers), and kilit follows that. It also follows a rename that MySQL
-  refuses because a new name is too long (1059) or taken (1826, 3822).
+  both servers), and kilit follows that. kilit renames them even when MySQL
+  refuses the rename because a new name is too long (1059) or taken (1826,
+  3822).
 - The row size counts 16K pages only. It leaves out bytes MySQL keeps
   hidden: columns dropped instantly, row versions, and the `FTS_DOC_ID` a
   dropped `FULLTEXT` index leaves behind. Columns it

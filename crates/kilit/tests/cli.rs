@@ -1306,7 +1306,7 @@ fn a_myisam_table_created_in_the_input_is_never_waited_for_unless_it_fails() {
     assert_eq!(kilit(&["check", "--strict"], sql).status.code(), Some(3));
 }
 
-// Regression test for what the step 9a review found: a key over 1000 bytes
+// Step 9a, regression test: a key over 1000 bytes
 // on a MyISAM table is 1071 in a strict SQL mode and accepted, cut to a
 // prefix, with sql_mode = ''. kilit does not follow the mode.
 
@@ -3322,7 +3322,7 @@ fn a_table_statement_kilit_cannot_read_is_unknown_and_prints_in_full_not_as_a_re
     assert!(!text.contains("read (not checked)"), "{text}");
 }
 
-// Regression tests for the review of step 11a.
+// Step 11a, regression tests: inputs kilit once answered wrongly.
 
 const ADD_CHILDREN_KEY: &str = "alter table `children` add constraint \
      `children_parent_id_foreign` foreign key (`parent_id`) references `parents` (`id`);";
@@ -4240,7 +4240,7 @@ fn the_help_of_check_says_each_file_runs_in_a_session_of_its_own() {
     assert_eq!(output.status.code(), Some(0));
 }
 
-// Regression tests for what the step 11b review found.
+// Step 11b, regression tests: inputs kilit once answered wrongly.
 
 #[test]
 fn a_global_set_with_a_comment_after_set_still_reaches_the_next_file() {
@@ -6739,7 +6739,7 @@ fn a_laravel_migration_that_creates_then_renames_truncates_and_drops_gives_no_wa
     }
 }
 
-// Step 12b, review findings. Measured by hand on MySQL 8.0.46 and 8.4.13 with
+// Step 12b, regression tests. Measured by hand on MySQL 8.0.46 and 8.4.13 with
 // a transaction that had read orders open and lock_wait_timeout = 3.
 
 #[test]
@@ -10496,11 +10496,11 @@ fn a_foreign_key_to_a_parent_the_dump_does_not_have_says_what_kilit_has_neither(
 
 // ---------------------------------------------------------------------------
 // Step B1b, second fix phase: text printed without a line break that runs
-// into a statement line with a mangled mark. Hand test of the review
-// (ron2.txt): `insert ignore` filled the table and MySQL gave 1062 on the
-// ADD UNIQUE after it, so the output is not fully read: exit 2.
+// into a statement line with a mangled mark. By hand on MySQL, `insert
+// ignore` filled the table and the ADD UNIQUE after it gave 1062, so the
+// output is not fully read: exit 2.
 
-/// ron2.txt: a Windows console in code page 1252 shows Laravel's mark as
+/// A Windows console in code page 1252 shows Laravel's mark as
 /// `â‡‚`, and the second migration prints "Copying codes" without a line
 /// break before its `insert ignore`.
 const RUN_INTO_MANGLED: &str = "
@@ -10561,10 +10561,11 @@ no newline  ? SET FOREIGN_KEY_CHECKS=0;
 
 // ---------------------------------------------------------------------------
 // Step B1b, final fix: the reason for a table that the dump has but kilit
-// cannot use must be true in every case (repros f6-c, schema-droptemp and
-// read-delimiter of the audit).
+// cannot use must be true in every case: a table named with its database, a
+// table dropped by DROP TEMPORARY TABLE, and a table dropped inside a trigger
+// body.
 
-/// The dump of those repros: `users` and `orders` with a FULLTEXT index.
+/// The dump of those cases: `users` and `orders` with a FULLTEXT index.
 const B1B_REASON_DUMP: &str = "CREATE TABLE `users` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
   `name` varchar(100) NOT NULL,
@@ -10584,7 +10585,7 @@ CREATE TABLE `orders` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 ";
 
-/// The statements of the repros, run against `B1B_REASON_DUMP`. Returns the
+/// The statements of those cases, run against `B1B_REASON_DUMP`. Returns the
 /// JSON, the ALTER's JSON statement (the one adding column c), its text
 /// report and the exit status.
 fn b1b_reason_run(input: &str) -> (serde_json::Value, serde_json::Value, String, Option<i32>) {
@@ -10603,7 +10604,7 @@ fn b1b_reason_run(input: &str) -> (serde_json::Value, serde_json::Value, String,
 
 #[test]
 fn a_database_qualified_name_of_a_table_in_the_dump_says_which_database_kilit_does_not_know() {
-    // Repro f6-c: ALTER TABLE shop.orders, the dump holds orders.
+    // ALTER TABLE shop.orders, the dump holds orders.
     let (json, alter, text, code) =
         b1b_reason_run("ALTER TABLE shop.orders ADD COLUMN c INT NULL;\n");
     assert_eq!(alter["impact"], "unknown", "{alter}");
@@ -10620,8 +10621,8 @@ fn a_database_qualified_name_of_a_table_in_the_dump_says_which_database_kilit_do
 
 #[test]
 fn a_table_the_input_dropped_with_drop_temporary_table_says_the_statement_before_dropped_it() {
-    // Repro schema-droptemp: DROP TEMPORARY TABLE IF EXISTS orders; then an
-    // ALTER of orders, a base table of the dump.
+    // DROP TEMPORARY TABLE IF EXISTS orders; then an ALTER of orders, a base
+    // table of the dump.
     let input =
         "DROP TEMPORARY TABLE IF EXISTS orders;\nALTER TABLE orders ADD COLUMN c INT NULL;\n";
     let (json, alter, text, code) = b1b_reason_run(input);
@@ -10639,8 +10640,11 @@ fn a_table_the_input_dropped_with_drop_temporary_table_says_the_statement_before
 
 #[test]
 fn a_table_dropped_inside_a_routine_body_says_the_statement_before_dropped_it_with_its_line() {
-    // Repro read-delimiter: DELIMITER //, a trigger whose body holds DROP
-    // TABLE IF EXISTS orders (line 5), DELIMITER ;, then an ALTER of orders.
+    // DELIMITER //, a trigger whose body holds DROP TABLE IF EXISTS orders
+    // (line 5), DELIMITER ;, then an ALTER of orders. This pins today's
+    // reading: kilit does not read DELIMITER yet, so the body's statements
+    // count as run and the trigger's DROP TABLE drops orders. MySQL only
+    // stores that body; the test changes with the step that reads DELIMITER.
     let input = "DELIMITER //
 CREATE TRIGGER t BEFORE INSERT ON orders FOR EACH ROW
 BEGIN

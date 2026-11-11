@@ -2369,8 +2369,8 @@ mod tests {
 
     #[test]
     fn renaming_a_table_renames_its_automatic_check_names() {
-        // MySQL 8.0.46 and 8.4.13 do the same, in both spellings (run by
-        // hand, manual/B1b/chk-rename): orders_chk_x becomes sales_chk_x.
+        // By hand on MySQL 8.0.46 and 8.4.13, in both spellings, both do the
+        // same: orders_chk_x becomes sales_chk_x.
         let schema = from_sql(
             "CREATE TABLE orders (amount INT, CHECK (amount > 0),
                  CONSTRAINT c_one CHECK (amount > 1), CONSTRAINT orders_chk_x CHECK (amount > 2));

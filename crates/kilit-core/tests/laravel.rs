@@ -4009,7 +4009,7 @@ fn migrations_run_with_force_or_outside_production_are_read_without_an_error() {
 // DERIVED, not real runs: the framework's own console classes of v10.0.0,
 // v10.16.1, v10.17.0 and v10.24.0 run in a harness (symfony/console 6.4,
 // termwind, laravel/prompts), with the Laravel 12.71.0 runs as the check of
-// the harness. The captures are in the review folder, laravel/A4/fix/l10/.
+// the harness.
 //
 // Laravel 10.0 to 10.16 print `Command canceled.` (one l) and, when stdin is
 // not a terminal and there is no -n, Symfony's question between the warning
@@ -4997,7 +4997,7 @@ fn text_a_migration_prints_does_not_change_what_kilit_reads_of_its_statements() 
 // of the console's code page; in code page 936 they read `鈬�`. The line is
 // still a statement, so it must not be taken for text a migration printed.
 // The lines are built from the bytes of Laravel 12.71.0's output with the
-// mark replaced, as the review saw them.
+// mark replaced by what each code page makes of it.
 
 /// A long-form output whose first migration has `line` between its name and
 /// its first known statement.
@@ -5016,7 +5016,7 @@ fn mangled_before_a_statement_short(line: &str) -> String {
 
 /// Marks and statements a code page can make of one statement line.
 const MANGLED_STATEMENT_LINES: [&str; 9] = [
-    // Code page 936, the review's form.
+    // Code page 936.
     "  鈬� alter table `orders` add fulltext `orders_note_fulltext`(`note`)  ",
     "  鈬� create index `orders_amount_index` on `orders` (`amount`)  ",
     // A mark of a single letter-led token.
@@ -5124,12 +5124,12 @@ fn unit3d_s_lines_with_words_such_as_table_and_columns_stay_printed_text() {
 // Step B1b, second fix phase: text a migration prints without a line break
 // runs into the statement line that follows it. When the console's code
 // page has mangled that line's mark, the line is a statement kilit cannot
-// read (it may change data), not text. The inputs are the review's ron.txt
-// and ron2.txt (cp1252 shows the mark `⇂` as `â‡‚`); the expectation is the
-// hand test's: `insert ignore` filled the table, MySQL gave 1062 on the
-// ADD UNIQUE after it, so the output must not be taken as fully read.
+// read (it may change data), not text. The inputs are Laravel outputs as a
+// Windows console in code page 1252 shows them (the mark `⇂` as `â‡‚`). By
+// hand on MySQL, `insert ignore` filled the table and the ADD UNIQUE after it
+// gave 1062, so the output must not be taken as fully read.
 
-/// The statement lines the review saw, with the text printed before them.
+/// Statement lines with the text a migration printed before them.
 const RUN_INTO_LINES: [&str; 7] = [
     "no newline  â‡‚ SET FOREIGN_KEY_CHECKS=0;",
     "Copying codes  â‡‚ insert ignore into `t` (`code`) values ('a'), ('a')",
@@ -5171,8 +5171,8 @@ fn text_printed_without_a_line_break_before_a_mangled_statement_line_is_an_unrea
 }
 
 #[test]
-fn the_reviews_run_in_output_keeps_its_insert_ignore_as_an_unreadable_line() {
-    // ron2.txt with Laravel's own lines in the right mark: a migration that
+fn a_run_in_output_keeps_its_insert_ignore_as_an_unreadable_line() {
+    // Such an output with Laravel's own lines in the right mark: a migration that
     // prints "Copying codes" without a line break and then runs
     // `insert ignore`, before an ADD UNIQUE.
     let output = "

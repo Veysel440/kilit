@@ -2784,7 +2784,7 @@ fn not_in_dump(name: &str, table: TableState<'_>, schema: &Schema) -> Option<Str
             GoneHow::Renamed { to } => format!("which {statement} renames to {to}"),
         };
         return Some(format!(
-            "{name}, {what}, and no statement after it creates again: MySQL refuses the \
+            "{name}, {what}, and no statement after it creates it again: MySQL refuses the \
              statement if {name} does not exist"
         ));
     }
