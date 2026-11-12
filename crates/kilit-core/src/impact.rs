@@ -306,13 +306,14 @@ mod tests {
     fn a_table_stays_new_through_a_rename_until_it_is_dropped() {
         assert_eq!(
             impacts_of(
-                "CREATE TABLE drafts (id INT PRIMARY KEY, note TEXT);
+                "CREATE TABLE drafts (id INT PRIMARY KEY, note TEXT) DEFAULT CHARSET=utf8mb4;
                  RENAME TABLE drafts TO notes;
                  ALTER TABLE notes ADD FULLTEXT (note);
                  ALTER TABLE notes RENAME TO memos;
                  ALTER TABLE memos ADD FULLTEXT (note);
                  DROP TABLE memos;
-                 CREATE TABLE IF NOT EXISTS memos (id INT PRIMARY KEY, note TEXT);
+                 CREATE TABLE IF NOT EXISTS memos (id INT PRIMARY KEY, note TEXT) \
+                 DEFAULT CHARSET=utf8mb4;
                  ALTER TABLE memos ADD FULLTEXT (note);"
             ),
             [

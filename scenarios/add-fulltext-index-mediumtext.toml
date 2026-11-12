@@ -1,0 +1,5 @@
+title = "Add a FULLTEXT index on a MEDIUMTEXT column"
+setup = [
+    "ALTER TABLE orders ADD COLUMN body MEDIUMTEXT NULL",
+]
+operation = "ADD FULLTEXT INDEX ft_orders_body (body)"

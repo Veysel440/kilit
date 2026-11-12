@@ -917,6 +917,7 @@ const INPLACE: &str = "INPLACE, no rebuild, writes continue";
 const FAILS_3780: &str = "fails with error 3780";
 const FAILS_1822: &str = "fails with error 1822";
 const FAILS_6125: &str = "fails with error 6125";
+const FAILS_1830: &str = "fails with error 1830";
 
 const OC_REF: &str = "ALTER TABLE orders ADD COLUMN ref BIGINT UNSIGNED NULL";
 const OC_NAME: &str = "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL";
@@ -2293,24 +2294,29 @@ fn a_child_column_whose_index_would_be_too_long_is_unknown() {
 }
 
 #[test]
-fn on_delete_or_on_update_set_null_on_a_not_null_child_is_unknown() {
-    // MySQL refuses it with 1830 before it looks at anything else.
+fn on_delete_set_null_on_a_not_null_child_fails_with_1830_and_every_other_shape_stays_unknown() {
+    // The lab measured ON DELETE SET NULL on a NOT NULL column that fits its
+    // parent: MySQL refuses it with 1830. A mismatch, a missing parent index
+    // and ON UPDATE SET NULL were not measured with it.
     let schema = "CREATE TABLE users (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, \
                   name VARCHAR(100) NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         CREATE TABLE orders (id INT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, \
         amount INT NOT NULL, un VARCHAR(100) NOT NULL, ok BIGINT UNSIGNED NULL) \
         ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
-    for action in ["ON DELETE SET NULL", "ON UPDATE SET NULL"] {
-        for (name, column, parent) in [
-            ("a fitting key", "user_id", "id"),
-            ("a type mismatch", "amount", "id"),
-            ("no parent index", "un", "name"),
+    for (action, fitting) in [
+        ("ON DELETE SET NULL", FAILS_1830),
+        ("ON UPDATE SET NULL", "unknown"),
+    ] {
+        for (name, column, parent, answer) in [
+            ("a fitting key", "user_id", "id", fitting),
+            ("a type mismatch", "amount", "id", "unknown"),
+            ("no parent index", "un", "name", "unknown"),
         ] {
             let sql = format!(
                 "ALTER TABLE orders ADD CONSTRAINT f1 FOREIGN KEY ({column}) \
                  REFERENCES users ({parent}) {action};"
             );
-            assert_answer(&format!("{action}, {name}"), schema, &sql, "unknown");
+            assert_answer(&format!("{action}, {name}"), schema, &sql, answer);
         }
         // A nullable child column has nothing to refuse.
         let sql = format!(
@@ -2318,6 +2324,10 @@ fn on_delete_or_on_update_set_null_on_a_not_null_child_is_unknown() {
         );
         assert_answer(&format!("{action}, nullable"), schema, &sql, COPY);
     }
+    // Both actions on one key are not the measured shape.
+    let sql = "ALTER TABLE orders ADD CONSTRAINT f1 FOREIGN KEY (user_id) REFERENCES users (id) \
+               ON DELETE SET NULL ON UPDATE SET NULL;";
+    assert_answer("both actions", schema, sql, "unknown");
 }
 
 #[test]
@@ -9717,7 +9727,7 @@ fn laravel_dropping_and_creating_a_table_in_another_letter_case_is_unknown_all_t
     // to fail with 1 and the ALTER stays ambiguous: all three are unknown.
     let schema = case_plain();
     let sql = "DROP TABLE IF EXISTS ORDERS;
-        CREATE TABLE ORDERS (id INT PRIMARY KEY, note TEXT);
+        CREATE TABLE ORDERS (id INT PRIMARY KEY, note TEXT) DEFAULT CHARSET=utf8mb4;
         ALTER TABLE ORDERS ADD FULLTEXT (note);";
     assert_eq!(case_answers(&schema, sql), [UNKNOWN, UNKNOWN, UNKNOWN]);
     assert_eq!(
@@ -9728,8 +9738,8 @@ fn laravel_dropping_and_creating_a_table_in_another_letter_case_is_unknown_all_t
     // the second CREATE fails with 1, so Posts is a table of its own, and the
     // third statement gets the measured answer of ADD FULLTEXT (lab: INPLACE,
     // rebuilds the table, writes wait) on a new table.
-    let sql = "CREATE TABLE posts (id INT PRIMARY KEY, body TEXT);
-        CREATE TABLE Posts (id INT PRIMARY KEY, body TEXT);
+    let sql = "CREATE TABLE posts (id INT PRIMARY KEY, body TEXT) DEFAULT CHARSET=utf8mb4;
+        CREATE TABLE Posts (id INT PRIMARY KEY, body TEXT) DEFAULT CHARSET=utf8mb4;
         ALTER TABLE Posts ADD FULLTEXT (body);";
     assert_eq!(
         case_answers("", sql),
@@ -9912,7 +9922,7 @@ fn a_create_table_in_another_letter_case_never_makes_the_known_table_new() {
     // kilit goes on as with 0 and ORDERS is a new table of its own. The
     // statement itself is unknown, and the ALTER after it is on a new table.
     let schema = case_fulltext();
-    let create = "CREATE TABLE ORDERS (id INT PRIMARY KEY, note TEXT);\n";
+    let create = "CREATE TABLE ORDERS (id INT PRIMARY KEY, note TEXT) DEFAULT CHARSET=utf8mb4;\n";
     assert_eq!(
         case_impacts(
             &schema,
@@ -10234,7 +10244,7 @@ fn a_rename_of_a_table_in_another_case_makes_the_new_name_the_table_made_here() 
     // A: RENAME TABLE T1 TO t2 fails with 0 (1146); kilit goes on as with 1
     // or 2, where T1 is t1: t2 is the new t1, so the ALTER of t2 is on a new
     // table.
-    let sql = "CREATE TABLE t1 (id INT PRIMARY KEY, note TEXT);
+    let sql = "CREATE TABLE t1 (id INT PRIMARY KEY, note TEXT) DEFAULT CHARSET=utf8mb4;
         RENAME TABLE T1 TO t2;
         ALTER TABLE t2 ADD FULLTEXT (note);";
     assert_eq!(
@@ -11294,9 +11304,15 @@ fn a_foreign_key_between_known_tables_has_no_note_about_what_it_can_see() {
 }
 
 #[test]
-fn a_foreign_key_that_sets_a_not_null_column_to_null_stays_unknown_on_known_tables() {
+fn a_foreign_key_that_sets_a_not_null_column_to_null_on_delete_fails_with_1830_on_known_tables() {
     let sql = "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE SET NULL";
-    assert_eq!(said(LAB_TABLES, sql).answer, "unknown");
+    let answer = said(LAB_TABLES, sql);
+    assert_eq!(answer.answer, FAILS_1830);
+    assert_eq!(
+        answer.evidence,
+        ["add-foreign-key-set-null-not-null"],
+        "the lab's own scenario is the evidence"
+    );
 }
 
 #[test]
@@ -12500,8 +12516,8 @@ fn b1c_what_every_table_may_do(
 
 /// For every scenario of every case and exception, on both
 /// servers, in all six variants: the statement on a table kilit does not know
-/// is unknown; or a failure that comes from the statement alone (1674, and
-/// 1101 where the type is in the statement); or the answer every table it may
+/// is unknown; or a failure that comes from the statement alone (1674, 1221,
+/// and 1101 where the type is in the statement); or the answer every table it may
 /// be shares. That last one is worked out again here from the matrix: the
 /// case and each exception a table decides and the change on MyISAM,
 /// COMPRESSED, COMPACT and REDUNDANT tables are all measured, and none lets
@@ -12528,6 +12544,7 @@ fn b1c_assert_nothing_runs_on(state: B1cState) {
                                 ..
                             } if !matches!(state, B1cState::NotInTheDump) => {
                                 (*code == 1674 && *found == "add-column-binlog-unsafe-default")
+                                    || (*code == 1221 && *found == "add-fulltext-index-with-order")
                                     || (*code == 1101
                                         && [
                                             "add-column-blob-literal-default",
@@ -14608,7 +14625,7 @@ fn a_fulltext_index_on_the_new_name_of_a_renamed_table_keeps_the_measured_answer
             b1c_answer(
                 server,
                 &schema,
-                "CREATE TABLE r (id INT PRIMARY KEY, note TEXT);
+                "CREATE TABLE r (id INT PRIMARY KEY, note TEXT) DEFAULT CHARSET=utf8mb4;
                  RENAME TABLE r TO z;
                  ALTER TABLE z ADD FULLTEXT INDEX ft (note)"
             ),
@@ -14626,9 +14643,9 @@ fn a_table_created_dropped_and_created_again_is_known_and_keeps_its_answer() {
             b1c_answer(
                 server,
                 &schema,
-                "CREATE TABLE y (id INT PRIMARY KEY, note TEXT);
+                "CREATE TABLE y (id INT PRIMARY KEY, note TEXT) DEFAULT CHARSET=utf8mb4;
                  DROP TABLE y;
-                 CREATE TABLE y (id INT PRIMARY KEY, note TEXT);
+                 CREATE TABLE y (id INT PRIMARY KEY, note TEXT) DEFAULT CHARSET=utf8mb4;
                  ALTER TABLE y ADD FULLTEXT INDEX ft (note)"
             ),
             "INPLACE, rebuilds the table, writes wait",
@@ -14720,5 +14737,2813 @@ fn the_reason_of_a_writes_wait_answer_on_a_table_kilit_does_not_know_names_the_h
                 "{how}, {server}: {reason}"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Foreign key actions: the lab measured every change of the twelve twins on a
+// table with a key that cascades or sets NULL, and on the parent of such a key;
+// each one is what its twin is, on both servers.
+
+/// The scenarios with a foreign key action, by the prefix that names the key
+/// and the twins they copy.
+const KEY_ACTION_SCENARIOS: [(&str, &[&str]); 10] = [
+    (
+        "on-delete-cascade-",
+        &[
+            "add-nullable-column",
+            "drop-column",
+            "rename-column",
+            "set-column-default",
+            "int-to-bigint",
+            "add-index",
+            "add-unique-index",
+            "drop-index",
+            "add-fulltext-index",
+            "make-column-nullable",
+            "varchar-50-to-60",
+            "drop-foreign-key",
+        ],
+    ),
+    (
+        "on-delete-set-null-",
+        &[
+            "add-nullable-column",
+            "drop-column",
+            "rename-column",
+            "set-column-default",
+            "int-to-bigint",
+            "add-index",
+            "add-unique-index",
+            "drop-index",
+            "add-fulltext-index",
+            "make-column-nullable",
+            "varchar-50-to-60",
+            "drop-foreign-key",
+        ],
+    ),
+    ("on-update-cascade-", &["add-index", "make-column-nullable"]),
+    (
+        "on-update-set-null-",
+        &["add-index", "make-column-nullable"],
+    ),
+    (
+        "on-delete-and-update-cascade-",
+        &["add-index", "make-column-nullable"],
+    ),
+    ("foreign-key-", &["add-index", "make-column-nullable"]),
+    (
+        "on-delete-restrict-",
+        &["add-index", "make-column-nullable"],
+    ),
+    (
+        "on-delete-no-action-",
+        &["add-index", "make-column-nullable"],
+    ),
+    (
+        "cascade-parent-",
+        &["add-index", "make-column-nullable", "add-nullable-column"],
+    ),
+    ("set-null-parent-", &["add-index"]),
+];
+
+/// Every pair of a foreign key action scenario and its twin.
+fn key_action_pairs() -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for (prefix, twins) in KEY_ACTION_SCENARIOS {
+        for twin in twins {
+            pairs.push((format!("{prefix}{twin}"), (*twin).to_owned()));
+        }
+    }
+    pairs
+}
+
+#[test]
+fn the_lab_measured_forty_scenarios_with_a_foreign_key_action_on_both_servers() {
+    assert_eq!(key_action_pairs().len(), 40);
+    for results in Knowledge::built_in().servers() {
+        for (id, twin) in key_action_pairs() {
+            assert!(
+                results.scenario(&id).is_some(),
+                "{id} is missing on {}",
+                results.server.name()
+            );
+            assert!(
+                results.scenario(&twin).is_some(),
+                "{twin} is missing on {}",
+                results.server.name()
+            );
+        }
+    }
+}
+
+#[test]
+fn every_foreign_key_action_scenario_gave_what_its_twin_gave_in_all_six_runs() {
+    // The lab's own observations: the key makes no difference to the verdict
+    // or to any of the six runs, on either server.
+    for results in Knowledge::built_in().servers() {
+        let server = results.server.name();
+        for (id, twin) in key_action_pairs() {
+            let scenario = results.scenario(&id).unwrap();
+            let twin = results.scenario(&twin).unwrap();
+            for variant in Variant::ALL {
+                assert_eq!(
+                    observation(scenario, variant),
+                    observation(twin, variant),
+                    "{id} as {variant} on {server} differs from {}",
+                    twin.id
+                );
+                assert_eq!(
+                    scenario.verdict_for(variant),
+                    twin.verdict_for(variant),
+                    "{id} as {variant} on {server} differs from {}",
+                    twin.id
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn every_foreign_key_action_scenario_is_answered_in_the_case_of_its_twin_and_is_its_evidence() {
+    for results in Knowledge::built_in().servers() {
+        let server = results.server.name();
+        for (id, twin_id) in key_action_pairs() {
+            let scenario = results.scenario(&id).unwrap();
+            let twin = results.scenario(&twin_id).unwrap();
+            let own = predict(
+                scenario,
+                Variant::SERVER_DEFAULT,
+                &server,
+                &lab_schema(scenario),
+            );
+            let theirs = predict(twin, Variant::SERVER_DEFAULT, &server, &lab_schema(twin));
+            let (
+                Prediction::Measured {
+                    case,
+                    verdict,
+                    evidence,
+                    ..
+                },
+                Prediction::Measured {
+                    case: twin_case,
+                    verdict: twin_verdict,
+                    ..
+                },
+            ) = (own, theirs)
+            else {
+                panic!("{id} or {twin_id} on {server} has no measured answer");
+            };
+            assert_eq!(case, twin_case, "{id} on {server}");
+            assert_eq!(verdict, twin_verdict, "{id} on {server}");
+            assert!(
+                evidence.contains(&id.as_str()),
+                "{id} is not in the evidence of its own answer on {server}: {evidence:?}"
+            );
+        }
+    }
+}
+
+/// `users` and `orders` as mysqldump writes them, with `orders` holding the
+/// foreign key `key` on `user_id` (a nullable column when the key sets NULL).
+fn orders_with_a_key(key: &str) -> String {
+    let nullable = if key.contains("SET NULL") {
+        "NULL"
+    } else {
+        "NOT NULL"
+    };
+    format!(
+        "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned {nullable},
+  `amount` int NOT NULL,
+  `email` varchar(255) DEFAULT NULL,
+  `note` varchar(50) DEFAULT NULL,
+  `body` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ix_amount` (`amount`),
+  KEY `fk_orders_user` (`user_id`),
+  CONSTRAINT `fk_orders_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) {key}
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+"
+    )
+}
+
+#[test]
+fn a_table_with_a_key_that_cascades_or_sets_null_keeps_the_answer_of_a_table_without_one() {
+    // The six changes that let writes continue through INPLACE on the plain
+    // tables, and the lab's twins of them, with the key in the dump. Not one
+    // is different on a table with ON DELETE CASCADE, ON DELETE SET NULL,
+    // ON UPDATE CASCADE or ON UPDATE SET NULL.
+    for key in [
+        "ON DELETE CASCADE",
+        "ON DELETE SET NULL",
+        "ON UPDATE CASCADE",
+        "ON UPDATE SET NULL",
+        "ON DELETE CASCADE ON UPDATE CASCADE",
+    ] {
+        let schema = orders_with_a_key(key);
+        for (operation, answer, evidence) in [
+            (
+                "ADD INDEX ix_email (email)",
+                INPLACE,
+                "on-delete-cascade-add-index",
+            ),
+            (
+                "ADD UNIQUE INDEX uq_email (email)",
+                INPLACE,
+                "on-delete-cascade-add-unique-index",
+            ),
+            (
+                "DROP INDEX ix_amount",
+                INPLACE,
+                "on-delete-cascade-drop-index",
+            ),
+            (
+                "MODIFY COLUMN amount INT NULL",
+                "INPLACE, rebuilds the table, writes continue",
+                "on-delete-cascade-make-column-nullable",
+            ),
+            (
+                "MODIFY COLUMN note VARCHAR(60) NULL",
+                INPLACE,
+                "on-delete-cascade-varchar-50-to-60",
+            ),
+            (
+                "DROP FOREIGN KEY fk_orders_user",
+                INPLACE,
+                "on-delete-cascade-drop-foreign-key",
+            ),
+        ] {
+            let sql = format!("ALTER TABLE orders {operation}");
+            let said = said(&schema, &sql);
+            assert_eq!(said.answer, answer, "{key}: {operation}: {:?}", said.reason);
+            assert!(
+                said.evidence.contains(&evidence),
+                "{key}: {operation}: {:?}",
+                said.evidence
+            );
+        }
+    }
+}
+
+#[test]
+fn a_table_that_another_tables_key_cascades_or_sets_null_to_keeps_the_answer_too() {
+    // order_items.order_id references orders with ON DELETE CASCADE or SET
+    // NULL: the lab measured a new nullable column (INSTANT), an index and
+    // making a column nullable on the parent.
+    for (action, nullable) in [("CASCADE", "NOT NULL"), ("SET NULL", "NULL")] {
+        let schema = format!(
+            "{}CREATE TABLE `order_items` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `order_id` bigint unsigned {nullable},
+  PRIMARY KEY (`id`),
+  KEY `fk_order_items_order` (`order_id`),
+  CONSTRAINT `fk_order_items_order` FOREIGN KEY (`order_id`) REFERENCES `orders` (`id`) \
+  ON DELETE {action}
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+",
+            orders_with_a_key("ON DELETE CASCADE")
+        );
+        for (operation, answer, evidence) in [
+            (
+                "ADD COLUMN coupon VARCHAR(255) NULL",
+                INSTANT,
+                "cascade-parent-add-nullable-column",
+            ),
+            (
+                "ADD INDEX ix_email (email)",
+                INPLACE,
+                "cascade-parent-add-index",
+            ),
+            (
+                "MODIFY COLUMN amount INT NULL",
+                "INPLACE, rebuilds the table, writes continue",
+                "cascade-parent-make-column-nullable",
+            ),
+        ] {
+            let said = said(&schema, &format!("ALTER TABLE orders {operation}"));
+            assert_eq!(
+                said.answer, answer,
+                "{action}: {operation}: {}",
+                said.reason
+            );
+            assert!(
+                said.evidence.contains(&evidence),
+                "{action}: {operation}: {:?}",
+                said.evidence
+            );
+        }
+    }
+}
+
+#[test]
+fn a_new_key_with_on_delete_cascade_set_null_or_set_default_copies_the_table_like_one_without() {
+    // $table->foreign('user_id')->references('id')->on('users')->cascadeOnDelete();
+    // ->nullOnDelete() on a nullable column; MySQL also accepts SET DEFAULT
+    // (InnoDB takes it in ADD FOREIGN KEY and in CREATE TABLE).
+    let nullable = "ALTER TABLE orders MODIFY COLUMN user_id BIGINT UNSIGNED NULL";
+    for (setup, action, evidence) in [
+        (
+            vec![],
+            "ON DELETE CASCADE",
+            "add-foreign-key-on-delete-cascade",
+        ),
+        (
+            vec![nullable],
+            "ON DELETE SET NULL",
+            "add-foreign-key-on-delete-set-null",
+        ),
+        (
+            vec![],
+            "ON DELETE SET DEFAULT",
+            "add-foreign-key-on-delete-set-default",
+        ),
+    ] {
+        let sql = format!(
+            "SET foreign_key_checks = 1;
+             ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) \
+             REFERENCES users (id) {action}"
+        );
+        let said = said(&lab_after(&setup), &sql);
+        assert_eq!(said.answer, COPY, "{action}");
+        assert!(
+            said.evidence.contains(&evidence),
+            "{action}: {:?}",
+            said.evidence
+        );
+        assert_eq!(said.case, Some("add-foreign-key"), "{action}");
+    }
+}
+
+#[test]
+fn a_new_key_with_on_delete_cascade_or_set_null_with_foreign_key_checks_off_runs_inplace() {
+    let nullable = "ALTER TABLE orders MODIFY COLUMN user_id BIGINT UNSIGNED NULL";
+    for (setup, action, evidence) in [
+        (
+            vec![],
+            "ON DELETE CASCADE",
+            "add-foreign-key-checks-off-on-delete-cascade",
+        ),
+        (
+            vec![nullable],
+            "ON DELETE SET NULL",
+            "add-foreign-key-checks-off-on-delete-set-null",
+        ),
+    ] {
+        let sql = format!(
+            "SET foreign_key_checks = 0;
+             ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) \
+             REFERENCES users (id) {action}"
+        );
+        let said = said(&lab_after(&setup), &sql);
+        assert_eq!(said.answer, INPLACE, "{action}");
+        assert!(
+            said.evidence.contains(&evidence),
+            "{action}: {:?}",
+            said.evidence
+        );
+        assert_eq!(said.case, Some("add-foreign-key-checks-off"), "{action}");
+    }
+}
+
+#[test]
+fn a_new_key_that_sets_a_not_null_column_to_null_on_delete_fails_with_1830_with_checks_on_or_off() {
+    // $table->foreignId('user_id')->constrained()->nullOnDelete() on the
+    // NOT NULL column: the lab's add-foreign-key-set-null-not-null and
+    // add-foreign-key-checks-off-set-null-not-null, in all six runs, on both
+    // servers.
+    let key = "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) \
+               REFERENCES users (id) ON DELETE SET NULL";
+    for (set, evidence) in [
+        (
+            "SET foreign_key_checks = 1;",
+            "add-foreign-key-set-null-not-null",
+        ),
+        (
+            "SET foreign_key_checks = 0;",
+            "add-foreign-key-checks-off-set-null-not-null",
+        ),
+    ] {
+        for clause in [
+            "",
+            ", ALGORITHM=INSTANT",
+            ", ALGORITHM=INPLACE",
+            ", ALGORITHM=INPLACE, LOCK=NONE",
+            ", ALGORITHM=COPY",
+            ", LOCK=NONE",
+        ] {
+            let said = said(LAB_TABLES, &format!("{set}\n{key}{clause}"));
+            assert_eq!(said.answer, FAILS_1830, "{set}{clause}");
+            assert_eq!(said.evidence, [evidence], "{set}{clause}");
+        }
+    }
+}
+
+#[test]
+fn a_key_that_fails_with_1830_leaves_the_tables_as_they_were() {
+    // The statement after a measured failure: orders is the table it was, so
+    // a new column is INSTANT, the column takes an index, and dropping it
+    // does not fail with 1828 (no key is there); the index goes with it.
+    let sql = "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) \
+               REFERENCES users (id) ON DELETE SET NULL;
+               ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;
+               ALTER TABLE orders ADD INDEX ix_user (user_id);
+               ALTER TABLE orders DROP COLUMN user_id;";
+    assert_eq!(
+        case_answers(LAB_TABLES, sql),
+        [
+            FAILS_1830,
+            INSTANT,
+            INPLACE,
+            "INPLACE, rebuilds the table, writes continue"
+        ]
+    );
+}
+
+#[test]
+fn a_key_that_sets_null_on_delete_and_is_accepted_makes_its_column_part_of_the_table() {
+    // The key on a NULL column is accepted, and dropping the column then
+    // fails with 1828 as for any other foreign key column.
+    let sql = "ALTER TABLE orders MODIFY COLUMN user_id BIGINT UNSIGNED NULL;
+               ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) \
+               REFERENCES users (id) ON DELETE SET NULL;
+               ALTER TABLE orders DROP COLUMN user_id;";
+    let answers = case_answers(LAB_TABLES, sql);
+    assert_eq!(answers[1], COPY);
+    assert_eq!(answers[2], "fails with error 1828");
+}
+
+const SET_NULL_KEY: &str = "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) \
+                            REFERENCES users (id) ON DELETE SET NULL";
+
+#[test]
+fn a_set_null_key_on_a_not_null_column_is_unknown_with_a_note_on_a_table_kilit_does_not_know() {
+    // The 1830 measurement is a candidate there: the table may have a NULL
+    // column, so the answer is not a failure, and the note says what the lab
+    // measured.
+    for (how, schema) in tables_kilit_does_not_know() {
+        for server in [MYSQL_80, MYSQL_84] {
+            let said = said_on(server, &schema, SET_NULL_KEY);
+            assert_eq!(said.answer, UNKNOWN, "{how} on {server}");
+            assert!(
+                said.has_note_with(&["fails with error 1830", "add-foreign-key-set-null-not-null"]),
+                "{how} on {server}: {:?}",
+                said.notes
+            );
+        }
+    }
+}
+
+#[test]
+fn a_set_null_key_on_a_nullable_column_has_no_1830_note() {
+    // The column is NULL, so the exception does not apply and is no note on
+    // a table kilit knows.
+    let schema = lab_after(&["ALTER TABLE orders MODIFY COLUMN user_id BIGINT UNSIGNED NULL"]);
+    let said = said(&schema, SET_NULL_KEY);
+    assert_eq!(said.answer, COPY);
+    assert!(!said.has_note_with(&["1830"]), "{:?}", said.notes);
+}
+
+#[test]
+fn a_key_that_sets_null_on_update_or_on_two_columns_or_next_to_other_changes_is_not_the_measured_shape()
+ {
+    // The lab measured one column and ON DELETE SET NULL. Anything else
+    // keeps "the lab has not measured that".
+    let two = "CREATE TABLE users (a INT NOT NULL, b INT NOT NULL, PRIMARY KEY (a, b)) \
+               ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        CREATE TABLE orders (id INT PRIMARY KEY, a INT NOT NULL, b INT NOT NULL, \
+        KEY k (a, b)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
+    for sql in [
+        "ALTER TABLE orders ADD CONSTRAINT f FOREIGN KEY (a, b) REFERENCES users (a, b) \
+         ON DELETE SET NULL",
+        "ALTER TABLE orders ADD CONSTRAINT f FOREIGN KEY (a, b) REFERENCES users (a, b) \
+         ON UPDATE SET NULL",
+    ] {
+        assert_answer("two columns", two, sql, UNKNOWN);
+    }
+    // Without the action the same key is the plain one.
+    let sql = "ALTER TABLE orders ADD CONSTRAINT f FOREIGN KEY (a, b) REFERENCES users (a, b)";
+    assert_answer("two columns, no action", two, sql, COPY);
+}
+
+#[test]
+fn making_the_column_of_a_set_null_key_not_null_is_unknown_with_1830_and_the_table_stays() {
+    // By hand on MySQL 8.0.46 and 8.4.13: MODIFY and CHANGE (also with
+    // ALGORITHM=COPY) that make the column of a SET NULL key NOT NULL fail
+    // with 1830, with ON DELETE SET NULL and with ON UPDATE SET NULL, and
+    // leave the table as it was.
+    for key in ["ON DELETE SET NULL", "ON UPDATE SET NULL"] {
+        let schema = orders_with_a_key(key);
+        for statement in [
+            "ALTER TABLE orders MODIFY COLUMN user_id BIGINT UNSIGNED NOT NULL",
+            "ALTER TABLE orders CHANGE COLUMN user_id user_id BIGINT UNSIGNED NOT NULL",
+            "ALTER TABLE orders MODIFY COLUMN user_id BIGINT UNSIGNED NOT NULL, ALGORITHM=COPY",
+        ] {
+            let sql =
+                format!("{statement};\nALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;");
+            for server in [MYSQL_80, MYSQL_84] {
+                let results = Knowledge::built_in().server(server).unwrap();
+                let findings = check(&parse(&sql), &Schema::from_dump(&schema), results);
+                match &findings[0].prediction {
+                    Prediction::Unknown { reason, .. } => assert!(
+                        reason.contains("1830"),
+                        "{server}: {key}: {statement}: {reason}"
+                    ),
+                    other => panic!("{server}: {key}: {statement}: {other:?}"),
+                }
+                // The table is as it was: the next answer is the lab's.
+                assert_eq!(
+                    b1c_answer(server, &Schema::from_dump(&schema), &sql),
+                    INSTANT,
+                    "{server}: {key}: {statement}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn making_the_column_of_a_cascade_key_not_null_is_not_refused() {
+    // By hand: the control with ON DELETE CASCADE is accepted (the table is
+    // rebuilt), so it is no 1830 and not unknown for that reason.
+    let schema = orders_with_a_key("ON DELETE CASCADE")
+        .replace("NOT NULL,\n  `amount`", "NULL,\n  `amount`");
+    let sql = "ALTER TABLE orders MODIFY COLUMN user_id BIGINT UNSIGNED NOT NULL";
+    for server in [MYSQL_80, MYSQL_84] {
+        let results = Knowledge::built_in().server(server).unwrap();
+        let findings = check(&parse(sql), &Schema::from_dump(&schema), results);
+        if let Prediction::Unknown { reason, .. } = &findings[0].prediction {
+            assert!(!reason.contains("1830"), "{server}: {reason}");
+        }
+    }
+}
+
+#[test]
+fn a_create_table_with_a_set_null_key_on_a_not_null_column_is_refused_and_loses_the_table() {
+    // By hand on MySQL 8.0.46 and 8.4.13: CREATE TABLE items with ON DELETE
+    // SET NULL or ON UPDATE SET NULL on a NOT NULL column fails with 1830 and
+    // the table is not there, also with foreign_key_checks = 0.
+    let users = "CREATE TABLE users (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, \
+                 name VARCHAR(100) NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n";
+    for (checks, action) in [
+        ("", "ON DELETE SET NULL"),
+        ("", "ON UPDATE SET NULL"),
+        ("SET foreign_key_checks = 0;\n", "ON DELETE SET NULL"),
+    ] {
+        let sql = format!(
+            "{checks}CREATE TABLE items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, \
+             user_id BIGINT UNSIGNED NOT NULL, CONSTRAINT fk_items_user FOREIGN KEY (user_id) \
+             REFERENCES users (id) {action}) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+             ALTER TABLE items ADD COLUMN coupon VARCHAR(255) NULL;"
+        );
+        for server in [MYSQL_80, MYSQL_84] {
+            let reason = b1c_reason(server, &Schema::from_sql(users), &sql);
+            assert!(
+                reason.contains("items") && reason.contains("kilit lost track of"),
+                "{server}: {action}: {reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_create_table_with_a_set_null_key_on_a_null_column_or_a_set_default_key_is_kept() {
+    // By hand: the control (SET NULL on a NULL column) and SET DEFAULT, also
+    // on a NOT NULL column with a default, are accepted by CREATE TABLE.
+    let users = "CREATE TABLE users (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, \
+                 name VARCHAR(100) NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n";
+    for (column, action) in [
+        ("user_id BIGINT UNSIGNED NULL", "ON DELETE SET NULL"),
+        ("user_id BIGINT UNSIGNED NULL", "ON DELETE SET DEFAULT"),
+        ("user_id BIGINT UNSIGNED NULL", "ON UPDATE SET DEFAULT"),
+        (
+            "user_id BIGINT UNSIGNED NOT NULL DEFAULT 1",
+            "ON DELETE SET DEFAULT",
+        ),
+    ] {
+        let sql = format!(
+            "CREATE TABLE items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, {column}, \
+             CONSTRAINT fk_items_user FOREIGN KEY (user_id) REFERENCES users (id) {action}) \
+             ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+             ALTER TABLE items ADD COLUMN coupon VARCHAR(255) NULL;"
+        );
+        let answers = case_answers(users, &sql);
+        assert_eq!(answers[1], INSTANT, "{column}, {action}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FULLTEXT on a known InnoDB DYNAMIC table: the shapes the lab measured, the
+// binary TEXT column MySQL refuses (1283), and an explicit ASC or DESC (1221).
+
+const FULLTEXT_REBUILD_WAIT: &str = "INPLACE, rebuilds the table, writes wait";
+const FULLTEXT_SECOND: &str = "INPLACE, no rebuild, writes wait";
+const FAILS_1283: &str = "fails with error 1283";
+const FAILS_1221: &str = "fails with error 1221";
+
+/// `posts` with `columns` and `options` after the closing parenthesis.
+fn posts(columns: &str, options: &str) -> String {
+    format!("CREATE TABLE `posts` (`id` int NOT NULL, {columns}, PRIMARY KEY (`id`)) {options};\n")
+}
+
+const UTF8MB4: &str = "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci";
+
+#[test]
+fn a_fulltext_index_on_one_or_two_text_columns_gets_the_lab_answer_on_a_dynamic_table() {
+    // $table->fullText('body'); $table->fullText(['title', 'body']);
+    for (columns, index) in [
+        ("`title` varchar(100) DEFAULT NULL", "`title`"),
+        ("`body` text", "`body`"),
+        ("`body` mediumtext", "`body`"),
+        ("`body` longtext", "`body`"),
+        (
+            "`title` varchar(100) DEFAULT NULL, `body` text",
+            "`title`, `body`",
+        ),
+        (
+            "`title` varchar(100), `body` varchar(200)",
+            "`title`, `body`",
+        ),
+        ("`title` text, `body` longtext", "`title`, `body`"),
+        ("`title` mediumtext, `body` varchar(10)", "`title`, `body`"),
+    ] {
+        let schema = posts(columns, UTF8MB4);
+        let sql = format!("ALTER TABLE posts ADD FULLTEXT INDEX ft ({index})");
+        let said = said(&schema, &sql);
+        assert_eq!(said.answer, FULLTEXT_REBUILD_WAIT, "{columns}");
+        assert_eq!(said.case, Some("add-fulltext-index"), "{columns}");
+        for scenario in [
+            "add-fulltext-index",
+            "add-fulltext-index-text",
+            "add-fulltext-index-mediumtext",
+            "add-fulltext-index-longtext",
+            "add-fulltext-index-two-columns",
+        ] {
+            assert!(
+                said.evidence.contains(&scenario),
+                "{columns}: {:?}",
+                said.evidence
+            );
+        }
+    }
+}
+
+#[test]
+fn a_fulltext_index_on_a_column_in_a_character_set_kilit_can_tell_is_measured_whatever_the_set() {
+    // The table's character set, or the column's own.
+    for schema in [
+        posts("`body` text", "ENGINE=InnoDB DEFAULT CHARSET=latin1"),
+        posts(
+            "`body` text CHARACTER SET latin1 COLLATE latin1_swedish_ci",
+            UTF8MB4,
+        ),
+        posts("`body` text COLLATE utf8mb4_unicode_ci", UTF8MB4),
+    ] {
+        assert_answer(
+            &schema,
+            &schema,
+            "ALTER TABLE posts ADD FULLTEXT INDEX ft (body)",
+            FULLTEXT_REBUILD_WAIT,
+        );
+    }
+}
+
+#[test]
+fn a_fulltext_index_on_a_text_column_in_the_binary_character_set_fails_with_1283() {
+    // By hand on MySQL 8.0.46 and 8.4.13: TEXT CHARACTER SET binary is a
+    // BLOB, and a table with DEFAULT CHARSET=binary makes its TEXT columns
+    // BLOBs; FULLTEXT on either is 1283.
+    for (label, schema) in [
+        (
+            "the column's set",
+            posts("`body` text CHARACTER SET binary", UTF8MB4),
+        ),
+        (
+            "the table's set",
+            posts("`body` text", "ENGINE=InnoDB DEFAULT CHARSET=binary"),
+        ),
+        (
+            "the column's set, backticks and capitals",
+            posts("`body` TEXT CHARACTER SET `BINARY` NULL", UTF8MB4),
+        ),
+    ] {
+        let said = said(&schema, "ALTER TABLE posts ADD FULLTEXT INDEX ft (body)");
+        assert_eq!(said.answer, FAILS_1283, "{label}");
+        assert_eq!(said.evidence, ["add-fulltext-index-binary-text"], "{label}");
+        assert_eq!(said.case, Some("add-fulltext-index"), "{label}");
+    }
+}
+
+#[test]
+fn a_fulltext_index_in_the_binary_character_set_fails_in_all_six_runs() {
+    let schema = posts("`body` text CHARACTER SET binary", UTF8MB4);
+    for clause in [
+        "",
+        ", ALGORITHM=INSTANT",
+        ", ALGORITHM=INPLACE",
+        ", ALGORITHM=INPLACE, LOCK=NONE",
+        ", ALGORITHM=COPY",
+        ", LOCK=NONE",
+    ] {
+        let sql = format!("ALTER TABLE posts ADD FULLTEXT INDEX ft (body){clause}");
+        assert_answer(clause, &schema, &sql, FAILS_1283);
+    }
+}
+
+#[test]
+fn a_fulltext_index_that_fails_with_1283_leaves_the_table_as_it_was() {
+    // The index is not there afterwards: the next one is the table's first
+    // (it rebuilds), not a second.
+    let schema = posts(
+        "`body` text CHARACTER SET binary, `title` varchar(50)",
+        UTF8MB4,
+    );
+    let sql = "ALTER TABLE posts ADD FULLTEXT INDEX ft (body);
+               ALTER TABLE posts ADD FULLTEXT INDEX ft2 (title);";
+    assert_eq!(
+        case_answers(&schema, sql),
+        [FAILS_1283, FULLTEXT_REBUILD_WAIT]
+    );
+}
+
+#[test]
+fn a_fulltext_index_on_a_binary_varchar_blob_or_varbinary_is_unknown_and_names_the_1283_measurement()
+ {
+    // Not measured: kilit says what was, the TEXT column in the binary set.
+    for (label, schema) in [
+        (
+            "VARCHAR in the binary set",
+            posts("`body` varchar(50) CHARACTER SET binary", UTF8MB4),
+        ),
+        (
+            "VARCHAR in a binary table",
+            posts("`body` varchar(50)", "ENGINE=InnoDB DEFAULT CHARSET=binary"),
+        ),
+        ("BLOB", posts("`body` blob", UTF8MB4)),
+        ("VARBINARY", posts("`body` varbinary(50)", UTF8MB4)),
+        (
+            "MEDIUMTEXT in the binary set",
+            posts("`body` mediumtext CHARACTER SET binary", UTF8MB4),
+        ),
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            let reason = b1c_reason(
+                server,
+                &Schema::from_sql(&schema),
+                "ALTER TABLE posts ADD FULLTEXT INDEX ft (body)",
+            );
+            assert!(
+                reason.contains("1283") && reason.contains("FULLTEXT"),
+                "{label} on {server}: {reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_fulltext_index_on_a_shape_the_lab_did_not_measure_is_unknown_on_a_dynamic_table() {
+    // CHAR, TINYTEXT, three columns, other types, and a character set kilit
+    // cannot tell (a table that writes none).
+    for (label, schema, index) in [
+        ("CHAR", posts("`code` char(10)", UTF8MB4), "code"),
+        ("TINYTEXT", posts("`body` tinytext", UTF8MB4), "body"),
+        (
+            "three columns",
+            posts("`a` varchar(10), `b` text, `c` text", UTF8MB4),
+            "a, b, c",
+        ),
+        (
+            "a VARCHAR and a CHAR",
+            posts("`a` varchar(10), `b` char(10)", UTF8MB4),
+            "a, b",
+        ),
+        ("JSON", posts("`body` json", UTF8MB4), "body"),
+        ("an integer", posts("`body` int", UTF8MB4), "body"),
+        (
+            "no character set written",
+            posts("`body` text", "ENGINE=InnoDB"),
+            "body",
+        ),
+        (
+            "no table options at all",
+            "CREATE TABLE posts (id INT PRIMARY KEY, body TEXT);".to_owned(),
+            "body",
+        ),
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            let reason = b1c_reason(
+                server,
+                &Schema::from_sql(&schema),
+                &format!("ALTER TABLE posts ADD FULLTEXT INDEX ft ({index})"),
+            );
+            assert!(
+                reason.contains("FULLTEXT") && reason.contains("measured"),
+                "{label} on {server}: {reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_fulltext_index_names_the_column_character_set_it_could_not_tell() {
+    let reason = case_reason(
+        "CREATE TABLE posts (id INT PRIMARY KEY, body TEXT);",
+        "ALTER TABLE posts ADD FULLTEXT INDEX ft (body)",
+    );
+    assert!(
+        reason.contains("posts") && reason.contains("character set"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn a_second_fulltext_index_takes_the_same_shapes() {
+    // The table has a FULLTEXT index on `title`.
+    let with_ft = |columns: &str, options: &str| {
+        format!(
+            "CREATE TABLE `posts` (`id` int NOT NULL, `title` varchar(100), {columns}, \
+             PRIMARY KEY (`id`), FULLTEXT KEY `ft_title` (`title`)) {options};\n"
+        )
+    };
+    for (columns, index) in [
+        ("`body` varchar(50)", "body"),
+        ("`body` text", "body"),
+        ("`body` longtext", "body"),
+        ("`body` text", "title, body"),
+    ] {
+        let schema = with_ft(columns, UTF8MB4);
+        assert_answer(
+            columns,
+            &schema,
+            &format!("ALTER TABLE posts ADD FULLTEXT INDEX ft2 ({index})"),
+            FULLTEXT_SECOND,
+        );
+    }
+    for (label, columns, index, options) in [
+        ("CHAR", "`body` char(10)", "body", UTF8MB4),
+        (
+            "three columns",
+            "`b` text, `c` text",
+            "title, b, c",
+            UTF8MB4,
+        ),
+        ("no character set", "`body` text", "body", "ENGINE=InnoDB"),
+    ] {
+        let schema = with_ft(columns, options);
+        assert_answer(
+            label,
+            &schema,
+            &format!("ALTER TABLE posts ADD FULLTEXT INDEX ft2 ({index})"),
+            UNKNOWN,
+        );
+    }
+}
+
+#[test]
+fn a_fulltext_index_on_a_table_kilit_does_not_know_still_makes_writes_wait_and_notes_1283() {
+    // Whatever the shape, every table it may be makes writes wait: no
+    // --schema, a lost table, and 1283 is one thing the column may bring.
+    for (how, schema) in tables_kilit_does_not_know() {
+        for index in ["note", "note, email", "note, email, id"] {
+            let said = said(
+                &schema,
+                &format!("ALTER TABLE orders ADD FULLTEXT INDEX ft ({index})"),
+            );
+            assert_eq!(
+                said.answer, "depends on the table: writes wait",
+                "{how}: {index}"
+            );
+            if !index.contains(',') {
+                assert!(
+                    said.has_note_with(&[
+                        "fails with error 1283",
+                        "add-fulltext-index-binary-text"
+                    ]),
+                    "{how}: {index}: {:?}",
+                    said.notes
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn myisam_and_row_format_tables_without_a_character_set_stay_unknown_for_fulltext() {
+    // By decision: the character set of a column that names none cannot be
+    // told, whatever the engine or the row format.
+    for options in [
+        "ENGINE=MyISAM",
+        "ENGINE=InnoDB ROW_FORMAT=COMPACT",
+        "ENGINE=InnoDB ROW_FORMAT=COMPRESSED",
+        "ENGINE=InnoDB ROW_FORMAT=REDUNDANT",
+        "ENGINE=InnoDB ROW_FORMAT=DYNAMIC",
+    ] {
+        let schema = posts("`body` text", options);
+        assert_answer(
+            options,
+            &schema,
+            "ALTER TABLE posts ADD FULLTEXT INDEX ft (body)",
+            UNKNOWN,
+        );
+    }
+    // With a character set the MyISAM table has its measured answer.
+    let schema = posts("`body` text", "ENGINE=MyISAM DEFAULT CHARSET=utf8mb4");
+    assert_answer(
+        "MyISAM with a set",
+        &schema,
+        "ALTER TABLE posts ADD FULLTEXT INDEX ft (body)",
+        "COPY, copies every row, writes wait",
+    );
+}
+
+#[test]
+fn an_explicit_asc_or_desc_in_a_fulltext_index_fails_with_1221_in_all_six_runs() {
+    // $table->rawIndex() is not FULLTEXT, but a hand-written migration can:
+    // MySQL refuses any written order on a FULLTEXT key part.
+    for order in ["ASC", "DESC", "desc", "Asc"] {
+        for clause in [
+            "",
+            ", ALGORITHM=INSTANT",
+            ", ALGORITHM=INPLACE",
+            ", ALGORITHM=INPLACE, LOCK=NONE",
+            ", ALGORITHM=COPY",
+            ", LOCK=NONE",
+        ] {
+            let sql = format!(
+                "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note {order}){clause}"
+            );
+            let said = said(LAB_TABLES, &sql);
+            assert_eq!(said.answer, FAILS_1221, "{sql}");
+            assert_eq!(
+                said.evidence,
+                ["add-fulltext-index-desc", "add-fulltext-index-asc"],
+                "{sql}"
+            );
+            assert_eq!(said.case, Some("add-fulltext-index-with-order"), "{sql}");
+        }
+    }
+    for form in [
+        "ALTER TABLE orders ADD FULLTEXT KEY ft (note DESC)",
+        "ALTER TABLE `orders` ADD FULLTEXT `ft` (`note` DESC)",
+        "alter table orders add fulltext index ft (note desc)",
+    ] {
+        assert_answer(form, LAB_TABLES, form, FAILS_1221);
+    }
+}
+
+#[test]
+fn an_ordered_fulltext_index_fails_with_1221_on_every_kind_of_table() {
+    // The error comes from the statement alone: by hand on MySQL 8.0.46 and
+    // 8.4.13 a MyISAM and a COMPACT table refuse it alike, so a table kilit
+    // does not know, and a new table, get it too.
+    let sql = "ALTER TABLE orders ADD FULLTEXT INDEX ft (note DESC)";
+    for options in [
+        "ENGINE=MyISAM DEFAULT CHARSET=utf8mb4",
+        "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=COMPACT",
+        "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=COMPRESSED",
+        "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=REDUNDANT",
+        "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC",
+    ] {
+        let schema =
+            format!("CREATE TABLE orders (id INT PRIMARY KEY, note VARCHAR(50)) {options};");
+        let said = said(&schema, sql);
+        assert_eq!(said.answer, FAILS_1221, "{options}");
+        assert_eq!(
+            said.case,
+            Some("add-fulltext-index-with-order"),
+            "{options}"
+        );
+    }
+    // A table kilit lost, one it never saw (no --schema), and a new table.
+    for (how, schema) in tables_kilit_does_not_know() {
+        let said = said(&schema, sql);
+        assert_eq!(said.answer, FAILS_1221, "{how}");
+    }
+    let created = "CREATE TABLE orders (id INT PRIMARY KEY, note VARCHAR(50));";
+    assert_eq!(
+        case_answers("", &format!("{created}\n{sql};")),
+        ["not checked", FAILS_1221]
+    );
+}
+
+#[test]
+fn an_ordered_fulltext_index_on_a_table_the_dump_lacks_is_unknown() {
+    // The dump decides: a table it does not have is not there, so not even a
+    // failure from the statement alone is given.
+    let schema = Schema::from_dump(LAB_TABLES);
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(
+            b1c_answer(
+                server,
+                &schema,
+                "ALTER TABLE nosuch ADD FULLTEXT INDEX ft (note DESC)"
+            ),
+            UNKNOWN,
+            "{server}"
+        );
+    }
+}
+
+#[test]
+fn an_ordered_fulltext_index_notes_what_was_measured_where() {
+    let said = said(
+        "CREATE TABLE orders (id INT PRIMARY KEY, note VARCHAR(50)) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4;",
+        "ALTER TABLE orders ADD FULLTEXT INDEX ft (note DESC)",
+    );
+    assert!(
+        said.has_note_with(&["MyISAM", "COMPACT"]),
+        "{:?}",
+        said.notes
+    );
+}
+
+#[test]
+fn a_fulltext_index_that_fails_with_1221_leaves_the_table_as_it_was() {
+    // The ordered form is refused and not followed: the next FULLTEXT index
+    // is the table's first, so it rebuilds the table.
+    let sql = "ALTER TABLE orders ADD FULLTEXT INDEX ft_a (note DESC);
+               ALTER TABLE orders ADD FULLTEXT INDEX ft_b (note);
+               ALTER TABLE orders ADD FULLTEXT INDEX ft_c (email);";
+    assert_eq!(
+        case_answers(LAB_TABLES, sql),
+        [FAILS_1221, FULLTEXT_REBUILD_WAIT, FULLTEXT_SECOND]
+    );
+}
+
+#[test]
+fn a_column_named_desc_or_asc_is_no_order_on_a_fulltext_key_part() {
+    let schema = "CREATE TABLE orders (id INT PRIMARY KEY, `desc` VARCHAR(50), `asc` VARCHAR(50)) \
+                  ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
+    for sql in [
+        "ALTER TABLE orders ADD FULLTEXT INDEX ft (`desc`)",
+        "ALTER TABLE orders ADD FULLTEXT INDEX ft (`asc`)",
+        "ALTER TABLE orders ADD FULLTEXT INDEX ft (`desc`, `asc`)",
+        "alter table `orders` add fulltext `orders_desc_fulltext`(`desc`)",
+    ] {
+        assert_answer(sql, schema, sql, FULLTEXT_REBUILD_WAIT);
+    }
+}
+
+#[test]
+fn a_btree_or_plain_index_with_desc_keeps_its_answer() {
+    // By hand on MySQL 8.0.46 and 8.4.13: DESC with USING BTREE, or on a plain
+    // key, is accepted.
+    for sql in [
+        "ALTER TABLE orders ADD INDEX ib (amount DESC) USING BTREE",
+        "ALTER TABLE orders ADD INDEX ib (amount DESC)",
+        "ALTER TABLE orders ADD INDEX ib (amount ASC)",
+        "ALTER TABLE orders ADD UNIQUE INDEX uq (email DESC)",
+        "CREATE INDEX ib ON orders (amount DESC)",
+    ] {
+        let answer = case_last_answer(LAB_TABLES, sql);
+        assert!(answer == INPLACE || answer == UNKNOWN, "{sql}: {answer}");
+        assert_ne!(answer, FAILS_1221, "{sql}");
+    }
+    assert_answer(
+        "btree",
+        LAB_TABLES,
+        "ALTER TABLE orders ADD INDEX ib (amount DESC) USING BTREE",
+        INPLACE,
+    );
+}
+
+#[test]
+fn an_ordered_spatial_or_hash_index_is_unknown_and_names_1221_and_is_not_followed() {
+    // By hand on MySQL 8.0.46 and 8.4.13: SPATIAL (p DESC) and USING HASH
+    // with ASC or DESC are 1221 too.
+    let schema = "CREATE TABLE g (id INT PRIMARY KEY, p POINT NOT NULL SRID 0, a INT) \
+                  ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
+    for sql in [
+        "ALTER TABLE g ADD SPATIAL INDEX sp (p DESC)",
+        "ALTER TABLE g ADD SPATIAL INDEX sp (p ASC)",
+        "ALTER TABLE g ADD INDEX ih (a DESC) USING HASH",
+        "ALTER TABLE g ADD INDEX ih (a ASC) USING HASH",
+        "ALTER TABLE g ADD INDEX ih USING HASH (a DESC)",
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            let reason = b1c_reason(server, &Schema::from_sql(schema), sql);
+            assert!(reason.contains("1221"), "{server}: {sql}: {reason}");
+        }
+        // Not followed: the next index of the same name is not a repeat.
+        let twice = format!("{sql};\n{sql};");
+        let reasons: Vec<String> = [MYSQL_80, MYSQL_84]
+            .iter()
+            .map(|server| b1c_reason(server, &Schema::from_sql(schema), &twice))
+            .collect();
+        for reason in reasons {
+            assert!(reason.contains("1221"), "{sql}: {reason}");
+        }
+    }
+}
+
+#[test]
+fn create_fulltext_index_with_an_order_or_on_a_binary_text_column_is_unknown_with_the_error_and_not_followed()
+ {
+    // By hand on MySQL 8.0.46 and 8.4.13: CREATE FULLTEXT INDEX (note DESC) is
+    // 1221, and on a binary TEXT column 1283; the table stays as it was.
+    let binary = posts(
+        "`body` text CHARACTER SET binary, `title` varchar(50)",
+        UTF8MB4,
+    );
+    for (schema, create, code, next) in [
+        (
+            LAB_TABLES.to_owned(),
+            "CREATE FULLTEXT INDEX ft_a ON orders (note DESC)",
+            "1221",
+            "ALTER TABLE orders ADD FULLTEXT INDEX ft_b (note)",
+        ),
+        (
+            LAB_TABLES.to_owned(),
+            "CREATE FULLTEXT INDEX ft_a ON orders (note ASC)",
+            "1221",
+            "ALTER TABLE orders ADD FULLTEXT INDEX ft_b (note)",
+        ),
+        (
+            binary,
+            "CREATE FULLTEXT INDEX ft_a ON posts (body)",
+            "1283",
+            "ALTER TABLE posts ADD FULLTEXT INDEX ft_b (title)",
+        ),
+    ] {
+        for server in [MYSQL_80, MYSQL_84] {
+            let sql = format!("{create};\n{next};");
+            let schema = Schema::from_sql(&schema);
+            let results = Knowledge::built_in().server(server).unwrap();
+            let findings = check(&parse(&sql), &schema, results);
+            match &findings[0].prediction {
+                Prediction::Unknown { reason, .. } => {
+                    assert!(reason.contains(code), "{server}: {create}: {reason}");
+                }
+                other => panic!("{server}: {create}: {other:?}"),
+            }
+            // The table has no FULLTEXT index, so the next one rebuilds it.
+            assert_eq!(
+                b1c_answer(server, &schema, &sql),
+                FULLTEXT_REBUILD_WAIT,
+                "{server}: {create}"
+            );
+        }
+    }
+}
+
+#[test]
+fn create_fulltext_index_on_a_measured_shape_is_still_unknown_and_followed() {
+    // Regression: the statement itself is not measured, but MySQL runs it as
+    // the ALTER, so the table has the index afterwards.
+    let sql = "CREATE FULLTEXT INDEX ft_a ON orders (note);
+               ALTER TABLE orders ADD FULLTEXT INDEX ft_b (email);";
+    for server in [MYSQL_80, MYSQL_84] {
+        let schema = Schema::from_sql(LAB_TABLES);
+        let results = Knowledge::built_in().server(server).unwrap();
+        let findings = check(&parse(sql), &schema, results);
+        assert!(matches!(findings[0].prediction, Prediction::Unknown { .. }));
+        assert_eq!(
+            b1c_answer(server, &schema, sql),
+            FULLTEXT_SECOND,
+            "{server}"
+        );
+    }
+}
+
+#[test]
+fn a_create_table_with_a_refused_fulltext_spatial_or_hash_key_loses_the_table() {
+    // By hand on MySQL 8.0.46 and 8.4.13: FULLTEXT (note DESC) and
+    // (note ASC) are 1221, also on MyISAM; FULLTEXT on a binary TEXT column
+    // (the column's set or the table's) is 1283; SPATIAL (p DESC) and
+    // KEY (a DESC) USING HASH are 1221. None creates the table.
+    for create in [
+        "CREATE TABLE t (id INT PRIMARY KEY, note VARCHAR(50), FULLTEXT KEY f (note DESC)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        "CREATE TABLE t (id INT PRIMARY KEY, note VARCHAR(50), FULLTEXT KEY f (note ASC)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        "CREATE TABLE t (id INT PRIMARY KEY, note VARCHAR(50), FULLTEXT KEY f (note DESC)) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4",
+        "CREATE TABLE t (id INT PRIMARY KEY, body TEXT CHARACTER SET binary NULL, FULLTEXT KEY f (body)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        "CREATE TABLE t (id INT PRIMARY KEY, body TEXT NULL, FULLTEXT KEY f (body)) ENGINE=InnoDB DEFAULT CHARSET=binary",
+        "CREATE TABLE t (id INT PRIMARY KEY, p POINT NOT NULL SRID 0, SPATIAL KEY sp (p DESC)) ENGINE=InnoDB",
+        "CREATE TABLE t (id INT PRIMARY KEY, a INT, KEY ih (a DESC) USING HASH) ENGINE=InnoDB",
+    ] {
+        let sql = format!("{create};\nALTER TABLE t ADD COLUMN x TINYINT NULL;");
+        for server in [MYSQL_80, MYSQL_84] {
+            let reason = b1c_reason(server, &Schema::from_sql(""), &sql);
+            assert!(
+                reason.contains("kilit lost track of t"),
+                "{server}: {create}: {reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_create_table_with_an_accepted_fulltext_or_ordered_btree_key_is_kept() {
+    // The controls of the hand tests: FULLTEXT without an order, a BTREE
+    // index with DESC, and a plain KEY (a DESC).
+    for create in [
+        "CREATE TABLE t (id INT PRIMARY KEY, note VARCHAR(50), FULLTEXT KEY f (note)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        "CREATE TABLE t (id INT PRIMARY KEY, a INT, KEY ib (a DESC) USING BTREE) ENGINE=InnoDB",
+        "CREATE TABLE t (id INT PRIMARY KEY, a INT, KEY ib (a DESC)) ENGINE=InnoDB",
+    ] {
+        let sql = format!("{create};\nALTER TABLE t ADD COLUMN x TINYINT NULL;");
+        let answers = case_answers("", &sql);
+        // A FULLTEXT index turns a new column into a copy.
+        let expected = if create.contains("FULLTEXT") {
+            COPY
+        } else {
+            INSTANT
+        };
+        assert_eq!(answers[1], expected, "{create}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Settings named in a `/*! */` comment that kilit leaves out: MySQL runs the
+// text of such a comment (by hand on MySQL 8.0.46 and 8.4.13, the mysql
+// client sends it), so from its line on kilit no longer trusts the setting.
+
+const FOREIGN_KEY_ON_USER: &str = "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY \
+                                   (user_id) REFERENCES users (id)";
+const UUID_COLUMN: &str = "ALTER TABLE orders ADD COLUMN token CHAR(36) NOT NULL DEFAULT (UUID())";
+const OVER_LONG: &str = "ALTER TABLE orders ADD COLUMN big VARCHAR(70000) NULL";
+const NEXT_COLUMN: &str = "ALTER TABLE orders ADD COLUMN c INT NULL";
+
+/// The answers to each statement of `sql` on both servers (the same on both,
+/// or the test fails).
+fn answers_of(schema: &str, sql: &str) -> Vec<String> {
+    case_answers(schema, sql)
+}
+
+#[test]
+fn a_sql_mode_set_in_a_left_out_comment_makes_an_over_long_varchar_lose_the_table() {
+    // By hand on MySQL 8.0.46 and 8.4.13: after a strict SET, `/*!40101 SET
+    // SQL_MODE='' */;` makes VARCHAR(70000) a MEDIUMTEXT, so the table is
+    // not what kilit follows.
+    let strict = "SET sql_mode = 'STRICT_TRANS_TABLES';";
+    // The control: no comment, strict mode, 1074 and the table is unchanged.
+    assert_eq!(
+        answers_of(
+            LAB_TABLES,
+            &format!("{strict}\n{OVER_LONG};\n{NEXT_COLUMN};")
+        ),
+        ["not checked", UNKNOWN, INSTANT]
+    );
+    for comment in [
+        "/*!40101 SET SQL_MODE='' */;",
+        "/*!40101 SET sql_mode = 'NO_ENGINE_SUBSTITUTION' */;",
+        "/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;",
+        "/*!40101 SET SQL_MODE=@OLD_SQL_MODE */;",
+    ] {
+        let sql = format!("{strict}\n{comment}\n{OVER_LONG};\n{NEXT_COLUMN};");
+        for server in [MYSQL_80, MYSQL_84] {
+            let reason = b1c_reason(server, &Schema::from_sql(LAB_TABLES), &sql);
+            assert!(
+                reason.contains("orders") && reason.contains("kilit lost track of"),
+                "{server}: {comment}: {reason}"
+            );
+            assert!(
+                reason.contains("line 2 runs a /*! */ comment that names sql_mode")
+                    && reason.contains("kilit does not read such comments"),
+                "{server}: {comment}: {reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_left_out_comment_after_the_over_long_column_does_not_change_that_statement() {
+    // The comment comes later: the strict SET is still the setting the
+    // statement runs under, so the table is unchanged.
+    let sql = format!(
+        "SET sql_mode = 'STRICT_TRANS_TABLES';\n{OVER_LONG};\n/*!40101 SET SQL_MODE='' */;\n{NEXT_COLUMN};"
+    );
+    assert_eq!(
+        answers_of(LAB_TABLES, &sql),
+        ["not checked", UNKNOWN, INSTANT]
+    );
+}
+
+#[test]
+fn foreign_key_checks_set_in_a_left_out_comment_makes_a_new_key_unknown() {
+    // By hand: `/*!40014 SET FOREIGN_KEY_CHECKS=0 */;` then ADD FOREIGN KEY is
+    // INPLACE, so kilit's COPY (checks on) would be wrong.
+    for comment in [
+        "/*!40014 SET FOREIGN_KEY_CHECKS=0 */;",
+        "/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;",
+        "/*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;",
+        "/*!40014 set foreign_key_checks=1 */;",
+    ] {
+        let sql = format!("{comment}\n{FOREIGN_KEY_ON_USER};");
+        for server in [MYSQL_80, MYSQL_84] {
+            let reason = b1c_reason(server, &Schema::from_sql(LAB_TABLES), &sql);
+            assert!(
+                reason.contains("line 1 runs a /*! */ comment that names foreign_key_checks")
+                    && reason.contains("kilit does not read such comments"),
+                "{server}: {comment}: {reason}"
+            );
+        }
+    }
+    // The control: the same key without the comment copies the table.
+    assert_eq!(
+        answers_of(LAB_TABLES, &format!("{FOREIGN_KEY_ON_USER};")),
+        [COPY]
+    );
+}
+
+#[test]
+fn a_statement_before_a_left_out_comment_keeps_its_answer() {
+    // From its line on: the key before the comment runs with checks on.
+    let sql =
+        format!("{FOREIGN_KEY_ON_USER};\n/*!40014 SET FOREIGN_KEY_CHECKS=0 */;\n{NEXT_COLUMN};");
+    let answers = answers_of(LAB_TABLES, &sql);
+    assert_eq!(answers[0], COPY);
+    assert_eq!(answers[1], INSTANT);
+}
+
+#[test]
+fn the_mysqldump_trailer_after_the_last_statement_changes_no_answer() {
+    // mysqldump ends a file with lines that restore the settings; they run
+    // after the last statement, not before it.
+    for trailer in [
+        "/*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;",
+        "/*!40101 SET SQL_MODE=@OLD_SQL_MODE */;",
+        "/*!40101 SET SQL_MODE=@OLD_SQL_MODE */;\n/*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;",
+    ] {
+        assert_eq!(
+            answers_of(LAB_TABLES, &format!("{FOREIGN_KEY_ON_USER};\n{trailer}\n")),
+            [COPY],
+            "{trailer}"
+        );
+        assert_eq!(
+            answers_of(LAB_TABLES, &format!("{NEXT_COLUMN};\n{trailer}\n")),
+            [INSTANT],
+            "{trailer}"
+        );
+    }
+}
+
+#[test]
+fn a_set_that_reads_foreign_key_checks_again_after_the_comment_makes_the_key_known_again() {
+    // A SET kilit can read after the comment fixes the setting.
+    let sql = format!(
+        "/*!40014 SET FOREIGN_KEY_CHECKS=0 */;\nSET foreign_key_checks = 1;\n{FOREIGN_KEY_ON_USER};"
+    );
+    let answers = answers_of(LAB_TABLES, &sql);
+    assert_eq!(
+        answers.last().map(String::as_str),
+        Some(COPY),
+        "{answers:?}"
+    );
+}
+
+#[test]
+fn sql_log_bin_set_in_a_left_out_comment_makes_the_binary_log_failures_unknown() {
+    // The 1674 failures depend on the binary log being on.
+    assert_eq!(
+        answers_of(LAB_TABLES, &format!("{UUID_COLUMN};")),
+        [FAILS_1674]
+    );
+    for comment in [
+        "/*!80000 SET @@SESSION.SQL_LOG_BIN= 0 */;",
+        "/*!32312 SET @OLD_SQL_LOG_BIN=@@SQL_LOG_BIN, SQL_LOG_BIN=0 */;",
+        "/*!80000 SET sql_log_bin = 1 */;",
+    ] {
+        let sql = format!("{comment}\n{UUID_COLUMN};");
+        for server in [MYSQL_80, MYSQL_84] {
+            let reason = b1c_reason(server, &Schema::from_sql(LAB_TABLES), &sql);
+            assert!(
+                reason.contains("sql_log_bin") && reason.contains("/*! */"),
+                "{server}: {comment}: {reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn old_alter_table_set_in_a_left_out_comment_makes_every_later_alter_unknown() {
+    // With it ON MySQL copies the table.
+    assert_eq!(
+        answers_of(LAB_TABLES, &format!("{NEXT_COLUMN};")),
+        [INSTANT]
+    );
+    let sql = format!("{NEXT_COLUMN};\n/*!80000 SET old_alter_table = ON */;\n{NEXT_COLUMN};");
+    for server in [MYSQL_80, MYSQL_84] {
+        let reason = b1c_reason(server, &Schema::from_sql(LAB_TABLES), &sql);
+        assert!(
+            reason.contains("line 2 runs a /*! */ comment that names old_alter_table"),
+            "{server}: {reason}"
+        );
+    }
+    // What ran before keeps its answer.
+    assert_eq!(answers_of(LAB_TABLES, &sql)[0], INSTANT);
+}
+
+#[test]
+fn restrict_fk_on_non_standard_key_set_in_a_left_out_comment_makes_the_index_rules_unknown() {
+    // The plain index on users.name: 1822 on 8.0.46, 6125 on 8.4.13 as
+    // measured; named, the server no longer decides in a way kilit can tell.
+    let setup = lab_after(&[OC_NAME, "ALTER TABLE users ADD INDEX idx_users_name (name)"]);
+    let key = format!("ALTER TABLE orders {NAME}");
+    let [on_80, on_84] = on_both(&setup, &format!("{key};"));
+    assert_eq!([on_80.as_str(), on_84.as_str()], [COPY, FAILS_6125]);
+    for comment in [
+        "/*!80019 SET restrict_fk_on_non_standard_key = OFF */;",
+        "/*!80019 SET SESSION restrict_fk_on_non_standard_key=0 */;",
+    ] {
+        assert_eq!(
+            on_both(&setup, &format!("{comment}\n{key};")),
+            [UNKNOWN, UNKNOWN],
+            "{comment}"
+        );
+    }
+}
+
+#[test]
+fn binlog_format_set_in_a_left_out_comment_makes_the_expression_defaults_unknown() {
+    // The lab measured 1674 with binlog_format = ROW.
+    for comment in [
+        "/*!50000 SET binlog_format = 'STATEMENT' */;",
+        "/*!50000 SET SESSION binlog_format=MIXED */;",
+    ] {
+        assert_eq!(
+            answers_of(LAB_TABLES, &format!("{comment}\n{UUID_COLUMN};"))
+                .last()
+                .map(String::as_str),
+            Some(UNKNOWN),
+            "{comment}"
+        );
+    }
+}
+
+#[test]
+fn row_format_strict_mode_and_engine_settings_in_a_left_out_comment_are_named_like_a_set() {
+    let create = "CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, amount INT NOT NULL, \
+                  email VARCHAR(255) NULL) DEFAULT CHARSET=utf8mb4";
+    // innodb_default_row_format: every table without a ROW_FORMAT is unknown.
+    assert_eq!(
+        answers_of(
+            LAB_TABLES,
+            &format!("/*!80000 SET GLOBAL innodb_default_row_format = COMPACT */;\n{NEXT_COLUMN};")
+        ),
+        [UNKNOWN]
+    );
+    // innodb_strict_mode: a table created after it.
+    assert_eq!(
+        answers_of(
+            "",
+            &format!("/*!80000 SET innodb_strict_mode = OFF */;\n{create};\nALTER TABLE t ADD COLUMN c INT NULL;")
+        )
+        .last()
+        .map(String::as_str),
+        Some(UNKNOWN)
+    );
+    // default_storage_engine and default_tmp_storage_engine.
+    assert_eq!(
+        answers_of(
+            "",
+            &format!("/*!40101 SET default_storage_engine = MyISAM */;\n{create};\nALTER TABLE t ADD COLUMN c INT NULL;")
+        )
+        .last()
+        .map(String::as_str),
+        Some(UNKNOWN)
+    );
+    assert_eq!(
+        answers_of(
+            "",
+            "/*!80000 SET default_tmp_storage_engine = MyISAM */;
+             CREATE TEMPORARY TABLE tt (id INT, email VARCHAR(255)) DEFAULT CHARSET=utf8mb4;
+             ALTER TABLE tt ADD INDEX ie (email);"
+        )
+        .last()
+        .map(String::as_str),
+        Some(UNKNOWN)
+    );
+    // Created before the comment: today's answer.
+    assert_eq!(
+        answers_of(
+            "",
+            &format!("{create};\n/*!80000 SET innodb_strict_mode = OFF */;\nALTER TABLE t ADD COLUMN c INT NULL;")
+        )
+        .last()
+        .map(String::as_str),
+        Some(INSTANT)
+    );
+}
+
+#[test]
+fn a_left_out_comment_that_names_no_followed_setting_changes_nothing() {
+    // The lines of a mysqldump header that set nothing kilit follows.
+    let header = "/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+/*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;
+/*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;
+/*!50503 SET NAMES utf8mb4 */;
+/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */;
+/*!40103 SET TIME_ZONE='+00:00' */;
+/*!40014 SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0 */;
+/*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;
+";
+    let statements = format!(
+        "{FOREIGN_KEY_ON_USER};\n{NEXT_COLUMN};\n{UUID_COLUMN};\n{OVER_LONG};\n{NEXT_COLUMN};"
+    );
+    let without = answers_of(LAB_TABLES, &statements);
+    assert_eq!(
+        answers_of(LAB_TABLES, &format!("{header}{statements}")),
+        without
+    );
+    // Between the statements too.
+    let between = format!(
+        "{FOREIGN_KEY_ON_USER};\n{header}{NEXT_COLUMN};\n{header}{UUID_COLUMN};\n{OVER_LONG};\n{header}{NEXT_COLUMN};"
+    );
+    assert_eq!(answers_of(LAB_TABLES, &between), without);
+}
+
+#[test]
+fn a_mysqldump_header_in_the_schema_file_changes_no_answer() {
+    // The schema file is not a session: its comments set nothing.
+    let header =
+        "/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;
+/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
+";
+    let dump = format!("{header}{LAB_TABLES}");
+    for server in [MYSQL_80, MYSQL_84] {
+        let results = Knowledge::built_in().server(server).unwrap();
+        let findings = check(
+            &parse(&format!("{FOREIGN_KEY_ON_USER};\n{UUID_COLUMN};")),
+            &Schema::from_dump(&dump),
+            results,
+        );
+        assert!(
+            matches!(
+                &findings[0].prediction,
+                Prediction::Measured { verdict, .. } if verdict.to_string() == COPY
+            ),
+            "{server}: {:?}",
+            findings[0].prediction
+        );
+    }
+}
+
+#[test]
+fn a_global_setting_in_a_left_out_comment_is_unclear_in_the_files_after_it() {
+    // SET GLOBAL (and PERSIST) outlast the session: the next input file
+    // starts with the setting unclear too. A session setting does not.
+    let schema = Schema::from_sql(LAB_TABLES);
+    for (comment, later, global_unknown) in [
+        (
+            "/*!40014 SET GLOBAL foreign_key_checks = 0 */;",
+            FOREIGN_KEY_ON_USER,
+            true,
+        ),
+        (
+            "/*!80000 SET PERSIST foreign_key_checks = 0 */;",
+            FOREIGN_KEY_ON_USER,
+            true,
+        ),
+        (
+            "/*!40014 SET FOREIGN_KEY_CHECKS=0 */;",
+            FOREIGN_KEY_ON_USER,
+            false,
+        ),
+        ("/*!80000 SET GLOBAL sql_log_bin = 0 */;", UUID_COLUMN, true),
+        ("/*!80000 SET sql_log_bin = 0 */;", UUID_COLUMN, false),
+        (
+            "/*!80000 SET GLOBAL old_alter_table = ON */;",
+            NEXT_COLUMN,
+            true,
+        ),
+        (
+            "/*!80000 SET PERSIST old_alter_table = ON */;",
+            NEXT_COLUMN,
+            true,
+        ),
+        ("/*!80000 SET old_alter_table = ON */;", NEXT_COLUMN, false),
+    ] {
+        let first = parse(&format!("{comment}\nSELECT 1;"));
+        let second = parse(&format!("{later};"));
+        for server in [MYSQL_80, MYSQL_84] {
+            let results = Knowledge::built_in().server(server).unwrap();
+            let findings = check_sessions(&[&first, &second], &schema, results);
+            let last = &findings.last().unwrap().prediction;
+            let unknown = matches!(last, Prediction::Unknown { .. });
+            assert_eq!(unknown, global_unknown, "{server}: {comment}: {last:?}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Columns at the limits of their type and of the row, by hand on MySQL
+// 8.0.46 and 8.4.13 in strict mode and with sql_mode = '': a row past 65,535
+// bytes is refused (1118); a column longer than its type is refused in strict
+// mode (1074) and made a TEXT or BLOB type in the other modes.
+
+/// What MySQL did with `ALTER TABLE orders ADD COLUMN c <definition> NULL` on
+/// the lab's `orders`, in strict mode and with sql_mode = ''.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AddedColumn {
+    /// Error 1118: the row is too large.
+    RowTooLarge,
+    /// Accepted.
+    Accepted,
+    /// Error 1074 in strict mode, the column made another type otherwise.
+    TooLongForItsType,
+    /// Error 1074 in every mode.
+    TooLongInEveryMode,
+}
+
+const ADD_COLUMN_LIMITS: [(&str, AddedColumn); 12] = [
+    (
+        "VARCHAR(16383) CHARACTER SET utf8mb4",
+        AddedColumn::RowTooLarge,
+    ),
+    (
+        "VARCHAR(16384) CHARACTER SET utf8mb4",
+        AddedColumn::TooLongForItsType,
+    ),
+    (
+        "VARCHAR(65532) CHARACTER SET latin1",
+        AddedColumn::RowTooLarge,
+    ),
+    (
+        "VARCHAR(65533) CHARACTER SET latin1",
+        AddedColumn::RowTooLarge,
+    ),
+    (
+        "VARCHAR(65535) CHARACTER SET latin1",
+        AddedColumn::RowTooLarge,
+    ),
+    (
+        "VARCHAR(65536) CHARACTER SET latin1",
+        AddedColumn::TooLongForItsType,
+    ),
+    ("VARBINARY(65532)", AddedColumn::RowTooLarge),
+    ("VARBINARY(65533)", AddedColumn::RowTooLarge),
+    ("VARBINARY(65535)", AddedColumn::RowTooLarge),
+    ("VARBINARY(65536)", AddedColumn::TooLongForItsType),
+    ("BINARY(255)", AddedColumn::Accepted),
+    ("BINARY(256)", AddedColumn::TooLongInEveryMode),
+];
+
+#[test]
+fn an_added_column_at_the_limits_is_refused_changed_or_accepted_as_mysql_does() {
+    for (mode, strict) in [
+        ("SET sql_mode = 'STRICT_TRANS_TABLES';\n", true),
+        ("SET sql_mode = '';\n", false),
+    ] {
+        for (definition, outcome) in ADD_COLUMN_LIMITS {
+            let sql =
+                format!("{mode}ALTER TABLE orders ADD COLUMN c {definition} NULL;\n{NEXT_COLUMN};");
+            for server in [MYSQL_80, MYSQL_84] {
+                let results = Knowledge::built_in().server(server).unwrap();
+                let findings = check(&parse(&sql), &Schema::from_sql(LAB_TABLES), results);
+                let (first, second) = (&findings[1].prediction, &findings[2].prediction);
+                let label = format!("{server}, strict {strict}: {definition}");
+                match outcome {
+                    AddedColumn::RowTooLarge => {
+                        assert!(
+                            matches!(
+                                first,
+                                Prediction::Measured {
+                                    verdict: Verdict::Fails { code: 1118, .. },
+                                    ..
+                                }
+                            ),
+                            "{label}: {first:?}"
+                        );
+                        // The table is as it was.
+                        assert!(
+                            matches!(second, Prediction::Measured { .. }),
+                            "{label}: {second:?}"
+                        );
+                    }
+                    AddedColumn::Accepted => {
+                        assert!(
+                            matches!(first, Prediction::Measured { verdict, .. }
+                                if verdict.to_string() == INSTANT),
+                            "{label}: {first:?}"
+                        );
+                    }
+                    AddedColumn::TooLongForItsType | AddedColumn::TooLongInEveryMode => {
+                        assert!(
+                            matches!(first, Prediction::Unknown { .. }),
+                            "{label}: {first:?}"
+                        );
+                        let changed = outcome == AddedColumn::TooLongForItsType && !strict;
+                        match second {
+                            Prediction::Unknown { reason, .. } if changed => assert!(
+                                reason.contains("kilit lost track of orders"),
+                                "{label}: {reason}"
+                            ),
+                            Prediction::Measured { verdict, .. } if !changed => {
+                                assert_eq!(verdict.to_string(), INSTANT, "{label}");
+                            }
+                            other => panic!("{label}: {other:?}"),
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Which of the three CREATE TABLE forms MySQL accepted for a column: the
+/// column alone and NULL, alone and NOT NULL, and NULL next to a BIGINT
+/// primary key.
+const CREATE_TABLE_LIMITS: [(&str, [bool; 3]); 12] = [
+    ("VARCHAR(16383) CHARACTER SET utf8mb4", [true, true, false]),
+    (
+        "VARCHAR(16384) CHARACTER SET utf8mb4",
+        [false, false, false],
+    ),
+    ("VARCHAR(65532) CHARACTER SET latin1", [true, true, false]),
+    ("VARCHAR(65533) CHARACTER SET latin1", [false, true, false]),
+    ("VARCHAR(65535) CHARACTER SET latin1", [false, false, false]),
+    ("VARCHAR(65536) CHARACTER SET latin1", [false, false, false]),
+    ("VARBINARY(65532)", [true, true, false]),
+    ("VARBINARY(65533)", [false, true, false]),
+    ("VARBINARY(65535)", [false, false, false]),
+    ("VARBINARY(65536)", [false, false, false]),
+    ("BINARY(255)", [true, true, true]),
+    ("BINARY(256)", [false, false, false]),
+];
+
+#[test]
+fn a_create_table_at_the_limits_keeps_the_table_mysql_makes_and_loses_the_one_it_refuses() {
+    for session in [
+        "",
+        "SET sql_mode = 'STRICT_TRANS_TABLES';\n",
+        "SET sql_mode = '';\n",
+    ] {
+        for (definition, accepted) in CREATE_TABLE_LIMITS {
+            for (form, kept) in [
+                (format!("CREATE TABLE t (c {definition} NULL)"), accepted[0]),
+                (
+                    format!("CREATE TABLE t (c {definition} NOT NULL)"),
+                    accepted[1],
+                ),
+                (
+                    format!(
+                        "CREATE TABLE t (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, c {definition} NULL)"
+                    ),
+                    accepted[2],
+                ),
+            ] {
+                let sql = format!(
+                    "{session}{form} ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n\
+                     ALTER TABLE t ADD COLUMN x TINYINT NULL;"
+                );
+                for server in [MYSQL_80, MYSQL_84] {
+                    let results = Knowledge::built_in().server(server).unwrap();
+                    let findings = check(&parse(&sql), &Schema::from_sql(""), results);
+                    let last = &findings.last().unwrap().prediction;
+                    let lost = matches!(last, Prediction::Unknown { reason, .. }
+                        if reason.contains("kilit lost track of t"));
+                    assert_eq!(!lost, kept, "{server}: {session}{form}: {last:?}");
+                }
+            }
+        }
+    }
+}
+
+/// The scenarios whose statement MySQL refuses, with the error the lab saw in
+/// every run.
+const REFUSED_SCENARIOS: [(&str, u16); 5] = [
+    ("add-foreign-key-set-null-not-null", 1830),
+    ("add-foreign-key-checks-off-set-null-not-null", 1830),
+    ("add-fulltext-index-binary-text", 1283),
+    ("add-fulltext-index-desc", 1221),
+    ("add-fulltext-index-asc", 1221),
+];
+
+#[test]
+fn the_lab_saw_the_refusals_in_every_run_on_both_servers_and_accepted_set_default() {
+    for results in Knowledge::built_in().servers() {
+        let server = results.server.name();
+        for (id, error) in REFUSED_SCENARIOS {
+            let scenario = results
+                .scenario(id)
+                .unwrap_or_else(|| panic!("{id} on {server}"));
+            for variant in Variant::ALL {
+                assert!(
+                    matches!(
+                        scenario.verdict_for(variant),
+                        Some(Verdict::Fails { code, .. }) if code == error
+                    ),
+                    "{id} as {variant} on {server}: {:?}",
+                    scenario.verdict_for(variant)
+                );
+            }
+        }
+        // SET DEFAULT is accepted by MySQL 8.0.46 and 8.4.13: it copies the
+        // table as the plain key does.
+        let set_default = results
+            .scenario("add-foreign-key-on-delete-set-default")
+            .unwrap();
+        let plain = results.scenario("add-foreign-key").unwrap();
+        for variant in Variant::ALL {
+            assert_eq!(
+                set_default.verdict_for(variant),
+                plain.verdict_for(variant),
+                "{variant} on {server}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Step B1d: answers on foreign keys, FULLTEXT indexes and statements that
+// MySQL refuses as a whole. The facts come from hand tests on MySQL 8.0.46
+// and 8.4.13 (the same on both) and from the lab's own results; the shapes
+// and the errors are named in each test.
+
+/// What kilit says about the last statement of `statements`, run in order
+/// on `schema`: the same on both servers, or the test fails.
+fn said_in_order(schema: &str, statements: &[&str]) -> Said {
+    let sql: String = statements
+        .iter()
+        .map(|statement| format!("{statement};\n"))
+        .collect();
+    said(schema, &sql)
+}
+
+/// What kilit says about the last of `statements` when the statement at
+/// `without` is left out.
+fn said_in_order_without(schema: &str, statements: &[&str], without: usize) -> Said {
+    let kept: Vec<&str> = statements
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| *at != without)
+        .map(|(_, statement)| *statement)
+        .collect();
+    said_in_order(schema, &kept)
+}
+
+const B1D_MODIFY_NULL: &str = "ALTER TABLE orders MODIFY COLUMN user_id BIGINT UNSIGNED NULL";
+const B1D_SET_NULL_KEY: &str = "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY \
+                                   (user_id) REFERENCES users (id) ON DELETE SET NULL";
+const B1D_SET_NULL_KEY_AGAIN: &str = "ALTER TABLE orders ADD CONSTRAINT fk_again FOREIGN KEY \
+                                         (user_id) REFERENCES users (id) ON DELETE SET NULL";
+
+#[test]
+fn a_modify_not_null_beside_the_drop_of_the_set_null_key_makes_the_column_not_null() {
+    // By hand on MySQL 8.0.46 and 8.4.13: with the key dropped in the
+    // same ALTER, MODIFY user_id ... NOT NULL is accepted (rebuilt, no rows
+    // copied), the table then shows user_id NOT NULL with the key's index
+    // left, and DROP COLUMN user_id is accepted too (rebuilt), not 1828.
+    for modify in [
+        "ALTER TABLE orders DROP FOREIGN KEY fk_orders_user, MODIFY user_id BIGINT UNSIGNED NOT NULL",
+        "ALTER TABLE orders MODIFY user_id BIGINT UNSIGNED NOT NULL, DROP FOREIGN KEY fk_orders_user",
+    ] {
+        let drop_column = "ALTER TABLE orders DROP COLUMN user_id";
+        let said = said_in_order(
+            LAB_TABLES,
+            &[B1D_MODIFY_NULL, B1D_SET_NULL_KEY, modify, drop_column],
+        );
+        assert_ne!(said.answer, FAILS_1828, "{modify}");
+        assert_eq!(
+            said.answer, "INPLACE, rebuilds the table, writes continue",
+            "{modify}"
+        );
+        // The column is NOT NULL now: a SET NULL key on it fails with 1830, as
+        // on the lab's own NOT NULL column (a NOT NULL column gave 1830).
+        let said = said_in_order(
+            LAB_TABLES,
+            &[
+                B1D_MODIFY_NULL,
+                B1D_SET_NULL_KEY,
+                modify,
+                B1D_SET_NULL_KEY_AGAIN,
+            ],
+        );
+        assert_eq!(said.answer, FAILS_1830, "{modify}");
+    }
+}
+
+#[test]
+fn a_modify_not_null_that_mysql_refuses_with_1830_leaves_the_column_nullable() {
+    // By hand (the table after the refusals): MODIFY, CHANGE and
+    // MODIFY with ALGORITHM=COPY on the column of a SET NULL key fail with
+    // 1830, and the table shows user_id DEFAULT NULL. With the key dropped,
+    // a new SET NULL key on user_id is accepted, so
+    // it copies the table; it would be 1830 if the column had become NOT NULL.
+    for modify in [
+        "ALTER TABLE orders MODIFY COLUMN user_id BIGINT UNSIGNED NOT NULL",
+        "ALTER TABLE orders CHANGE COLUMN user_id user_id BIGINT UNSIGNED NOT NULL",
+        "ALTER TABLE orders MODIFY COLUMN user_id BIGINT UNSIGNED NOT NULL, ALGORITHM=COPY",
+    ] {
+        let said = said_in_order(
+            LAB_TABLES,
+            &[
+                B1D_MODIFY_NULL,
+                B1D_SET_NULL_KEY,
+                modify,
+                "ALTER TABLE orders DROP FOREIGN KEY fk_orders_user",
+                B1D_SET_NULL_KEY_AGAIN,
+            ],
+        );
+        assert_eq!(said.answer, COPY, "{modify}");
+    }
+}
+
+#[test]
+fn a_modify_to_utf8mb4_beside_a_fulltext_index_on_a_binary_text_column_is_followed() {
+    // By hand: body TEXT CHARACTER SET binary refuses a FULLTEXT index
+    // (1283), but MODIFY body TEXT CHARACTER SET utf8mb4 with ADD FULLTEXT in
+    // the same ALTER is accepted, and a second FULLTEXT index on body is
+    // accepted without a rebuild (rebuilt 0, no rows copied).
+    let statements = [
+        "ALTER TABLE orders ADD COLUMN body TEXT CHARACTER SET binary NULL",
+        "ALTER TABLE orders MODIFY body TEXT CHARACTER SET utf8mb4 NULL, ADD FULLTEXT INDEX ft_body (body)",
+        "ALTER TABLE orders ADD FULLTEXT INDEX ft_body2 (body)",
+    ];
+    let second = said_in_order(LAB_TABLES, &statements);
+    assert_ne!(second.answer, FAILS_1283);
+    assert_eq!(second.answer, FULLTEXT_SECOND);
+    // The first ALTER does not fail either.
+    let first = said_in_order(LAB_TABLES, &statements[..2]);
+    assert!(!first.answer.starts_with("fails"), "{}", first.answer);
+}
+
+#[test]
+fn an_index_or_a_table_named_hash_with_desc_is_not_a_hash_index() {
+    // By hand on both servers: ADD INDEX hash (amount DESC) on orders,
+    // CREATE TABLE hash, ALTER TABLE hash ADD INDEX ic (c DESC) and CREATE
+    // INDEX ic2 ON hash (c DESC, id) are accepted (rebuilt 0, no rows copied).
+    let statements = [
+        "ALTER TABLE orders ADD INDEX hash (amount DESC)",
+        "CREATE TABLE hash (id INT PRIMARY KEY, c INT)",
+        "ALTER TABLE hash ADD INDEX ic (c DESC)",
+        "CREATE INDEX ic2 ON hash (c DESC, id)",
+        "ALTER TABLE orders ADD COLUMN zz INT NULL",
+    ];
+    assert_eq!(said_in_order(LAB_TABLES, &statements[..1]).answer, INPLACE);
+    assert_eq!(said_in_order(LAB_TABLES, &statements[..3]).answer, INPLACE);
+    // CREATE INDEX is followed and not measured on its own: unknown, but the
+    // reason is not the 1221 of a hash index.
+    let create_index = said_in_order(LAB_TABLES, &statements[..4]);
+    assert!(
+        create_index.answer == INPLACE || create_index.answer == UNKNOWN,
+        "{}",
+        create_index.answer
+    );
+    assert!(
+        !create_index.reason.contains("1221"),
+        "{}",
+        create_index.reason
+    );
+    // The same ALTER in the last place: the table is as the lab has it.
+    assert_eq!(said_in_order(LAB_TABLES, &statements).answer, INSTANT);
+}
+
+#[test]
+fn a_hash_index_with_desc_is_still_unknown_and_names_1221_also_when_it_is_named_hash() {
+    // By hand: USING HASH with ASC or DESC is 1221 (spatial/fulltext/hash
+    // index and explicit index order).
+    for statement in [
+        "ALTER TABLE orders ADD INDEX hash (amount DESC) USING HASH",
+        "ALTER TABLE orders ADD INDEX ih (amount DESC) USING HASH",
+    ] {
+        let said = said_in_order(LAB_TABLES, &[statement]);
+        assert_eq!(said.answer, UNKNOWN, "{statement}");
+        assert!(said.reason.contains("1221"), "{statement}: {}", said.reason);
+    }
+}
+
+#[test]
+fn a_create_table_if_not_exists_of_a_known_table_with_a_refused_key_leaves_the_table_known() {
+    // By hand: CREATE TABLE IF NOT EXISTS orders (... FULLTEXT (note
+    // DESC)) is 1221 and orders is as it was (SHOW CREATE TABLE unchanged);
+    // the same with a SET NULL key on a NOT NULL column is accepted with note
+    // 1050, and orders is unchanged. A FULLTEXT index followed into the table
+    // would turn the next ADD COLUMN into a COPY.
+    let add_column = "ALTER TABLE orders ADD COLUMN zz INT NULL";
+    for create in [
+        "CREATE TABLE IF NOT EXISTS orders (id INT PRIMARY KEY, note VARCHAR(50), FULLTEXT (note DESC))",
+        "CREATE TABLE IF NOT EXISTS orders (id INT PRIMARY KEY, uid INT NOT NULL, \
+         FOREIGN KEY (uid) REFERENCES users (id) ON DELETE SET NULL)",
+    ] {
+        let said = said_in_order(LAB_TABLES, &[create, add_column]);
+        assert_eq!(said.answer, INSTANT, "{create}");
+    }
+    let said = said_in_order(
+        LAB_TABLES,
+        &[
+            "CREATE TABLE IF NOT EXISTS users (id INT PRIMARY KEY, note VARCHAR(50), FULLTEXT (note DESC))",
+            "ALTER TABLE users ADD COLUMN zz INT NULL",
+        ],
+    );
+    let control = said_in_order(LAB_TABLES, &["ALTER TABLE users ADD COLUMN zz INT NULL"]);
+    assert_eq!(said.answer, control.answer);
+    assert_eq!(said.answer, INSTANT);
+}
+
+#[test]
+fn a_refused_create_temporary_table_leaves_the_base_table_known() {
+    // The FULLTEXT (note DESC) key is 1221 in any CREATE TABLE, so no
+    // temporary orders exists and the ALTER is for the base table, which has
+    // no FULLTEXT index.
+    let said = said_in_order(
+        LAB_TABLES,
+        &[
+            "CREATE TEMPORARY TABLE orders (id INT PRIMARY KEY, note VARCHAR(50), FULLTEXT (note DESC))",
+            "ALTER TABLE orders ADD COLUMN zz INT NULL",
+        ],
+    );
+    assert_eq!(said.answer, INSTANT);
+}
+
+#[test]
+fn a_myisam_table_with_a_set_null_key_on_a_not_null_column_is_kept() {
+    // By hand: MyISAM takes the key clause and ignores it, so the table
+    // is made (SHOW CREATE TABLE shows the plain KEY). The lab's
+    // myisam-add-nullable-column is a COPY.
+    let said = said_in_order(
+        LAB_TABLES,
+        &[
+            "CREATE TABLE mo2 (id INT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, \
+             FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE SET NULL) ENGINE=MyISAM",
+            "ALTER TABLE mo2 ADD COLUMN zz INT NULL",
+        ],
+    );
+    assert_eq!(said.answer, COPY, "{}", said.reason);
+}
+
+#[test]
+fn a_create_table_with_a_varbinary_past_its_type_gives_the_over_long_column_reason() {
+    // By hand (under a non-strict sql_mode): under sql_mode = '' VARBINARY(65536) and
+    // VARCHAR(70000) become BLOB and TEXT types (note 1246) in CREATE TABLE
+    // with or without a primary key, NULL or NOT NULL; it is no row too large.
+    for definition in [
+        "c VARBINARY(65536) NULL",
+        "c VARBINARY(65536) NOT NULL",
+        "id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, c VARBINARY(65536) NULL",
+        "c VARCHAR(70000) CHARACTER SET latin1 NULL",
+    ] {
+        let sql = format!(
+            "SET sql_mode = '';\nCREATE TABLE t ({definition}) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n\
+             ALTER TABLE t ADD COLUMN x TINYINT NULL;"
+        );
+        let reason = case_reason("", &sql);
+        assert!(
+            reason.contains("kilit lost track of t"),
+            "{definition}: {reason}"
+        );
+        assert!(
+            reason.contains("longer than its type holds")
+                || reason.contains("more than its type holds"),
+            "{definition}: {reason}"
+        );
+        assert!(!reason.contains("1118"), "{definition}: {reason}");
+    }
+}
+
+const B1D_VIRTUAL_COLUMN: &str = "ALTER TABLE orders ADD COLUMN v VARCHAR(50) AS (note) VIRTUAL";
+const B1D_STORED_COLUMN: &str = "ALTER TABLE orders ADD COLUMN s VARCHAR(50) AS (note) STORED";
+const B1D_NEXT_COLUMN: &str = "ALTER TABLE orders ADD COLUMN zz INT NULL";
+
+#[test]
+fn a_fulltext_index_on_a_virtual_generated_column_is_unknown_with_3106_and_not_followed() {
+    // By hand: 3106 in all six variants, on both servers.
+    for variant in Variant::ALL {
+        let statement = format!(
+            "ALTER TABLE orders ADD FULLTEXT INDEX fv (v){}",
+            variant.clause()
+        );
+        let said = said_in_order(LAB_TABLES, &[B1D_VIRTUAL_COLUMN, &statement]);
+        assert_eq!(said.answer, UNKNOWN, "{variant}");
+        assert!(said.reason.contains("3106"), "{variant}: {}", said.reason);
+    }
+    // The index is not there: the next column is the answer without the
+    // statement, not the COPY a FULLTEXT index would give.
+    let statements = [
+        B1D_VIRTUAL_COLUMN,
+        "ALTER TABLE orders ADD FULLTEXT INDEX fv (v)",
+        B1D_NEXT_COLUMN,
+    ];
+    let said = said_in_order(LAB_TABLES, &statements);
+    assert_ne!(said.answer, COPY);
+    assert_eq!(
+        said.answer,
+        said_in_order_without(LAB_TABLES, &statements, 1).answer
+    );
+    assert_eq!(said.answer, INSTANT);
+}
+
+#[test]
+fn a_create_table_with_a_fulltext_index_on_a_virtual_generated_column_loses_the_table() {
+    // By hand: CREATE TABLE gv (... g ... VIRTUAL, FULLTEXT (g))
+    // fails with 3106 and the table is not made.
+    let said = said_in_order(
+        "",
+        &[
+            "CREATE TABLE gv (id INT PRIMARY KEY, note VARCHAR(50), \
+             g VARCHAR(50) AS (note) VIRTUAL, FULLTEXT (g)) DEFAULT CHARSET=utf8mb4",
+            "ALTER TABLE gv ADD COLUMN x INT NULL",
+        ],
+    );
+    assert_eq!(said.answer, UNKNOWN);
+    assert!(
+        said.reason.contains("kilit lost track of gv"),
+        "{}",
+        said.reason
+    );
+}
+
+#[test]
+fn a_fulltext_index_on_a_stored_generated_column_is_unknown_and_followed() {
+    // By hand: STORED is accepted (a rebuild to add
+    // FTS_DOC_ID) in ALTER and in CREATE TABLE. The lab has not measured the
+    // shape, so the answer is unknown, and the index is on the table.
+    let statements = [
+        B1D_STORED_COLUMN,
+        "ALTER TABLE orders ADD FULLTEXT INDEX fs (s)",
+        B1D_NEXT_COLUMN,
+    ];
+    let said = said_in_order(LAB_TABLES, &statements[..2]);
+    assert_eq!(said.answer, UNKNOWN);
+    assert!(said.reason.contains("not been measured"), "{}", said.reason);
+    // A FULLTEXT index on the table makes the next column a COPY.
+    assert_eq!(said_in_order(LAB_TABLES, &statements).answer, COPY);
+    assert_ne!(
+        said_in_order_without(LAB_TABLES, &statements, 1).answer,
+        COPY
+    );
+    // CREATE TABLE is accepted: the table is kept, with the index.
+    let said = said_in_order(
+        "",
+        &[
+            "CREATE TABLE gs (id INT PRIMARY KEY, note VARCHAR(50), \
+             g VARCHAR(50) AS (note) STORED, FULLTEXT (g)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+            "ALTER TABLE gs ADD COLUMN x INT NULL",
+        ],
+    );
+    assert!(!said.reason.contains("kilit lost track"), "{}", said.reason);
+}
+
+#[test]
+fn a_fulltext_index_on_a_utf16_utf16le_utf32_or_ucs2_column_is_unknown_and_not_followed() {
+    // By hand: 1283 for VARCHAR and TEXT columns in these
+    // character sets, in ALTER and in CREATE TABLE (no table is made).
+    for (column, character_set) in [
+        ("VARCHAR(50)", "utf16"),
+        ("VARCHAR(50)", "utf32"),
+        ("VARCHAR(50)", "ucs2"),
+        ("TEXT", "utf16"),
+        ("TEXT", "utf16le"),
+        ("TEXT", "utf32"),
+        ("TEXT", "ucs2"),
+    ] {
+        let add_column =
+            format!("ALTER TABLE orders ADD COLUMN c1 {column} CHARACTER SET {character_set} NULL");
+        let statements = [
+            add_column.as_str(),
+            "ALTER TABLE orders ADD FULLTEXT INDEX f1 (c1)",
+            B1D_NEXT_COLUMN,
+        ];
+        let said = said_in_order(LAB_TABLES, &statements[..2]);
+        assert_eq!(said.answer, UNKNOWN, "{column} {character_set}");
+        // Not followed: the next column is not the COPY of a FULLTEXT index.
+        let next = said_in_order(LAB_TABLES, &statements);
+        assert_ne!(next.answer, COPY, "{column} {character_set}");
+        assert_eq!(
+            next.answer,
+            said_in_order_without(LAB_TABLES, &statements, 1).answer,
+            "{column} {character_set}"
+        );
+        // CREATE TABLE: no table.
+        let create = format!(
+            "CREATE TABLE tx (id INT PRIMARY KEY, c1 {column} CHARACTER SET {character_set}, \
+             FULLTEXT (c1)) ENGINE=InnoDB"
+        );
+        let said = said_in_order(
+            "",
+            &[create.as_str(), "ALTER TABLE tx ADD COLUMN x INT NULL"],
+        );
+        assert_eq!(said.answer, UNKNOWN, "{create}");
+        assert!(
+            said.reason.contains("kilit lost track of tx"),
+            "{create}: {}",
+            said.reason
+        );
+    }
+}
+
+#[test]
+fn a_foreign_key_that_sets_null_on_update_on_a_not_null_column_is_unknown_and_not_followed() {
+    // By hand: ON UPDATE SET NULL and ON DELETE SET NULL ON
+    // UPDATE CASCADE on the NOT NULL user_id are 1830, and DROP COLUMN user_id
+    // is then accepted (not 1828). Kilit has not measured these shapes.
+    let drop_column = "ALTER TABLE orders DROP COLUMN user_id";
+    let control = said_in_order(LAB_TABLES, &[drop_column]);
+    assert_ne!(control.answer, FAILS_1828);
+    for key in ["ON UPDATE SET NULL", "ON DELETE SET NULL ON UPDATE CASCADE"] {
+        let add_key = format!(
+            "ALTER TABLE orders ADD CONSTRAINT fk_u FOREIGN KEY (user_id) REFERENCES users (id) {key}"
+        );
+        let said = said_in_order(LAB_TABLES, &[add_key.as_str()]);
+        assert_eq!(said.answer, UNKNOWN, "{key}");
+        let dropped = said_in_order(LAB_TABLES, &[add_key.as_str(), drop_column]);
+        assert_ne!(dropped.answer, FAILS_1828, "{key}");
+        assert_eq!(dropped.answer, control.answer, "{key}");
+    }
+    // ON DELETE SET NULL alone keeps its measured failure.
+    let said = said_in_order(LAB_TABLES, &[B1D_SET_NULL_KEY]);
+    assert_eq!(said.answer, FAILS_1830);
+}
+
+#[test]
+fn a_global_setting_in_the_trailer_of_a_file_is_unclear_in_the_next_file() {
+    // mysqldump's last lines run after the last statement. By hand on MySQL 8.0.46
+    // and 8.4.13: /*!40014 SET GLOBAL FOREIGN_KEY_CHECKS=0 */ makes the next session see
+    // 0, where adding a key does not copy the table; a session setting ends
+    // with its session. The last statement of the first file keeps its
+    // answer either way.
+    let schema = Schema::from_sql(LAB_TABLES);
+    for (trailer, later_is_unknown) in [
+        ("/*!40014 SET GLOBAL FOREIGN_KEY_CHECKS=0 */;", true),
+        ("/*!80000 SET PERSIST foreign_key_checks = 0 */;", true),
+        (
+            "/*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;",
+            false,
+        ),
+        ("/*!40014 SET FOREIGN_KEY_CHECKS=0 */;", false),
+    ] {
+        let first = parse(&format!("{NEXT_COLUMN};\n{trailer}\n"));
+        let second = parse(&format!("{FOREIGN_KEY_ON_USER};"));
+        for server in [MYSQL_80, MYSQL_84] {
+            let results = Knowledge::built_in().server(server).unwrap();
+            let findings = check_sessions(&[&first, &second], &schema, results);
+            assert_eq!(findings.len(), 2);
+            match &findings[0].prediction {
+                Prediction::Measured { verdict, .. } => {
+                    assert_eq!(verdict.to_string(), INSTANT, "{server}: {trailer}");
+                }
+                other => panic!("{server}: {trailer}: {other:?}"),
+            }
+            match &findings[1].prediction {
+                Prediction::Unknown { .. } => {
+                    assert!(later_is_unknown, "{server}: {trailer}: unknown")
+                }
+                Prediction::Measured { verdict, .. } => {
+                    assert!(!later_is_unknown, "{server}: {trailer}: {verdict}");
+                    assert_eq!(verdict.to_string(), COPY, "{server}: {trailer}");
+                }
+                other => panic!("{server}: {trailer}: {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn a_comment_that_makes_a_setting_unclear_names_the_output_line_under_pretend() {
+    // Laravel prints a statement on one line, so a comment's "line" in a
+    // reason is the line of the statement in the output, not a line inside
+    // the statement's text.
+    let key = "alter table `orders` add constraint `orders_user_id_foreign` foreign key \
+               (`user_id`) references `users` (`id`)";
+    let comment = "/*!40014 SET FOREIGN_KEY_CHECKS=0 */";
+    let results = Knowledge::built_in().server(MYSQL_84).unwrap();
+    for printed in [
+        // The comment before the key's first word: the key's own line.
+        vec![
+            "alter table `orders` add `c` int null".to_owned(),
+            format!("{comment} {key}"),
+        ],
+        // The comment after the last statement of its line: that line.
+        vec![
+            format!("alter table `orders` add `c` int null; {comment}"),
+            key.to_owned(),
+        ],
+    ] {
+        let statements: Vec<&str> = printed.iter().map(String::as_str).collect();
+        let output = pretend("2026_01_01_000000_add_things", &statements);
+        let expected = output
+            .lines()
+            .position(|line| line.contains(comment))
+            .unwrap()
+            + 1;
+        assert!(expected > 4, "{output}");
+        let pretend = read_pretend(&output).expect("the output of migrate --pretend");
+        let all: Vec<Statement> = pretend
+            .migrations
+            .into_iter()
+            .flat_map(|migration| migration.statements)
+            .collect();
+        let findings = check(&all, &Schema::from_sql(LAB_TABLES), results);
+        assert_eq!(findings.len(), 2, "{output}");
+        let Prediction::Unknown { reason, .. } = &findings[1].prediction else {
+            panic!("{output}: {:?}", findings[1].prediction);
+        };
+        assert!(
+            reason.contains(&format!("line {expected} runs a /*! */ comment")),
+            "expected line {expected}: {reason}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Step B1d, refusals: a refusal is judged on the table as the whole
+// ALTER leaves it. Each shape was run by hand on MySQL 8.0.46 and 8.4.13
+// (the same on both): the ALTER that MySQL refuses changes nothing, and the
+// ALTER that it accepts changes the table as all its clauses say.
+
+const TWO_SET_NULL_KEYS: &str = "CREATE TABLE ch (id INT PRIMARY KEY, uid BIGINT UNSIGNED NULL, \
+     CONSTRAINT fk_a FOREIGN KEY (uid) REFERENCES users (id) ON DELETE SET NULL, \
+     CONSTRAINT fk_b FOREIGN KEY (uid) REFERENCES users (id) ON UPDATE SET NULL)";
+const UNNAMED_SET_NULL_KEY: &str = "CREATE TABLE ch (id INT PRIMARY KEY, \
+     uid BIGINT UNSIGNED NULL, \
+     FOREIGN KEY (uid) REFERENCES users (id) ON DELETE SET NULL)";
+const DROP_UID: &str = "ALTER TABLE ch DROP COLUMN uid";
+
+#[test]
+fn a_refused_modify_not_null_beside_the_drop_of_one_of_two_set_null_keys_leaves_both_keys() {
+    // Two SET NULL keys on uid; one ALTER drops fk_a and makes uid NOT NULL.
+    // MySQL refuses it with 1830 (fk_b still needs a NULL column), so fk_a is
+    // still there: after DROP FOREIGN KEY fk_b, DROP COLUMN uid fails 1828
+    // (needed in fk_a).
+    let refused = "ALTER TABLE ch DROP FOREIGN KEY fk_a, MODIFY uid BIGINT UNSIGNED NOT NULL";
+    let drop_fk_b = "ALTER TABLE ch DROP FOREIGN KEY fk_b";
+    let said = said_in_order(
+        LAB_TABLES,
+        &[TWO_SET_NULL_KEYS, refused, drop_fk_b, DROP_UID],
+    );
+    assert_eq!(said.answer, FAILS_1828);
+    // The refused ALTER itself is not answered as a measured success.
+    let refused_said = said_in_order(LAB_TABLES, &[TWO_SET_NULL_KEYS, refused]);
+    assert_eq!(refused_said.answer, "unknown");
+}
+
+#[test]
+fn an_unnamed_set_null_key_dropped_by_its_name_beside_a_modify_loses_the_table() {
+    // MySQL names the key ch_ibfk_1 and accepts both ALTERs below (the table
+    // then has uid NOT NULL, the key gone, its index left), and DROP COLUMN
+    // uid is accepted. kilit does not give names to unnamed keys, so it
+    // loses the table: unknown, never "fails with error 1828".
+    for drop in ["DROP FOREIGN KEY ch_ibfk_1", "DROP CONSTRAINT ch_ibfk_1"] {
+        let alter = format!("ALTER TABLE ch {drop}, MODIFY uid BIGINT UNSIGNED NOT NULL");
+        let said = said_in_order(LAB_TABLES, &[UNNAMED_SET_NULL_KEY, &alter, DROP_UID]);
+        assert_ne!(said.answer, FAILS_1828, "{drop}");
+        assert_eq!(said.answer, "unknown", "{drop}");
+        assert!(
+            said.reason.contains("lost track of ch"),
+            "{drop}: {}",
+            said.reason
+        );
+    }
+}
+
+#[test]
+fn a_refused_modify_not_null_beside_a_new_set_null_key_leaves_the_table_as_it_was() {
+    // MODIFY uid ... NOT NULL plus ADD a SET NULL key on uid in one ALTER:
+    // 1830, nothing changes (no key, uid still NULL). DROP COLUMN uid after
+    // it is answered as on the table without the key, not 1828.
+    let create = "CREATE TABLE ch (id INT PRIMARY KEY, uid BIGINT UNSIGNED NULL)";
+    let refused = "ALTER TABLE ch MODIFY uid BIGINT UNSIGNED NOT NULL, ADD CONSTRAINT fk_u \
+                   FOREIGN KEY (uid) REFERENCES users (id) ON DELETE SET NULL";
+    let said = said_in_order(LAB_TABLES, &[create, refused, DROP_UID]);
+    let without_the_key = said_in_order(LAB_TABLES, &[create, DROP_UID]);
+    assert_ne!(said.answer, FAILS_1828);
+    assert_eq!(said, without_the_key);
+}
+
+#[test]
+fn a_refused_add_not_null_column_beside_a_new_set_null_key_adds_no_column() {
+    // ADD COLUMN uid ... NOT NULL plus a SET NULL key on it: 1830, so the
+    // table has no uid. DROP COLUMN uid after it is 1091 on the server; the
+    // lab never measured that, so kilit says unknown, not 1828.
+    let create = "CREATE TABLE ch (id INT PRIMARY KEY)";
+    let refused = "ALTER TABLE ch ADD COLUMN uid BIGINT UNSIGNED NOT NULL, ADD CONSTRAINT fk_u \
+                   FOREIGN KEY (uid) REFERENCES users (id) ON DELETE SET NULL";
+    let said = said_in_order(LAB_TABLES, &[create, refused, DROP_UID]);
+    assert_ne!(said.answer, FAILS_1828);
+    assert_eq!(said.answer, "unknown");
+}
+
+#[test]
+fn a_refused_fulltext_index_on_a_new_binary_text_column_adds_neither_column_nor_index() {
+    // ADD COLUMN b TEXT CHARACTER SET binary plus ADD FULLTEXT (b): 1283, so
+    // there is no column b and no index. ADD COLUMN b INT after it is
+    // accepted, and it is the plain add-column answer (no FULLTEXT index on
+    // the table).
+    let binary_text = "ALTER TABLE orders ADD COLUMN b TEXT CHARACTER SET binary NULL, \
+                       ADD FULLTEXT INDEX fb (b)";
+    let add_b = "ALTER TABLE orders ADD COLUMN b INT NULL";
+    let said = said_in_order(LAB_TABLES, &[binary_text, add_b]);
+    let control = said_in_order(LAB_TABLES, &[add_b]);
+    assert_eq!(said.case, Some("add-column"));
+    assert_eq!(said.answer, INSTANT);
+    assert_eq!(said, control);
+}
+
+#[test]
+fn dropping_and_adding_back_a_binary_text_column_with_a_fulltext_index_loses_the_table() {
+    // bin is TEXT CHARACTER SET binary. DROP COLUMN bin, ADD COLUMN bin TEXT
+    // (utf8mb4), ADD FULLTEXT (bin) in one ALTER is accepted by MySQL (hand
+    // test), but it names bin in two clauses beside a FULLTEXT index, which
+    // MySQL may refuse: kilit cannot tell whether it ran and loses the table.
+    // The later ADD FULLTEXT gets the lost-table answer (depends on the
+    // table: writes wait), never a failure or a measured FULLTEXT answer.
+    let statements = [
+        "ALTER TABLE orders ADD COLUMN bin TEXT CHARACTER SET binary NULL",
+        "ALTER TABLE orders DROP COLUMN bin, ADD COLUMN bin TEXT NULL, \
+         ADD FULLTEXT INDEX fb (bin)",
+        "ALTER TABLE orders ADD FULLTEXT INDEX fn (note)",
+    ];
+    let said = said_in_order(LAB_TABLES, &statements);
+    assert_eq!(
+        said.answer, "depends on the table: writes wait",
+        "{}",
+        said.reason
+    );
+    assert!(!said.answer.contains("fails"));
+    assert!(
+        said.reason.contains(
+            "in two of its clauses, which MySQL takes against the names before the statement"
+        ),
+        "{}",
+        said.reason
+    );
+    assert_ne!(said.answer, FULLTEXT_SECOND);
+    assert_ne!(said.answer, FULLTEXT_REBUILD_WAIT);
+}
+
+// A refused ADD FULLTEXT on a binary TEXT column written with a prefix, and
+// a refused ALTER that renames the table. By hand on MySQL 8.0.46 and
+// 8.4.13 (the same on both).
+
+#[test]
+fn a_fulltext_index_on_a_binary_text_column_with_a_prefix_fails_and_is_not_followed() {
+    // bin is TEXT CHARACTER SET binary. ADD FULLTEXT INDEX f (bin(10)) is
+    // refused with error 1283, so the table has no FULLTEXT index: the next
+    // ADD COLUMN gets the plain add-column answer, the same as without the
+    // refused statement.
+    let add_bin = "ALTER TABLE orders ADD COLUMN bin TEXT CHARACTER SET binary NULL";
+    let fulltext = "ALTER TABLE orders ADD FULLTEXT INDEX f (bin(10))";
+    let add_zz = "ALTER TABLE orders ADD COLUMN zz INT NULL";
+    let said = said_in_order(LAB_TABLES, &[add_bin, fulltext, add_zz]);
+    let control = said_in_order(LAB_TABLES, &[add_bin, add_zz]);
+    assert_eq!(said.case, Some("add-column"));
+    assert_eq!(said.answer, INSTANT);
+    assert_eq!(said, control);
+    // The refused statement itself is not given a measured success.
+    let refused = said_in_order(LAB_TABLES, &[add_bin, fulltext]);
+    assert_ne!(refused.answer, FULLTEXT_REBUILD_WAIT);
+    assert_ne!(refused.answer, FULLTEXT_SECOND);
+}
+
+#[test]
+fn a_create_table_with_a_prefix_fulltext_index_on_a_binary_text_column_loses_the_table() {
+    // MySQL refuses the CREATE TABLE (1283), so there is no table; kilit does
+    // not check CREATE TABLE and must not keep a table it may not have.
+    let create = "CREATE TABLE a5 (id INT PRIMARY KEY, bin TEXT CHARACTER SET binary, \
+                  FULLTEXT INDEX f (bin(10)))";
+    let said = said_in_order(
+        LAB_TABLES,
+        &[create, "ALTER TABLE a5 ADD COLUMN zz INT NULL"],
+    );
+    assert_eq!(said.answer, "unknown");
+    assert_ne!(said.answer, INSTANT);
+}
+
+#[test]
+fn a_refused_rename_with_a_modify_not_null_on_a_set_null_key_column_changes_nothing() {
+    // ALTER TABLE ch RENAME TO chb, MODIFY uid ... NOT NULL: uid has a SET
+    // NULL key, so MySQL refuses it (1830). ch stays, chb does not exist.
+    let create = "CREATE TABLE ch (id INT PRIMARY KEY, uid BIGINT UNSIGNED NULL, \
+                  CONSTRAINT fk_ch FOREIGN KEY (uid) REFERENCES users (id) ON DELETE SET NULL)";
+    let refused = "ALTER TABLE ch RENAME TO chb, MODIFY uid BIGINT UNSIGNED NOT NULL";
+    let add_q_to_chb = "ALTER TABLE chb ADD COLUMN q INT NULL";
+    let add_q_to_ch = "ALTER TABLE ch ADD COLUMN q INT NULL";
+    // chb does not exist: never the add-column answer of a known table.
+    let on_chb = said_in_order(LAB_TABLES, &[create, refused, add_q_to_chb]);
+    assert_ne!(on_chb.answer, INSTANT);
+    assert_eq!(on_chb.answer, "unknown");
+    // ch keeps its answers, as if the refused ALTER had not been there.
+    let on_ch = said_in_order(LAB_TABLES, &[create, refused, add_q_to_ch]);
+    let control = said_in_order(LAB_TABLES, &[create, add_q_to_ch]);
+    assert_eq!(on_ch, control);
+    let drop_uid = said_in_order(LAB_TABLES, &[create, refused, DROP_UID_OF_CH]);
+    assert_eq!(drop_uid.answer, FAILS_1828);
+}
+
+const DROP_UID_OF_CH: &str = "ALTER TABLE ch DROP COLUMN uid";
+
+// A refused ADD FULLTEXT that sits beside ADD COLUMN, and a prefix FULLTEXT on a VIRTUAL generated column or a CHAR column. By
+// hand on MySQL 8.0.46 and 8.4.13 (the same on both).
+
+#[test]
+fn a_refused_fulltext_beside_the_binary_text_column_it_adds_leaves_the_table_as_it_was() {
+    // One ALTER adds bin (TEXT CHARACTER SET binary) and a FULLTEXT index on
+    // `BIN`(10): MySQL refuses it with 1283, so the table gets neither the
+    // column nor the index. A later ADD COLUMN bin INT therefore gets the
+    // plain add-column answer, the same as without the refused statement.
+    let refused = "ALTER TABLE orders ADD COLUMN bin TEXT CHARACTER SET binary NULL, \
+                   ADD FULLTEXT INDEX f (`BIN`(10))";
+    let add_bin = "ALTER TABLE orders ADD COLUMN bin INT NULL";
+    let said = said_in_order(LAB_TABLES, &[refused, add_bin]);
+    let control = said_in_order(LAB_TABLES, &[add_bin]);
+    assert_eq!(said.case, Some("add-column"));
+    assert_eq!(said.answer, INSTANT);
+    assert_eq!(said, control);
+}
+
+const G1_TABLE: &str = "CREATE TABLE `g1` (`id` int NOT NULL, `note` text, \
+    `g` text GENERATED ALWAYS AS (`note`) VIRTUAL, `c` char(20) DEFAULT NULL, \
+    `j` json DEFAULT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n";
+
+#[test]
+fn a_prefix_fulltext_index_on_a_virtual_generated_column_is_unknown_naming_3106_and_not_followed() {
+    let fulltext = "ALTER TABLE g1 ADD FULLTEXT INDEX f (g(10))";
+    let add_zz = "ALTER TABLE g1 ADD COLUMN zz INT NULL";
+    let refused = said_in_order(G1_TABLE, &[fulltext]);
+    assert_eq!(refused.answer, "unknown");
+    assert!(refused.reason.contains("3106"), "{}", refused.reason);
+    // Not followed: the next ADD COLUMN keeps the add-column answer, the
+    // same as without the refused statement.
+    let said = said_in_order(G1_TABLE, &[fulltext, add_zz]);
+    let control = said_in_order(G1_TABLE, &[add_zz]);
+    assert_eq!(said.case, Some("add-column"));
+    assert_eq!(said.answer, INSTANT);
+    assert_eq!(said, control);
+}
+
+#[test]
+fn a_prefix_fulltext_index_on_a_char_column_is_unknown_not_a_measured_fulltext_answer() {
+    // MySQL accepts it (no rebuild measured here), but the lab measured
+    // FULLTEXT only on TEXT columns without a prefix.
+    let said = said_in_order(G1_TABLE, &["ALTER TABLE g1 ADD FULLTEXT INDEX f (c(10))"]);
+    assert_eq!(said.answer, "unknown");
+    assert_ne!(said.answer, FULLTEXT_REBUILD_WAIT);
+    assert_ne!(said.answer, FULLTEXT_SECOND);
+}
+
+// A primary key on a column of an ON DELETE SET
+// NULL key. By hand on MySQL 8.0.46 and 8.4.13 (the same on both): ADD
+// PRIMARY KEY (uid), MODIFY uid ... PRIMARY KEY, CHANGE uid uid ... PRIMARY
+// KEY, DROP PRIMARY KEY + ADD PRIMARY KEY (uid), and DROP PRIMARY KEY +
+// MODIFY uid + ADD PRIMARY KEY (id, uid) all fail with 1830 and leave the
+// table as it was; MODIFY uid ... NULL with ADD PRIMARY KEY (uid) in one
+// statement fails with 1171; a later DROP INDEX of the key's only index
+// then fails with 1553 and a later DROP COLUMN uid with 1828.
+
+const B1D_PK_USERS: &str = "CREATE TABLE users (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, \
+    name VARCHAR(100) NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n";
+
+/// Tables of a SET NULL key without a primary key (n1 to n4) and with one
+/// (p1, p2), as the hand test built them.
+const B1D_PK_TABLES: &str = "\
+    CREATE TABLE n1 (id BIGINT UNSIGNED NOT NULL, uid BIGINT UNSIGNED NULL, \
+        CONSTRAINT f1 FOREIGN KEY (uid) REFERENCES users (id) ON DELETE SET NULL);\n\
+    CREATE TABLE n2 (id BIGINT UNSIGNED NOT NULL, uid BIGINT UNSIGNED NULL, \
+        CONSTRAINT f2 FOREIGN KEY (uid) REFERENCES users (id) ON DELETE SET NULL);\n\
+    CREATE TABLE n3 (id BIGINT UNSIGNED NOT NULL, uid BIGINT UNSIGNED NULL, \
+        CONSTRAINT f3 FOREIGN KEY (uid) REFERENCES users (id) ON DELETE SET NULL);\n\
+    CREATE TABLE n4 (id BIGINT UNSIGNED NOT NULL, uid BIGINT UNSIGNED NULL, \
+        CONSTRAINT f4 FOREIGN KEY (uid) REFERENCES users (id) ON DELETE SET NULL);\n\
+    CREATE TABLE p1 (id BIGINT UNSIGNED NOT NULL PRIMARY KEY, uid BIGINT UNSIGNED NULL, \
+        CONSTRAINT g1 FOREIGN KEY (uid) REFERENCES users (id) ON DELETE SET NULL);\n\
+    CREATE TABLE p2 (id BIGINT UNSIGNED NOT NULL PRIMARY KEY, uid BIGINT UNSIGNED NULL, \
+        CONSTRAINT g2 FOREIGN KEY (uid) REFERENCES users (id) ON DELETE SET NULL);\n";
+
+/// A table `s` with a SET NULL key and its own index `ix`.
+const B1D_PK_S_TABLE: &str = "CREATE TABLE `s` (`id` bigint unsigned NOT NULL, \
+    `uid` bigint unsigned DEFAULT NULL, `v` int DEFAULT NULL, KEY `ix` (`uid`), \
+    CONSTRAINT `fs` FOREIGN KEY (`uid`) REFERENCES `users` (`id`) ON DELETE SET NULL) \
+    ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;\n";
+
+#[test]
+fn a_primary_key_on_a_set_null_key_column_is_not_followed_so_dropping_the_column_fails_or_is_unknown()
+ {
+    // ALTER TABLE n1 ADD PRIMARY KEY (uid)
+    // ALTER TABLE n2 MODIFY uid BIGINT UNSIGNED PRIMARY KEY
+    // ALTER TABLE n4 CHANGE uid uid BIGINT UNSIGNED PRIMARY KEY
+    // ALTER TABLE p1 DROP PRIMARY KEY, ADD PRIMARY KEY (uid)
+    // ALTER TABLE p2 DROP PRIMARY KEY, MODIFY uid BIGINT UNSIGNED, ADD PRIMARY KEY (id, uid)
+    let mut problems = Vec::new();
+    let schema = format!("{B1D_PK_USERS}{B1D_PK_TABLES}");
+    for (table, change) in [
+        ("n1", "ADD PRIMARY KEY (uid)"),
+        ("n2", "MODIFY uid BIGINT UNSIGNED PRIMARY KEY"),
+        ("n4", "CHANGE uid uid BIGINT UNSIGNED PRIMARY KEY"),
+        ("p1", "DROP PRIMARY KEY, ADD PRIMARY KEY (uid)"),
+        (
+            "p2",
+            "DROP PRIMARY KEY, MODIFY uid BIGINT UNSIGNED, ADD PRIMARY KEY (id, uid)",
+        ),
+    ] {
+        let alter = format!("ALTER TABLE {table} {change};\n");
+        let drop_column = format!("ALTER TABLE {table} DROP COLUMN uid;\n");
+        let answers = answers_of(&schema, &format!("{alter}{drop_column}"));
+        // kilit does not follow an inline PRIMARY KEY option: it loses the
+        // table, so the later drop is unknown, never a runs answer.
+        let inline = change.ends_with("PRIMARY KEY") && !change.contains("ADD");
+        let ok = if inline {
+            answers[1] == UNKNOWN
+        } else {
+            answers[1] == FAILS_1828
+        };
+        if !ok {
+            problems.push(format!("{table}: {change}: got {answers:?}"));
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn a_primary_key_on_a_set_null_key_column_made_by_a_modify_and_an_add_is_not_followed() {
+    // ALTER TABLE n3 MODIFY uid BIGINT UNSIGNED, ADD PRIMARY KEY (uid)
+    // By hand on MySQL 8.0.46 and 8.4.13: the key stays and the column stays
+    // nullable, so a later DROP COLUMN uid fails with 1828.
+    let schema = format!("{B1D_PK_USERS}{B1D_PK_TABLES}");
+    let sql = "ALTER TABLE n3 MODIFY uid BIGINT UNSIGNED, ADD PRIMARY KEY (uid);\n\
+               ALTER TABLE n3 DROP COLUMN uid;\n";
+    assert_eq!(answers_of(&schema, sql).pop().unwrap(), FAILS_1828);
+}
+
+#[test]
+fn the_same_primary_key_forms_on_tables_made_in_the_input_leave_the_dropped_column_failing_with_1828()
+ {
+    // The same forms on tables the input creates.
+    let create_s = "CREATE TABLE s (id BIGINT UNSIGNED NOT NULL, uid BIGINT UNSIGNED NULL, \
+        v INT NULL, CONSTRAINT fs FOREIGN KEY (uid) REFERENCES users (id) \
+        ON DELETE SET NULL) ENGINE=InnoDB;\n";
+    let create_s_with_key = "CREATE TABLE s (id BIGINT UNSIGNED NOT NULL PRIMARY KEY, \
+        uid BIGINT UNSIGNED NULL, v INT NULL, CONSTRAINT fs FOREIGN KEY (uid) \
+        REFERENCES users (id) ON DELETE SET NULL) ENGINE=InnoDB;\n";
+    for (create, change) in [
+        (create_s, "ADD PRIMARY KEY (uid)"),
+        (create_s_with_key, "DROP PRIMARY KEY, ADD PRIMARY KEY (uid)"),
+        (
+            create_s_with_key,
+            "DROP PRIMARY KEY, MODIFY uid BIGINT UNSIGNED, ADD PRIMARY KEY (id, uid)",
+        ),
+    ] {
+        let sql = format!(
+            "{B1D_PK_USERS}{create}ALTER TABLE s {change};\nALTER TABLE s DROP COLUMN uid;\n"
+        );
+        let answers = answers_of("", &sql);
+        let n = answers.len();
+        assert_eq!(answers[n - 1], FAILS_1828, "{change}");
+    }
+}
+
+#[test]
+fn a_modify_with_null_and_a_primary_key_on_a_set_null_key_column_is_not_followed_so_the_index_stays()
+ {
+    // By hand on MySQL 8.0.46 and 8.4.13: ALTER TABLE s MODIFY uid BIGINT
+    // UNSIGNED NULL, ADD PRIMARY KEY (uid) fails with 1171, then ALTER TABLE s
+    // DROP INDEX ix fails with 1553.
+    let schema = format!("{B1D_PK_USERS}{B1D_PK_S_TABLE}");
+    let sql = "ALTER TABLE s MODIFY uid BIGINT UNSIGNED NULL, ADD PRIMARY KEY (uid);\n\
+               ALTER TABLE s DROP INDEX ix;\n";
+    assert_eq!(answers_of(&schema, sql).pop().unwrap(), FAILS_1553);
+}
+
+#[test]
+fn dropping_the_only_index_of_a_set_null_key_still_fails_with_1553_after_a_refused_primary_key() {
+    // By hand on MySQL 8.0.46 and 8.4.13: the primary key on uid is refused
+    // (1830), the table is unchanged, so DROP INDEX ix fails with 1553.
+    let schema = format!("{B1D_PK_USERS}{B1D_PK_S_TABLE}");
+    for sql in [
+        // In one statement with a MODIFY.
+        "ALTER TABLE s MODIFY uid BIGINT UNSIGNED, ADD PRIMARY KEY (uid);\n\
+         ALTER TABLE s DROP INDEX ix;\n",
+        // Alone, after a MODIFY of its own.
+        "ALTER TABLE s MODIFY uid BIGINT UNSIGNED NULL;\n\
+         ALTER TABLE s ADD PRIMARY KEY (uid);\n\
+         ALTER TABLE s DROP INDEX ix;\n",
+    ] {
+        assert_eq!(answers_of(&schema, sql).pop().unwrap(), FAILS_1553, "{sql}");
+    }
+}
+
+#[test]
+fn swapping_two_column_names_with_two_changes_is_neither_refused_nor_a_failed_drop() {
+    // By hand on MySQL 8.0.46 and 8.4.13: ALTER TABLE s1 CHANGE id uid BIGINT
+    // UNSIGNED NOT NULL, CHANGE uid x BIGINT UNSIGNED NULL is accepted. What
+    // kilit says afterwards is an older limit; it must not call the swap
+    // refused, and must not fail a later DROP COLUMN with 1828 or 1830.
+    let schema = "CREATE TABLE `users` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, \
+        `name` varchar(100) NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n\
+        CREATE TABLE `s1` (`id` bigint unsigned NOT NULL, `uid` bigint unsigned DEFAULT NULL, \
+        PRIMARY KEY (`id`), KEY `fs1` (`uid`), CONSTRAINT `fs1` FOREIGN KEY (`uid`) \
+        REFERENCES `users` (`id`) ON DELETE SET NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n";
+    let swap = "ALTER TABLE s1 CHANGE id uid BIGINT UNSIGNED NOT NULL, \
+                CHANGE uid x BIGINT UNSIGNED NULL;\n";
+    for drop in ["x", "uid"] {
+        let sql = format!("{swap}ALTER TABLE s1 DROP COLUMN {drop};\n");
+        for (at, name) in ["the swap", "the drop"].into_iter().enumerate() {
+            let sql_to = if at == 0 {
+                swap.to_owned()
+            } else {
+                sql.clone()
+            };
+            let said = said(schema, &sql_to);
+            assert_ne!(said.answer, FAILS_1828, "{name} of {drop}");
+            assert_ne!(said.answer, FAILS_1830, "{name} of {drop}");
+            assert!(
+                !said.reason.contains(NOT_ACCEPTED),
+                "{name} of {drop}: {}",
+                said.reason
+            );
+        }
+    }
+}
+
+// By hand on MySQL 8.0.46 and 8.4.13 (the same on both): an ALTER with a
+// change MySQL may refuse that also names one column in two clauses. kilit
+// cannot tell how MySQL takes it and loses the table.
+
+#[test]
+fn a_dropped_fulltext_index_and_a_not_null_set_null_key_column_beside_a_column_drop_and_add_loses_the_table()
+ {
+    // The first ALTER fails with 1830 (MODIFY uid NOT NULL under a SET NULL
+    // key) and the FULLTEXT index stays, so a later ADD COLUMN cannot be
+    // INSTANT. kilit does not know whether it ran: the table is lost.
+    let schema = "CREATE TABLE `users` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, \
+        `name` varchar(100) NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n\
+        CREATE TABLE `n` (`id` bigint unsigned NOT NULL, `uid` bigint unsigned DEFAULT NULL, \
+        `x` bigint unsigned DEFAULT NULL, `code` varchar(20) DEFAULT NULL, `body` text, \
+        PRIMARY KEY (`id`), FULLTEXT KEY `ft` (`body`), KEY `f1` (`uid`), \
+        CONSTRAINT `f1` FOREIGN KEY (`uid`) REFERENCES `users` (`id`) ON DELETE SET NULL) \
+        ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n";
+    let sql = "ALTER TABLE n DROP INDEX ft, MODIFY uid BIGINT UNSIGNED NOT NULL, \
+               DROP COLUMN x, ADD COLUMN x INT NULL;\n\
+               ALTER TABLE n ADD COLUMN w INT NULL;\n";
+    let said = said(schema, sql);
+    assert_eq!(said.answer, "unknown");
+    assert!(
+        said.reason.contains(
+            "in two of its clauses, which MySQL takes against the names before the statement"
+        ),
+        "{}",
+        said.reason
+    );
+    assert_ne!(said.answer, INSTANT);
+}
+
+#[test]
+fn a_refused_binary_text_fulltext_beside_a_column_drop_and_add_does_not_make_a_later_add_column_copy()
+ {
+    // The first ALTER fails with 1283 (FULLTEXT on a binary TEXT column), so
+    // there is no q and no index, and a later ADD COLUMN w runs INSTANT. kilit
+    // does not know whether it ran: the table is lost, so the answer is
+    // unknown, never COPY.
+    let schema = "CREATE TABLE `users` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, \
+        `name` varchar(100) NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n\
+        CREATE TABLE `n` (`id` bigint unsigned NOT NULL, `uid` bigint unsigned DEFAULT NULL, \
+        `x` bigint unsigned DEFAULT NULL, `code` varchar(20) DEFAULT NULL, \
+        PRIMARY KEY (`id`), KEY `f1` (`uid`), \
+        CONSTRAINT `f1` FOREIGN KEY (`uid`) REFERENCES `users` (`id`) ON DELETE SET NULL) \
+        ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n";
+    let sql = "ALTER TABLE n ADD COLUMN q TEXT CHARACTER SET binary, ADD FULLTEXT ft (q), \
+               DROP COLUMN x, ADD COLUMN x INT NULL;\n\
+               ALTER TABLE n ADD COLUMN w INT NULL;\n";
+    let said = said(schema, sql);
+    assert_eq!(said.answer, "unknown");
+    assert!(
+        said.reason.contains(
+            "in two of its clauses, which MySQL takes against the names before the statement"
+        ),
+        "{}",
+        said.reason
+    );
+    assert!(!said.answer.starts_with(COPY_PREFIX));
+}
+
+// kilit's cautious rule, not a MySQL fact: an ALTER with a change MySQL may
+// refuse (MODIFY of a SET NULL key's column to NOT NULL, 1830) beside a
+// clause kilit cannot follow loses the table, and a later statement on it is
+// unknown, never a measured answer.
+
+#[test]
+fn a_clause_kilit_cannot_follow_beside_a_change_mysql_may_refuse_loses_the_table() {
+    let schema = "CREATE TABLE `users` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, \
+        PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n\
+        CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, \
+        `uid` bigint unsigned DEFAULT NULL, `note` varchar(100) DEFAULT NULL, \
+        PRIMARY KEY (`id`), KEY `fk_u` (`uid`), \
+        CONSTRAINT `fk_u` FOREIGN KEY (`uid`) REFERENCES `users` (`id`) ON DELETE SET NULL) \
+        ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n";
+    let cases = [
+        (
+            "ALTER TABLE t MODIFY uid BIGINT UNSIGNED NOT NULL, ADD COLUMN note INT NULL;",
+            "adds note, which the table already has, beside a change MySQL may refuse",
+        ),
+        (
+            "ALTER TABLE t MODIFY uid BIGINT UNSIGNED NOT NULL, ADD COLUMN z INT UNIQUE;",
+            "options kilit does not follow",
+        ),
+        (
+            "ALTER TABLE t MODIFY uid BIGINT UNSIGNED NOT NULL, ADD COLUMN z INT UNIQUE;",
+            "beside a change MySQL may refuse",
+        ),
+    ];
+    for (first, words) in cases {
+        let sql = format!("{first}\nALTER TABLE t ADD COLUMN q INT;\n");
+        let said = said(schema, &sql);
+        assert_eq!(said.answer, "unknown", "{first}");
+        assert!(said.reason.contains(words), "{first}: {}", said.reason);
+        assert_ne!(said.answer, INSTANT, "{first}");
     }
 }

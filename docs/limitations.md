@@ -34,9 +34,32 @@ safe.
   engine, the row format or the key block size is `UNKNOWN`, though the table
   stays known. It becomes lost when MySQL may refuse the change because of
   the table's keys or foreign keys.
-- A statement that consists only of a `/*! */` comment is not seen, so a
-  `SET` inside one, such as `/*!80000 SET old_alter_table = ON */`, does not
-  change the answers after it.
+- kilit leaves out a `/*! */` comment that stands alone between semicolons
+  or comes before a statement's first word, and does not read its text as
+  SQL. MySQL runs that text, and mysqldump writes settings there, such as
+  `/*!40101 SET SQL_MODE='' */`. So when the text names a setting kilit
+  follows (`sql_mode`, `foreign_key_checks`, `sql_log_bin`,
+  `old_alter_table`, `restrict_fk_on_non_standard_key`, `binlog_format`,
+  `innodb_default_row_format`, `innodb_strict_mode`,
+  `default_storage_engine` or `default_tmp_storage_engine`), kilit treats
+  that setting as unclear from that line on, as after a `SET` it cannot
+  read: an over-long column loses its table, the answers that depend on the
+  setting are `UNKNOWN`, and the reason says `line N runs a /*! */ comment
+  that names <setting>, and kilit does not read such comments`. A name
+  counts as part of the text, so `@OLD_SQL_MODE` names `sql_mode` too. When
+  the text has `GLOBAL` or `PERSIST`, the later input files start with the
+  setting unclear too. A comment that names none of them changes nothing,
+  and a comment after the last statement of a file runs after it, so a
+  mysqldump trailer keeps the last answer. Under `--pretend` the line is
+  the output line of the statement.
+- What kilit leaves for later in these comments: the DDL inside them is not
+  followed; a version above the server's still counts, though MySQL skips
+  such a comment, which is cautious; a comment before a statement's first
+  word joins that statement, so the statement is read without it; a file
+  made only of such comments does not make the next file start unclear
+  after a `GLOBAL` in them; and a `--pretend` line that holds only one is
+  not seen. After a left-out `sql_mode` comment, a quoted default
+  such as `TEXT DEFAULT 'x'` is `UNKNOWN` where MySQL gives error 1101.
 - `CREATE TABLE` is not checked: kilit follows the table it creates, but says
   nothing about the statement itself. The one exception is syntax MySQL
   8.0.46 and 8.4.13 reject (a name in single quotes, a key part that is not a
@@ -116,9 +139,11 @@ kilit gives no answer that the table could change.
   stays `UNKNOWN` for these statements, where rules 3 and 4 could answer. It
   is cautious.
 - The only failures kept on such a table come from the statement alone: error
-  1674 for a nondeterministic default and error 1101 for a quoted default on
-  a `TEXT`, `BLOB`, `JSON` or `GEOMETRY` column named in the statement. Every
-  other failure (1828, 1553, 3959, 1091, 3780, 1822, 6125, 1118) is a note.
+  1674 for a nondeterministic default, error 1101 for a quoted default on
+  a `TEXT`, `BLOB`, `JSON` or `GEOMETRY` column named in the statement, and
+  error 1221 for `ASC` or `DESC` on a `FULLTEXT` key part. Every other
+  failure (1828, 1553, 3959, 1091, 3780, 1822, 6125, 1118, 1283, 1830) is a
+  note.
 - With `--schema`, a table the dump lacks is `UNKNOWN` for every statement,
   1674 and 1101 included. The reason says which statement dropped or renamed
   it, with its line, or that the dump may be out of date or the table does not
@@ -180,7 +205,13 @@ kilit gives no answer that the table could change.
   unclear `sql_mode`, MySQL turns the column into `MEDIUMTEXT` or
   `MEDIUMBLOB`, and kilit loses the table. A `CHAR` or `BINARY` over 255 is
   refused in every mode (1074; run by hand on both servers). A `CREATE TABLE`
-  with such a column loses the table too.
+  with such a column loses the table too, and so does a `CREATE TABLE` whose
+  row kilit counts past 65,535 bytes (error 1118). The limits were run by
+  hand on both servers: a `utf8mb4` `VARCHAR(16383)` and a `latin1`
+  `VARCHAR` or `VARBINARY(65535)` are accepted alone but fail with 1118 in
+  a table that holds anything else; the next size up is 1074 in strict mode
+  and a `MEDIUMTEXT` or `MEDIUMBLOB` otherwise; `BINARY(255)` is accepted
+  and `BINARY(256)` is 1074 in every mode.
 - Some shapes on a known table are `UNKNOWN` because the lab has not measured
   them. The reason names an error only where a hand test on both servers
   recorded it: `ADD COLUMN ... NOT NULL` of a `DATE`, `DATETIME` or
@@ -191,13 +222,84 @@ kilit gives no answer that the table could change.
   `UNIQUE` index of `NOT NULL` columns on a table without a primary key; a
   `MODIFY` that makes a primary key column nullable; and a `MODIFY` or
   `CHANGE` that moves a column `AFTER` itself.
-- A `SET sql_mode` inside a `/*! */` comment is not seen, so a strict mode set
-  earlier stays in force for kilit after `/*!40101 SET SQL_MODE='' */`. The
-  over-long column rule above then keeps a table that MySQL changed.
-- `ADD FULLTEXT INDEX (col DESC)` is refused by MySQL (error 1221) and kilit
-  answers it and follows it. A FULLTEXT index on a `TEXT` column with
-  `CHARACTER SET binary` on a DYNAMIC table gets the lab's answer where MySQL
-  gives error 1283. Both are older than this version.
+- A `FULLTEXT` index is answered on a known table only in the shapes the lab
+  measured: one or two columns, each `VARCHAR`, `TEXT`, `MEDIUMTEXT` or
+  `LONGTEXT`, in a character set kilit can tell that is not binary. This
+  holds for the second `FULLTEXT` index too. One `TEXT` column in the binary
+  character set (the column's or the table's) fails with error 1283. A
+  binary `VARCHAR`, a `BLOB` or a `VARBINARY` is `UNKNOWN` and the reason
+  names 1283. `CHAR`, `TINYTEXT`, three or more columns, any other type, and
+  a generated column are `UNKNOWN`; so is a `utf16`, `utf16le`, `utf32` or
+  `ucs2` column, which MySQL refuses with 1283 by hand. A `FULLTEXT` index
+  on a `STORED` generated column is followed, but `UNKNOWN`; a `VIRTUAL` one
+  gives error 3106 by hand and is not followed.
+- On a table whose character set kilit cannot tell (a table with none
+  written and no dump entry), the `FULLTEXT` answers on MyISAM, on the other
+  row formats and now on DYNAMIC are `UNKNOWN`. It is cautious.
+- An explicit `ASC` or `DESC` on a `FULLTEXT` key part fails with error 1221,
+  whatever the engine and row format (by hand on MyISAM and COMPACT tables
+  too). It stays the answer on a table kilit does not know. `CREATE FULLTEXT
+  INDEX`, `SPATIAL` and `USING HASH` with `ASC` or `DESC` are `UNKNOWN` with
+  1221 in the reason, and are not followed. A `CREATE TABLE` with any of
+  them loses the table.
+- A foreign key whose action is `SET NULL` on a `NOT NULL` column fails with
+  error 1830, for a key of one column on another table with `ON DELETE SET
+  NULL` and no `ON UPDATE` clause. `ON UPDATE SET NULL`, `ON DELETE SET NULL`
+  with another `ON UPDATE` action and keys of several columns are `UNKNOWN`:
+  MySQL refuses them with 1830 by hand, but the lab did not measure them. A
+  `MODIFY` that makes the column of a `SET NULL` key `NOT NULL` is `UNKNOWN`
+  with 1830 in the reason, and a `CREATE TABLE` with such a key on an InnoDB
+  table loses the table. On a table kilit does not know it is a note.
+- Foreign key actions: the lab measured one foreign key (`orders.user_id` to
+  `users.id`) against twelve changes, with `ON DELETE CASCADE` and with `ON
+  DELETE SET NULL`: add and drop a column, rename a column, set a default,
+  `INT` to `BIGINT`, add, add unique and drop an index, add a `FULLTEXT`
+  index, make a column nullable, lengthen a `VARCHAR` and drop the key. It
+  measured `ON UPDATE CASCADE`, `ON UPDATE SET NULL`, both `CASCADE`, no
+  clause, `RESTRICT` and `NO ACTION` against adding an index and making a
+  column nullable. On the parent side it measured `CASCADE` against adding
+  an index, making a column nullable and adding a column, and `SET NULL`
+  against adding an index. Each equals its plain twin, so kilit gives the
+  twin's answer on a table with such a key. Keys of several columns, more
+  than one such key on a table and a key that points at its own table are
+  not measured; nor
+  is `ADD FOREIGN KEY` with only `ON UPDATE CASCADE`, `ON UPDATE SET
+  DEFAULT`, `RESTRICT` or `NO ACTION`, which gets the answer of
+  `add-foreign-key`. `ON DELETE SET DEFAULT` is accepted by MySQL 8.0.46 and
+  8.4.13 and measured.
+- A refusal is judged on the table the whole `ALTER` leaves, not clause by
+  clause. `DROP FOREIGN KEY k, MODIFY c ... NOT NULL` is followed; `MODIFY c
+  ... NOT NULL` with `ADD FOREIGN KEY ... ON DELETE SET NULL` is refused. A
+  primary key column counts as `NOT NULL`, so `ADD PRIMARY KEY` on a column
+  of a `SET NULL` key is refused (error 1830 by hand), also as `DROP PRIMARY
+  KEY, ADD PRIMARY KEY` or beside a `MODIFY`; the table stays as it was.
+  `RENAME TO` beside a refused change is refused too, and the table keeps its
+  old name. When such an `ALTER` names one column in two clauses (MySQL takes
+  every clause against the names before the statement), or has a clause kilit
+  cannot follow, kilit cannot tell what MySQL does: it loses the table and
+  says so in the reason, for example "names the column x in two of its
+  clauses, which MySQL takes against the names before the statement, beside a
+  change MySQL may refuse". Some of these cases are not followed exactly: a
+  `DROP FOREIGN KEY` beside an `ADD` of the same name (MySQL 1826), an `ADD
+  COLUMN` of a name the table has (1060), a `MODIFY` beside a `RENAME COLUMN`
+  of the same column (1054) and an inline `PRIMARY KEY` in `MODIFY` or
+  `CHANGE` lose the table or are answered without the refusal. A plain
+  `MODIFY` or `CHANGE` that makes the column of a `SET NULL` key `NOT NULL`
+  is `UNKNOWN` naming error 1830, and the table stays as it was; one that
+  also writes an option kilit does not follow, such as an inline `PRIMARY
+  KEY`, loses the table.
+- A `FULLTEXT` key part with a prefix, such as `bin(10)`, is read as its
+  column (error 1283 for a binary `TEXT`, 3106 for a `VIRTUAL` generated
+  column, both by hand). A `FULLTEXT` index on a `CHAR` column with a prefix
+  is accepted by MySQL and stays `UNKNOWN` in kilit.
+- A `MODIFY` to the binary character set of a column that a `FULLTEXT` index
+  holds is `COPY` in kilit and error 1283 in MySQL. A backticked
+  `` USING `HASH` `` is refused by MySQL (1064) and answered by kilit.
+- `DROP CONSTRAINT` of a name that is both a `CHECK` and a `UNIQUE` index is
+  `UNKNOWN`, and the table is lost; MySQL refuses it. Two `VARCHAR(16000)`
+  columns of `utf8mb4` with a `VIRTUAL` generated column fail in a `CREATE
+  TABLE` with error 1118: kilit does not count generated virtual columns in
+  the row.
 - The 3072-byte count does not cover a `DATE`, `DATETIME` or `TIMESTAMP` key
   part, so a key that holds one runs when MySQL may refuse it (1071). A key
   that names a column twice (error 1060) runs too. Adding a `UNIQUE` index of

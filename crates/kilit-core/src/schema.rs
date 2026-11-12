@@ -1091,6 +1091,53 @@ fn merged(a: Option<Engine>, b: Option<Engine>) -> Option<Engine> {
     }
 }
 
+/// `table` as `alter` leaves it, when kilit can follow every one of its
+/// changes; else why it cannot tell. A new table name changes nothing
+/// here; MySQL takes a RENAME INDEX beside other changes against the names
+/// before the statement, which kilit does not follow.
+pub(crate) fn table_after(table: &Table, alter: &Alter) -> Result<Table, String> {
+    // MySQL takes every clause against the column names before the
+    // statement (by hand on MySQL 8.0.46 and 8.4.13: two CHANGE clauses can
+    // swap two names); kilit applies them one after another, which is the
+    // same only when no column name is in two clauses.
+    let mut named: Vec<&str> = Vec::new();
+    for operation in &alter.operations {
+        let names: Vec<&str> = match operation {
+            Operation::AddColumn { column, .. } | Operation::ModifyColumn { column, .. } => {
+                vec![&column.name]
+            }
+            Operation::ChangeColumn {
+                old_name, column, ..
+            } => vec![old_name, &column.name],
+            Operation::DropColumn { name } => vec![name],
+            Operation::RenameColumn { from, to } => vec![from, to],
+            _ => Vec::new(),
+        };
+        let mut own: Vec<&str> = Vec::new();
+        for name in names {
+            if named.iter().any(|other| same(other, name)) {
+                return Err(format!(
+                    "names the column {name} in two of its clauses, which MySQL takes against \
+                     the names before the statement"
+                ));
+            }
+            own.push(name);
+        }
+        named.extend(own);
+    }
+    let mut after = table.clone();
+    for operation in &alter.operations {
+        match operation {
+            Operation::RenameTable { .. } => {}
+            Operation::RenameIndex { .. } if alter.operations.len() > 1 => {
+                return Err("renames an index beside other changes".to_owned());
+            }
+            other => change(&mut after, other)?,
+        }
+    }
+    Ok(after)
+}
+
 /// Changes `table` as one `ALTER TABLE` operation does, or says why kilit
 /// cannot follow it.
 fn change(table: &mut Table, operation: &Operation) -> Result<(), String> {
@@ -1813,7 +1860,7 @@ fn generated_index_name(table: &Table, index: &Index) -> String {
 
 /// The column of an index entry: `email` in `email(10)`. An expression
 /// such as `(lower(email))` is returned whole and matches no column.
-fn indexed_column(entry: &str) -> &str {
+pub(crate) fn indexed_column(entry: &str) -> &str {
     if entry.starts_with('(') {
         return entry;
     }

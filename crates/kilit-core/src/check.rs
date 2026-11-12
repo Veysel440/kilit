@@ -233,6 +233,13 @@ pub enum Condition {
     /// The new column, or the longer one, makes the row longer than the
     /// 65,535 bytes MySQL allows, as kilit counts it from the table.
     RowTooLarge,
+    /// The foreign key the statement adds sets its one column to NULL on
+    /// delete, and the column is NOT NULL (error 1830).
+    SetNullOnNotNull,
+    /// The new FULLTEXT index takes one TEXT column in the binary character
+    /// set, the column's or the table's, which MySQL makes a BLOB (error
+    /// 1283).
+    BinaryText,
     /// Something no schema shows: the rows, or the table's history.
     Hidden,
 }
@@ -307,6 +314,12 @@ const ADD_COLUMN: Case = Case {
         "add-column-not-null-default",
         "add-column-options",
         "add-column-current-timestamp",
+        // The same change on a table whose foreign key cascades or sets NULL
+        // on delete, or that another table's key points at with ON DELETE
+        // CASCADE. MySQL 8.0.46 and 8.4.13 take each one as without the key.
+        "on-delete-cascade-add-nullable-column",
+        "on-delete-set-null-add-nullable-column",
+        "cascade-parent-add-nullable-column",
     ],
     exceptions: &[
         Exception {
@@ -458,6 +471,10 @@ const DROP_COLUMN: Case = Case {
         "drop-column-in-not-enforced-check-alone",
         "drop-column-next-to-check",
         "drop-column-named-in-check-string",
+        // The same change on a table whose foreign key cascades or sets NULL
+        // on delete.
+        "on-delete-cascade-drop-column",
+        "on-delete-set-null-drop-column",
     ],
     exceptions: &[
         Exception {
@@ -563,6 +580,10 @@ const RENAME_COLUMN: Case = Case {
         "change-column-rename",
         "rename-column-next-to-check",
         "rename-column-named-in-check-string",
+        // The same change on a table whose foreign key cascades or sets NULL
+        // on delete.
+        "on-delete-cascade-rename-column",
+        "on-delete-set-null-rename-column",
     ],
     exceptions: &[
         Exception {
@@ -590,7 +611,13 @@ const RENAME_COLUMN: Case = Case {
 
 const SET_COLUMN_DEFAULT: Case = Case {
     id: "set-column-default",
-    scenarios: &["set-column-default"],
+    scenarios: &[
+        "set-column-default",
+        // The same change on a table whose foreign key cascades or sets NULL
+        // on delete.
+        "on-delete-cascade-set-column-default",
+        "on-delete-set-null-set-column-default",
+    ],
     exceptions: &[Exception {
         scenarios: &[
             "set-column-default-text-literal",
@@ -605,7 +632,15 @@ const SET_COLUMN_DEFAULT: Case = Case {
 
 const CHANGE_INTEGER_TYPE: Case = Case {
     id: "change-integer-type",
-    scenarios: &["int-to-bigint", "int-to-smallint", "int-to-unsigned"],
+    scenarios: &[
+        "int-to-bigint",
+        "int-to-smallint",
+        "int-to-unsigned",
+        // The same change on a table whose foreign key cascades or sets NULL
+        // on delete.
+        "on-delete-cascade-int-to-bigint",
+        "on-delete-set-null-int-to-bigint",
+    ],
     exceptions: &[
         Exception {
             scenarios: &["modify-foreign-key-column"],
@@ -628,6 +663,10 @@ const LENGTHEN_VARCHAR: Case = Case {
         "varchar-255-to-300",
         "varchar-latin1-200-to-255",
         "varchar-50-to-60-indexed",
+        // The same change on a table whose foreign key cascades or sets NULL
+        // on delete.
+        "on-delete-cascade-varchar-50-to-60",
+        "on-delete-set-null-varchar-50-to-60",
     ],
     exceptions: &[Exception {
         scenarios: &["lengthen-varchar-over-row-size-limit"],
@@ -684,7 +723,22 @@ const MAKE_COLUMN_NOT_NULL: Case = Case {
 
 const MAKE_COLUMN_NULLABLE: Case = Case {
     id: "make-column-nullable",
-    scenarios: &["make-column-nullable"],
+    scenarios: &[
+        "make-column-nullable",
+        // The same change on a table with a foreign key: ON DELETE or ON UPDATE
+        // CASCADE or SET NULL, none, RESTRICT or NO ACTION on its own key, or
+        // CASCADE or SET NULL on a key of another table that points at it.
+        // MySQL 8.0.46 and 8.4.13 take each one as without the key.
+        "on-delete-cascade-make-column-nullable",
+        "on-delete-set-null-make-column-nullable",
+        "on-update-cascade-make-column-nullable",
+        "on-update-set-null-make-column-nullable",
+        "on-delete-and-update-cascade-make-column-nullable",
+        "foreign-key-make-column-nullable",
+        "on-delete-restrict-make-column-nullable",
+        "on-delete-no-action-make-column-nullable",
+        "cascade-parent-make-column-nullable",
+    ],
     exceptions: &[],
 };
 
@@ -709,7 +763,23 @@ const MODIFY_SAME_DEFINITION: Case = Case {
 /// An index on a JSON column is unknown: see [`check_json_columns`].
 const ADD_INDEX: Case = Case {
     id: "add-index",
-    scenarios: &["add-index"],
+    scenarios: &[
+        "add-index",
+        // The same change on a table with a foreign key: ON DELETE or ON UPDATE
+        // CASCADE or SET NULL, none, RESTRICT or NO ACTION on its own key, or
+        // CASCADE or SET NULL on a key of another table that points at it.
+        // MySQL 8.0.46 and 8.4.13 take each one as without the key.
+        "on-delete-cascade-add-index",
+        "on-delete-set-null-add-index",
+        "on-update-cascade-add-index",
+        "on-update-set-null-add-index",
+        "on-delete-and-update-cascade-add-index",
+        "foreign-key-add-index",
+        "on-delete-restrict-add-index",
+        "on-delete-no-action-add-index",
+        "cascade-parent-add-index",
+        "set-null-parent-add-index",
+    ],
     exceptions: &[Exception {
         scenarios: &[
             "add-index-on-text",
@@ -737,7 +807,13 @@ const ADD_FUNCTIONAL_INDEX: Case = Case {
 
 const ADD_UNIQUE_INDEX: Case = Case {
     id: "add-unique-index",
-    scenarios: &["add-unique-index"],
+    scenarios: &[
+        "add-unique-index",
+        // The same change on a table whose foreign key cascades or sets NULL
+        // on delete.
+        "on-delete-cascade-add-unique-index",
+        "on-delete-set-null-add-unique-index",
+    ],
     exceptions: &[
         Exception {
             scenarios: &["add-unique-index-duplicates"],
@@ -760,12 +836,43 @@ const ADD_UNIQUE_INDEX: Case = Case {
 
 const ADD_FULLTEXT_INDEX: Case = Case {
     id: "add-fulltext-index",
-    scenarios: &["add-fulltext-index"],
-    exceptions: &[Exception {
-        scenarios: &["add-second-fulltext-index"],
-        when: "if the table already has a FULLTEXT index",
-        conditions: &[Condition::FulltextIndex],
-    }],
+    scenarios: &[
+        "add-fulltext-index",
+        // On one TEXT, MEDIUMTEXT or LONGTEXT column, or on a VARCHAR and a
+        // TEXT one; and with a foreign key that cascades or sets NULL on
+        // delete.
+        "on-delete-cascade-add-fulltext-index",
+        "on-delete-set-null-add-fulltext-index",
+        "add-fulltext-index-text",
+        "add-fulltext-index-mediumtext",
+        "add-fulltext-index-longtext",
+        "add-fulltext-index-two-columns",
+    ],
+    exceptions: &[
+        Exception {
+            scenarios: &["add-second-fulltext-index"],
+            when: "if the table already has a FULLTEXT index",
+            conditions: &[Condition::FulltextIndex],
+        },
+        Exception {
+            scenarios: &["add-fulltext-index-binary-text"],
+            when: BINARY_TEXT,
+            conditions: &[Condition::BinaryText],
+        },
+    ],
+};
+
+const BINARY_TEXT: &str =
+    "if the column is TEXT in the binary character set, which MySQL makes a BLOB";
+
+/// A FULLTEXT index with ASC or DESC written on a key part: refused
+/// whatever the table, as written and in every variant. By hand on MySQL
+/// 8.0.46 and 8.4.13: so on MyISAM and COMPACT tables, and by CREATE
+/// FULLTEXT INDEX and CREATE TABLE too.
+const ADD_FULLTEXT_INDEX_WITH_ORDER: Case = Case {
+    id: "add-fulltext-index-with-order",
+    scenarios: &["add-fulltext-index-desc", "add-fulltext-index-asc"],
+    exceptions: &[],
 };
 
 /// Shapes the lab has not measured, and an index MySQL may have replaced,
@@ -782,6 +889,10 @@ const DROP_INDEX: Case = Case {
         "drop-index-foreign-key-keeps-second-index",
         "drop-index-foreign-key-keeps-first-index",
         "drop-index-foreign-key-keeps-primary-key",
+        // The same change on a table whose foreign key cascades or sets NULL
+        // on delete.
+        "on-delete-cascade-drop-index",
+        "on-delete-set-null-drop-index",
     ],
     exceptions: &[
         Exception {
@@ -822,12 +933,22 @@ const ADD_FOREIGN_KEY: Case = Case {
         "add-foreign-key-varchar-to-char",
         "add-foreign-key-char-to-char",
         "add-foreign-key-self-reference",
+        // The key with ON DELETE CASCADE, SET NULL (on a nullable column) or
+        // SET DEFAULT, which MySQL 8.0.46 and 8.4.13 take alike.
+        "add-foreign-key-on-delete-cascade",
+        "add-foreign-key-on-delete-set-null",
+        "add-foreign-key-on-delete-set-default",
     ],
     exceptions: &[
         Exception {
             scenarios: &["add-foreign-key-orphans"],
             when: ORPHAN_ROW,
             conditions: &[Condition::Hidden],
+        },
+        Exception {
+            scenarios: &["add-foreign-key-set-null-not-null"],
+            when: SET_NULL_ON_NOT_NULL,
+            conditions: &[Condition::SetNullOnNotNull],
         },
         Exception {
             scenarios: &[
@@ -882,17 +1003,38 @@ const ADD_FOREIGN_KEY: Case = Case {
 
 const ADD_FOREIGN_KEY_CHECKS_OFF: Case = Case {
     id: "add-foreign-key-checks-off",
-    scenarios: &["add-foreign-key-checks-off"],
-    exceptions: &[Exception {
-        scenarios: &["add-foreign-key-checks-off-orphans"],
-        when: ORPHAN_ROW_KEPT,
-        conditions: &[Condition::Hidden],
-    }],
+    scenarios: &[
+        "add-foreign-key-checks-off",
+        // The key with ON DELETE CASCADE or SET NULL (on a nullable column).
+        "add-foreign-key-checks-off-on-delete-cascade",
+        "add-foreign-key-checks-off-on-delete-set-null",
+    ],
+    exceptions: &[
+        Exception {
+            scenarios: &["add-foreign-key-checks-off-orphans"],
+            when: ORPHAN_ROW_KEPT,
+            conditions: &[Condition::Hidden],
+        },
+        Exception {
+            scenarios: &["add-foreign-key-checks-off-set-null-not-null"],
+            when: SET_NULL_ON_NOT_NULL,
+            conditions: &[Condition::SetNullOnNotNull],
+        },
+    ],
 };
+
+const SET_NULL_ON_NOT_NULL: &str =
+    "if the column is NOT NULL and the key sets it to NULL on delete";
 
 const DROP_FOREIGN_KEY: Case = Case {
     id: "drop-foreign-key",
-    scenarios: &["drop-foreign-key"],
+    scenarios: &[
+        "drop-foreign-key",
+        // The same change on a table whose foreign key cascades or sets NULL
+        // on delete.
+        "on-delete-cascade-drop-foreign-key",
+        "on-delete-set-null-drop-foreign-key",
+    ],
     exceptions: &[Exception {
         scenarios: &["drop-foreign-key-missing"],
         when: "if the table has no such foreign key",
@@ -1008,7 +1150,7 @@ const SET_TABLE_COMMENT: Case = Case {
 const MAX_TABLE_COMMENT: usize = 2048;
 
 /// Every case kilit knows.
-pub const CASES: [&Case; 35] = [
+pub const CASES: [&Case; 36] = [
     &ADD_COLUMN,
     &ADD_COLUMN_EXPRESSION_DEFAULT,
     &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT,
@@ -1034,6 +1176,7 @@ pub const CASES: [&Case; 35] = [
     &ADD_FUNCTIONAL_INDEX,
     &ADD_UNIQUE_INDEX,
     &ADD_FULLTEXT_INDEX,
+    &ADD_FULLTEXT_INDEX_WITH_ORDER,
     &DROP_INDEX,
     &ADD_FOREIGN_KEY,
     &ADD_FOREIGN_KEY_CHECKS_OFF,
@@ -1705,6 +1848,9 @@ fn check_one<'r>(
     results: &'r ServerResults,
     agreements: &mut Agreements<'r>,
 ) -> (Prediction, Option<LetterCase>) {
+    for (line, text) in &statement.run_comments {
+        left_out_comment(*line, text, session, schema, agreements);
+    }
     let mut unread_foreign_key_checks = false;
     // 8.0.46 has no restrict_fk_on_non_standard_key and 8.4.13 does: once
     // the input names it, every answer may depend on the server.
@@ -1874,7 +2020,80 @@ fn check_one<'r>(
         (_, Some((followed, goes_on))) => go_on(schema, &followed, &goes_on, session),
         (_, None) => go_on(schema, statement, &prediction, session),
     }
+    for (line, text) in &statement.run_comments_after {
+        left_out_comment(*line, text, session, schema, agreements);
+    }
     (created_fulltext_index(statement, prediction), letter_case)
+}
+
+/// Why kilit does not know a setting after a `/*!` comment names it.
+fn in_a_comment(line: usize, setting: &str) -> String {
+    format!(
+        "line {line} runs a /*! */ comment that names {setting}, and kilit does not read such \
+         comments"
+    )
+}
+
+/// A `/*!` comment that split.rs left out of every statement, on `line`:
+/// MySQL runs its text, and kilit does not read it. Each setting kilit
+/// follows that the text names, as a statement's text names it (in any
+/// case, `@OLD_SQL_MODE` too), is from here on as after a SET of it that
+/// kilit cannot read. With GLOBAL or PERSIST in the text, later input files
+/// start with it unclear too.
+fn left_out_comment(
+    line: usize,
+    text: &str,
+    session: &mut Session,
+    schema: &mut Schema,
+    agreements: &mut Agreements<'_>,
+) {
+    let text = text.to_ascii_lowercase();
+    let global = text.contains("global") || text.contains("persist");
+    if text.contains("restrict_fk_on_non_standard_key") {
+        session.restrict_fk_set = true;
+        agreements.server_dependent = true;
+    }
+    if text.contains("storage_engine") {
+        schema.default_engine_changes();
+    }
+    if text.contains("sql_mode") {
+        session.sql_mode_set = true;
+        session.sql_mode = SqlMode::Unclear(in_a_comment(line, "sql_mode"));
+    }
+    if text.contains("binlog_format") {
+        session.binlog_format_set = true;
+    }
+    if text.contains("foreign_key_checks") {
+        session.foreign_key_checks = Setting::Unknown;
+        session.foreign_key_checks_global = false;
+        session.earlier_session.foreign_key_checks = false;
+        session.foreign_key_checks_unknown = in_a_comment(line, "foreign_key_checks");
+        if global {
+            session.later_sessions.foreign_key_checks_global = true;
+        }
+    }
+    if text.contains("sql_log_bin") {
+        session.binary_log = BinaryLog::Other(format!(
+            "sql_log_bin in a /*! */ comment on line {line}, which kilit does not read"
+        ));
+        if global {
+            session.later_sessions.sql_log_bin_global = true;
+        }
+    }
+    if text.contains("innodb_default_row_format") {
+        session.default_row_format_set = true;
+        schema.default_row_format_changes();
+    }
+    if text.contains("innodb_strict_mode") {
+        session.strict_mode_set = true;
+        schema.default_row_format_changes();
+    }
+    if text.contains("old_alter_table") {
+        session.old_alter_table = OldAlterTable::InComment(line);
+        if global {
+            session.later_sessions.old_alter_table_unclear = true;
+        }
+    }
 }
 
 /// A `CREATE FULLTEXT INDEX`, which kilit answers and follows as the `ALTER
@@ -1969,6 +2188,9 @@ enum Rewritten {
 /// --pretend` does not print it). A refused CREATE TABLE is taken as lost
 /// too: kilit gives that table no answer either way.
 fn rewritten(statement: &Statement, schema: &Schema, session: &Session) -> Option<Rewritten> {
+    if let Some(refused) = refused_by_mysql(statement, schema) {
+        return Some(refused);
+    }
     // Without a dump, a table no statement before shows may be there: MySQL
     // then keeps it as it is, and creates nothing. One a statement before
     // dropped or renamed is not there.
@@ -2034,10 +2256,16 @@ fn rewritten(statement: &Statement, schema: &Schema, session: &Session) -> Optio
             column.name
         )
     } else {
+        let mode = match &session.sql_mode {
+            SqlMode::Unclear(why) => why.clone(),
+            SqlMode::NotStrict => "the input sets a sql_mode that is not strict".to_owned(),
+            SqlMode::ServerDefault | SqlMode::Strict => {
+                "the input sets no strict sql_mode before it".to_owned()
+            }
+        };
         format!(
             "line {line}: {} is longer than its type holds, and unless the sql_mode is \
-             strict MySQL makes it a TEXT or BLOB type; the input sets no strict sql_mode \
-             before it",
+             strict MySQL makes it a TEXT or BLOB type; {mode}",
             column.name
         )
     };
@@ -2264,11 +2492,15 @@ fn predict_kind<'r>(
 ///   default (error 1674);
 /// - add-column-blob-literal-default and modify-column-blob-literal-default:
 ///   a quoted default on the TEXT, BLOB, JSON or GEOMETRY column the
-///   statement writes (error 1101).
-const FAILS_FROM_THE_STATEMENT: [&Case; 3] = [
+///   statement writes (error 1101);
+/// - add-fulltext-index-with-order: ASC or DESC on a key part of a FULLTEXT
+///   index (error 1221; by hand on MySQL 8.0.46 and 8.4.13, on MyISAM and
+///   COMPACT tables too).
+const FAILS_FROM_THE_STATEMENT: [&Case; 4] = [
     &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT,
     &ADD_COLUMN_BLOB_LITERAL_DEFAULT,
     &MODIFY_COLUMN_BLOB_LITERAL_DEFAULT,
+    &ADD_FULLTEXT_INDEX_WITH_ORDER,
 ];
 
 /// An answer on a table kilit does not know: one it lost track of, one no
@@ -2940,6 +3172,9 @@ enum OldAlterTable {
     /// The statement on this line sets it globally, to `DEFAULT`, or in a
     /// form kilit cannot read. It stays unknown from there on.
     Unknown(usize),
+    /// A `/*!` comment on this line, which MySQL runs and kilit does not
+    /// read, names it. It stays unknown from there on.
+    InComment(usize),
     /// An earlier session set it globally, or in a form kilit cannot read,
     /// and this one starts with the global value.
     UnknownFromEarlierSession,
@@ -3100,7 +3335,9 @@ impl OldAlterTable {
     fn unknown(self) -> bool {
         matches!(
             self,
-            OldAlterTable::Unknown(_) | OldAlterTable::UnknownFromEarlierSession
+            OldAlterTable::Unknown(_)
+                | OldAlterTable::InComment(_)
+                | OldAlterTable::UnknownFromEarlierSession
         )
     }
 }
@@ -3339,6 +3576,12 @@ fn predict<'r>(
                  cannot read, and with it ON MySQL copies the table"
             ));
         }
+        OldAlterTable::InComment(line) => {
+            return unknown(format!(
+                "{}, and with it ON MySQL copies the table",
+                in_a_comment(line, "old_alter_table")
+            ));
+        }
         OldAlterTable::UnknownFromEarlierSession => {
             return unknown(
                 "an earlier file sets old_alter_table globally or in a form kilit cannot read, \
@@ -3450,6 +3693,17 @@ fn predict<'r>(
         schema,
     };
     let prediction = match (myisam, measured) {
+        // The error comes from the statement alone, whatever the engine or
+        // row format.
+        (Some(_), _) | (None, Some(_)) if std::ptr::eq(case, &ADD_FULLTEXT_INDEX_WITH_ORDER) => {
+            let mut notes = notes;
+            notes.push(
+                "the lab measured it on a DYNAMIC table; by hand on MySQL 8.0.46 and 8.4.13, \
+                 MyISAM and COMPACT tables refuse it alike"
+                    .to_owned(),
+            );
+            answer(case, &situation, variant, results, agreements, notes)
+        }
         (Some(table), _) => on_myisam(
             operation, sql, case, table, &situation, variant, results, agreements, notes,
         ),
@@ -4493,10 +4747,34 @@ fn applies(condition: Condition, situation: &Situation<'_>) -> Applies {
     let TableState::Known(table) = situation.table else {
         return match condition {
             Condition::NewForeignKey(problem) => new_foreign_key(problem, situation),
+            Condition::SetNullOnNotNull => match situation.foreign_key {
+                Some(key) if sets_null_on_delete(key) && key.columns.len() == 1 => Applies::Maybe,
+                _ => Applies::No,
+            },
+            Condition::BinaryText => match situation.index {
+                Some(index) if index.kind == IndexKind::Fulltext && index.columns.len() == 1 => {
+                    Applies::Maybe
+                }
+                _ => Applies::No,
+            },
             _ => Applies::Maybe,
         };
     };
     match (condition, situation.column) {
+        (Condition::SetNullOnNotNull, _) => set_null_on_not_null(table, situation),
+        (Condition::BinaryText, _) => match situation.index {
+            Some(index) if index.kind == IndexKind::Fulltext => match index.columns.as_slice() {
+                [entry] => match table.column(crate::schema::indexed_column(entry)) {
+                    Some(column) if is_binary_text(table, column) => Applies::Yes(vec![format!(
+                        "{} is TEXT in the binary character set, which MySQL makes a BLOB",
+                        column.name
+                    )]),
+                    _ => Applies::No,
+                },
+                _ => Applies::No,
+            },
+            _ => Applies::No,
+        },
         (Condition::NewForeignKey(problem), _) => new_foreign_key(problem, situation),
         (Condition::NoSuchName, _) => no_such_name(table, situation),
         (Condition::RowTooLarge, _) => match situation.row {
@@ -4613,6 +4891,347 @@ fn is_plain_text(table: &Table, column: &Column) -> bool {
         && table
             .text_settings(column)
             .is_ok_and(|settings| settings.charset.name != "binary")
+}
+
+/// The shapes of a FULLTEXT index the lab measured on a DYNAMIC table: one
+/// or two columns, each VARCHAR, TEXT, MEDIUMTEXT or LONGTEXT in a
+/// character set kilit can tell and that is not binary; and one TEXT
+/// column in the binary character set, which fails (see
+/// [`Condition::BinaryText`]). Any other is unknown.
+fn fulltext_shape(table: &Table, index: &Index) -> Result<(), String> {
+    const MEASURED: [&str; 3] = ["TEXT", "MEDIUMTEXT", "LONGTEXT"];
+    let columns: Vec<&Column> = index
+        .columns
+        .iter()
+        .filter_map(|entry| table.column(crate::schema::indexed_column(entry)))
+        .collect();
+    // A missing column is check_new_index's.
+    if columns.len() != index.columns.len() {
+        return Ok(());
+    }
+    if let Some(column) = columns.iter().find(|column| column.generated.is_some()) {
+        return Err(format!(
+            "{} is a generated column, and a FULLTEXT index on it has not been measured; MySQL \
+             refuses one on a VIRTUAL column (error 3106, by hand on MySQL 8.0.46 and 8.4.13)",
+            column.name
+        ));
+    }
+    if let [column] = columns.as_slice()
+        && is_binary_text(table, column)
+    {
+        return Ok(());
+    }
+    if columns.len() > 2 {
+        return Err(format!(
+            "a FULLTEXT index of {} columns has not been measured; the lab measured one or two",
+            columns.len()
+        ));
+    }
+    for column in columns {
+        let name = column.data_type.to_string().to_ascii_uppercase();
+        let text = matches!(column.data_type, DataType::VarChar { .. })
+            || MEASURED.contains(&name.as_str());
+        let charset = table
+            .text_settings(column)
+            .map(|settings| settings.charset.name);
+        match (text, charset) {
+            (true, Ok("binary")) => {
+                return Err(format!(
+                    "{} is {name} in the binary character set, and a FULLTEXT index on it has \
+                     not been measured; the lab measured MySQL refusing one on a TEXT column in \
+                     the binary character set (error 1283)",
+                    column.name
+                ));
+            }
+            (true, Ok(_)) => {}
+            (true, Err(why)) => {
+                return Err(format!(
+                    "{why}, and a FULLTEXT index has been measured only in a character set \
+                     kilit can tell"
+                ));
+            }
+            (false, _) if name == "BLOB" || name.starts_with("VARBINARY") => {
+                return Err(format!(
+                    "{} is {name}, and a FULLTEXT index on it has not been measured; the lab \
+                     measured MySQL refusing one on a TEXT column in the binary character set \
+                     (error 1283)",
+                    column.name
+                ));
+            }
+            (false, _) => {
+                return Err(format!(
+                    "{} is {name}, and a FULLTEXT index has been measured only on VARCHAR, \
+                     TEXT, MEDIUMTEXT and LONGTEXT columns",
+                    column.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The foreign key of `table` that sets the column `old_name` to NULL on
+/// delete or update, when the new definition `column` makes it NOT NULL:
+/// MySQL refuses that MODIFY or CHANGE (error 1830, by hand on MySQL 8.0.46
+/// and 8.4.13), and the table stays as it was.
+fn sets_to_null<'t>(table: &'t Table, old_name: &str, column: &Column) -> Option<&'t ForeignKey> {
+    if column.nullable != Some(false) {
+        return None;
+    }
+    table.foreign_keys.iter().find(|key| {
+        (key.on_delete == Some(ForeignKeyAction::SetNull)
+            || key.on_update == Some(ForeignKeyAction::SetNull))
+            && key.columns.iter().any(|name| same_column(name, old_name))
+    })
+}
+
+/// What MySQL refuses outright, by the lab or by hand on MySQL 8.0.46 and
+/// 8.4.13, where kilit's answer is unknown or a failure: the tables stay
+/// as they were, and a refused CREATE TABLE makes no table, which kilit
+/// takes as lost (it gives that table no answer either way).
+fn refused_by_mysql(statement: &Statement, schema: &Schema) -> Option<Rewritten> {
+    match &statement.kind {
+        StatementKind::Alter(alter) => {
+            if crate::parse::ordered_index(&statement.sql).is_some() {
+                return Some(Rewritten::Refused);
+            }
+            let TableState::Known(table) = schema.table(&alter.table) else {
+                return None;
+            };
+            // Only a FULLTEXT index, a key that sets NULL, or a NOT NULL
+            // column in such a key can be refused here: the rest needs no
+            // copy of the table.
+            let in_set_null_key = |name: &str| {
+                table.foreign_keys.iter().any(|key| {
+                    sets_null(key) && key.columns.iter().any(|column| same_column(column, name))
+                })
+            };
+            // A column may become NOT NULL by a PRIMARY KEY too.
+            let relevant = alter.operations.iter().any(|operation| match operation {
+                Operation::AddIndex(index) => index.kind == IndexKind::Fulltext,
+                Operation::AddForeignKey(key) => sets_null(key),
+                Operation::AddColumn { column, .. } | Operation::ModifyColumn { column, .. } => {
+                    in_set_null_key(&column.name)
+                }
+                Operation::ChangeColumn { old_name, .. } => in_set_null_key(old_name),
+                Operation::AddPrimaryKey { columns } => columns
+                    .iter()
+                    .any(|entry| in_set_null_key(crate::schema::indexed_column(entry))),
+                _ => false,
+            });
+            if !relevant {
+                return None;
+            }
+            // MySQL judges the table as the whole statement leaves it; a new
+            // index or key alone changes no column.
+            let (after, added) = match alter.operations.as_slice() {
+                [Operation::AddIndex(_)] => (Cow::Borrowed(table), None),
+                [Operation::AddForeignKey(key)] => (Cow::Borrowed(table), Some(key)),
+                _ => match crate::schema::table_after(table, alter) {
+                    Ok(after) => (Cow::Owned(after), None),
+                    // MySQL may refuse it, and kilit cannot tell how the
+                    // clauses leave the table: it stops trusting the table.
+                    Err(why) => {
+                        return Some(Rewritten::Lost {
+                            table: alter.table.clone(),
+                            reason: format!(
+                                "line {}: {why}, beside a change MySQL may refuse",
+                                statement.line
+                            ),
+                            engine: table.engine.clone(),
+                        });
+                    }
+                },
+            };
+            let after = after.as_ref();
+            let written = |name: &str| {
+                alter.operations.iter().any(|operation| match operation {
+                    Operation::AddColumn { column, .. }
+                    | Operation::ModifyColumn { column, .. } => same_column(&column.name, name),
+                    Operation::ChangeColumn { column, .. } => same_column(&column.name, name),
+                    Operation::AddPrimaryKey { columns } => columns
+                        .iter()
+                        .any(|entry| same_column(crate::schema::indexed_column(entry), name)),
+                    _ => false,
+                })
+            };
+            let new_fulltext = alter.operations.iter().any(|operation| match operation {
+                Operation::AddIndex(index) if index.kind == IndexKind::Fulltext => index
+                    .columns
+                    .iter()
+                    .filter_map(|entry| after.column(crate::schema::indexed_column(entry)))
+                    .any(|column| refuses_fulltext(after, column)),
+                _ => false,
+            });
+            let adds_key = alter
+                .operations
+                .iter()
+                .any(|operation| matches!(operation, Operation::AddForeignKey(_)));
+            let set_null_on_not_null = is_innodb(after)
+                && after
+                    .foreign_keys
+                    .iter()
+                    .chain(added)
+                    .filter(|key| sets_null(key))
+                    .any(|key| {
+                        key.columns.iter().any(|name| {
+                            after.column(name).is_some_and(|column| {
+                                !after.is_nullable(column) || after.in_primary_key(&column.name)
+                            }) && (adds_key || written(name))
+                        })
+                    });
+            (new_fulltext || set_null_on_not_null).then_some(Rewritten::Refused)
+        }
+        StatementKind::CreateTable {
+            table,
+            if_not_exists,
+        } => {
+            let line = statement.line;
+            let reason = if let Some(ordered) = crate::parse::ordered_index(&statement.sql) {
+                format!(
+                    "line {line}: MySQL refuses ASC or DESC on a key part of its {} index \
+                     (error 1221)",
+                    ordered.name()
+                )
+            } else if let Some(column) = table
+                .indexes
+                .iter()
+                .filter(|index| index.kind == IndexKind::Fulltext)
+                .flat_map(|index| &index.columns)
+                .filter_map(|entry| table.column(crate::schema::indexed_column(entry)))
+                .find(|column| refuses_fulltext(table, column))
+            {
+                format!(
+                    "line {line}: MySQL refuses its FULLTEXT index on {} (error {})",
+                    column.name,
+                    if column.generated.is_some() {
+                        3106
+                    } else {
+                        1283
+                    }
+                )
+            } else if let Some(key) = table.foreign_keys.iter().find(|key| {
+                is_innodb(table)
+                    && sets_null(key)
+                    && key.columns.iter().any(|name| {
+                        table
+                            .column(name)
+                            .is_some_and(|column| !table.is_nullable(column))
+                    })
+            }) {
+                format!(
+                    "line {line}: MySQL refuses its foreign key {}, which sets a NOT NULL column \
+                     to NULL (error 1830)",
+                    key.name.as_deref().unwrap_or("without a name")
+                )
+            } else if table
+                .columns
+                .iter()
+                .all(|column| row::too_long_kind(Some(table), column).is_none())
+            {
+                // By hand on MySQL 8.0.46 and 8.4.13, in strict mode and not:
+                // latin1 VARCHAR(65535), VARBINARY(65535) alone, and utf8mb4
+                // VARCHAR(16383) next to a BIGINT primary key. A column
+                // longer than its type holds is `rewritten`'s.
+                let bytes = row_past_the_limit(table)?;
+                format!(
+                    "line {line}: MySQL refuses it, as its row would take {}, past the {} it \
+                     allows (error 1118)",
+                    row::bytes(bytes),
+                    row::MAX_ROW_BYTES
+                )
+            } else {
+                return None;
+            };
+            // CREATE TABLE IF NOT EXISTS of a table that is there leaves it
+            // as it is, refused or not (by hand on MySQL 8.0.46 and 8.4.13),
+            // and a refused temporary table hides no table.
+            if (*if_not_exists && schema.table(&table.name) != TableState::Missing)
+                || crate::schema::creates_temporary(&statement.sql)
+            {
+                return Some(Rewritten::Refused);
+            }
+            Some(Rewritten::Lost {
+                table: table.name.clone(),
+                reason,
+                engine: table.engine.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Whether a foreign key sets its columns to NULL, on delete or on update.
+fn sets_null(key: &ForeignKey) -> bool {
+    key.on_delete == Some(ForeignKeyAction::SetNull)
+        || key.on_update == Some(ForeignKeyAction::SetNull)
+}
+
+/// Whether `table` is InnoDB: MySQL keeps foreign keys on InnoDB tables
+/// only, and refuses a SET NULL one on a NOT NULL column there.
+fn is_innodb(table: &Table) -> bool {
+    matches!(table.engine, None | Some(Engine::InnoDb))
+}
+
+/// Whether MySQL refuses a FULLTEXT index on `column`, by hand on MySQL
+/// 8.0.46 and 8.4.13: a VIRTUAL generated column (error 3106), or a
+/// column in the binary character set, or in utf16, utf16le, utf32 or ucs2
+/// (error 1283).
+fn refuses_fulltext(table: &Table, column: &Column) -> bool {
+    column
+        .generated
+        .as_ref()
+        .is_some_and(|generated| !generated.stored)
+        || in_binary(table, column)
+        || column.data_type.is_text()
+            && written_charset(table, column).is_some_and(|charset| {
+                ["utf16", "utf16le", "utf32", "ucs2"]
+                    .iter()
+                    .any(|wide| charset.eq_ignore_ascii_case(wide))
+            })
+}
+
+/// The character set written for `column`, or for its table, as written:
+/// from the CHARACTER SET, or from the collation's first word.
+fn written_charset<'t>(table: &'t Table, column: &'t Column) -> Option<&'t str> {
+    let from_collation = |collation: &'t str| collation.split('_').next();
+    column
+        .charset
+        .as_deref()
+        .or_else(|| column.collation.as_deref().and_then(from_collation))
+        .or(table.charset.as_deref())
+        .or_else(|| table.collation.as_deref().and_then(from_collation))
+}
+
+/// The bytes of the row of a new table, when kilit counts it past the
+/// 65,535 MySQL allows.
+fn row_past_the_limit(table: &Table) -> Option<u64> {
+    let columns: Vec<&Column> = table.columns.iter().collect();
+    row::count(table, &columns, page_format(table))
+        .ok()
+        .map(|counts| counts.row)
+        .filter(|bytes| *bytes > row::MAX_ROW_BYTES)
+}
+
+/// Whether a VARCHAR or TEXT column is in the binary character set (the
+/// column's or the table's): MySQL makes it a VARBINARY or a BLOB, and
+/// refuses a FULLTEXT index on it (error 1283, by hand on MySQL 8.0.46 and
+/// 8.4.13).
+fn in_binary(table: &Table, column: &Column) -> bool {
+    column.data_type.is_text()
+        && table
+            .text_settings(column)
+            .is_ok_and(|settings| settings.charset.name == "binary")
+}
+
+/// Whether a column is TEXT in the binary character set (the column's or
+/// the table's), which MySQL makes a BLOB: by hand on MySQL 8.0.46 and
+/// 8.4.13.
+fn is_binary_text(table: &Table, column: &Column) -> bool {
+    column.data_type.to_string().eq_ignore_ascii_case("TEXT")
+        && table
+            .text_settings(column)
+            .is_ok_and(|settings| settings.charset.name == "binary")
 }
 
 fn entry_column(entry: &str) -> Option<&str> {
@@ -4737,6 +5356,35 @@ impl KeySeen {
 /// Whether a problem of the new foreign key holds. A value of
 /// `restrict_fk_on_non_standard_key` the lab did not measure leaves the index
 /// rules without an answer, also when kilit cannot see the tables.
+/// Whether a new foreign key sets its columns to NULL on delete, with no
+/// ON UPDATE clause: the shape the lab measured with a NOT NULL column.
+fn sets_null_on_delete(key: &ForeignKey) -> bool {
+    key.on_delete == Some(ForeignKeyAction::SetNull) && key.on_update.is_none()
+}
+
+/// The new foreign key sets its one column, NOT NULL in `table`, to NULL on
+/// delete: MySQL refuses it (error 1830, measured with foreign_key_checks on
+/// and off). A key on its own table, or of several columns, has not been
+/// measured; see [`foreign_key_seen`].
+fn set_null_on_not_null(table: &Table, situation: &Situation<'_>) -> Applies {
+    let Some(key) = situation.foreign_key else {
+        return Applies::No;
+    };
+    if !sets_null_on_delete(key) || key.referenced_table.eq_ignore_ascii_case(&table.name) {
+        return Applies::No;
+    }
+    let [column] = key.columns.as_slice() else {
+        return Applies::No;
+    };
+    match table.column(column) {
+        Some(column) if !table.is_nullable(column) => Applies::Yes(vec![format!(
+            "{} is NOT NULL, and the foreign key sets it to NULL on delete",
+            column.name
+        )]),
+        _ => Applies::No,
+    }
+}
+
 fn new_foreign_key(problem: KeyProblem, situation: &Situation<'_>) -> Applies {
     let Some(key) = situation.foreign_key else {
         return Applies::No;
@@ -4833,9 +5481,12 @@ fn foreign_key_seen(
     }
     let sets_null = key.on_delete == Some(ForeignKeyAction::SetNull)
         || key.on_update == Some(ForeignKeyAction::SetNull);
+    // One column on another table, set to NULL on delete only, is measured:
+    // see [`Condition::SetNullOnNotNull`].
+    let measured = sets_null_on_delete(key) && pairs.len() == 1 && !self_reference;
     if let Some((column, _)) = pairs
         .iter()
-        .find(|(column, _)| sets_null && !child.is_nullable(column))
+        .find(|(column, _)| sets_null && !measured && !child.is_nullable(column))
     {
         return Err(format!(
             "the foreign key {name} sets {} to NULL, which is NOT NULL, and the lab has not \
@@ -6458,6 +7109,30 @@ fn classify(
             if let TableState::Known(table) = table {
                 unmeasured = check_new_index(table, index).err();
             }
+            match crate::parse::ordered_index(sql) {
+                Some(crate::parse::OrderedIndex::Fulltext) if index.kind == IndexKind::Fulltext => {
+                    return Ok(Classified {
+                        case: &ADD_FULLTEXT_INDEX_WITH_ORDER,
+                        notes,
+                        unmeasured,
+                        column: None,
+                        row,
+                    });
+                }
+                Some(ordered) => {
+                    return Err(format!(
+                        "MySQL refuses ASC or DESC on a key part of a {} index (error 1221, by \
+                         hand on MySQL 8.0.46 and 8.4.13)",
+                        ordered.name()
+                    ));
+                }
+                None => {}
+            }
+            if index.kind == IndexKind::Fulltext
+                && let TableState::Known(table) = table
+            {
+                fulltext_shape(table, index)?;
+            }
             match index.kind {
                 IndexKind::Plain => {
                     check_json_columns(index, table, &mut notes)?;
@@ -6624,6 +7299,15 @@ fn check_modified_shape(
     {
         return Err(format!(
             "putting {old_name} AFTER itself has not been measured yet"
+        ));
+    }
+    if let TableState::Known(table) = table
+        && let Some(key) = sets_to_null(table, old_name, column)
+    {
+        return Err(format!(
+            "{old_name} is in the foreign key {}, which sets it to NULL, and MySQL refuses to \
+             make it NOT NULL (error 1830, by hand on MySQL 8.0.46 and 8.4.13)",
+            key.name.as_deref().unwrap_or("without a name")
         ));
     }
     if let TableState::Known(table) = table
@@ -6894,9 +7578,9 @@ fn check_dropped_index(table: &Table, name: &str) -> Result<(), String> {
 
 /// What kilit cannot see about a new foreign key unless it knows both
 /// tables: the shapes [`foreign_key_seen`] leaves unknown.
-const FOREIGN_KEY_UNSEEN: &str = "if a column of the key is missing, or NOT NULL with ON DELETE \
-     SET NULL, or the table is MyISAM: not measured, so kilit cannot tell (it can when it knows \
-     both tables)";
+const FOREIGN_KEY_UNSEEN: &str = "if a column of the key is missing, or NOT NULL with SET NULL \
+     in another form than ON DELETE SET NULL alone, or the table is MyISAM: not measured, so \
+     kilit cannot tell (it can when it knows both tables)";
 
 /// The case of a new foreign key, by the session's foreign_key_checks.
 fn foreign_key_case(
@@ -9276,7 +9960,7 @@ mod tests {
     fn a_second_fulltext_index_does_not_rebuild_the_table() {
         // The first FULLTEXT index is in the schema dump.
         let dump = "CREATE TABLE posts (id INT PRIMARY KEY, title VARCHAR(100), body TEXT,
-                    FULLTEXT KEY posts_title_fulltext (title));";
+                    FULLTEXT KEY posts_title_fulltext (title)) DEFAULT CHARSET=utf8mb4;";
         let Prediction::Measured {
             case,
             verdict,
@@ -9338,6 +10022,9 @@ mod tests {
             vec![
                 "if the table already has a FULLTEXT index: INPLACE, no rebuild, writes wait \
                  (add-second-fulltext-index)"
+                    .to_owned(),
+                "if the column is TEXT in the binary character set, which MySQL makes a BLOB: \
+                 fails with error 1283 (add-fulltext-index-binary-text)"
                     .to_owned(),
                 "if the table is MyISAM: COPY, copies every row, writes wait \
                  (myisam-add-fulltext-index and myisam-add-fulltext-index-text)"
@@ -9489,6 +10176,130 @@ mod tests {
         // A CREATE FULLTEXT INDEX is not measured itself.
         let prediction = only("CREATE FULLTEXT INDEX ft ON posts (body)");
         assert!(reason(prediction).contains("CREATE FULLTEXT INDEX itself has not been measured"),);
+    }
+
+    /// The lab's tables, as scenarios/tables.sql writes them.
+    const LAB_TABLES: &str = include_str!("../../../scenarios/tables.sql");
+
+    #[test]
+    fn columns_at_the_limits_of_their_type_and_of_the_row_get_what_mysql_does() {
+        // By hand on MySQL 8.0.46 and 8.4.13, on the lab's orders, in strict
+        // mode and with sql_mode = '' alike unless said.
+        let next = "ALTER TABLE orders ADD COLUMN d INT NULL";
+        let strict = "SET sql_mode = 'STRICT_TRANS_TABLES';";
+        for (session, column, said_first, then) in [
+            // Under the limit of the type: the row is too large (1118).
+            (
+                "",
+                "c VARCHAR(16383) CHARACTER SET utf8mb4 NULL",
+                "fails with error 1118",
+                "kept",
+            ),
+            (
+                "",
+                "c VARCHAR(65535) CHARACTER SET latin1 NULL",
+                "fails with error 1118",
+                "kept",
+            ),
+            (
+                "",
+                "c VARBINARY(65535) NULL",
+                "fails with error 1118",
+                "kept",
+            ),
+            // Past it: refused in strict mode (1074), else another type.
+            (
+                strict,
+                "c VARCHAR(16384) CHARACTER SET utf8mb4 NULL",
+                "unknown",
+                "kept",
+            ),
+            (
+                "",
+                "c VARCHAR(16384) CHARACTER SET utf8mb4 NULL",
+                "unknown",
+                "lost",
+            ),
+            (
+                strict,
+                "c VARCHAR(65536) CHARACTER SET latin1 NULL",
+                "unknown",
+                "kept",
+            ),
+            (
+                "SET sql_mode = '';",
+                "c VARCHAR(65536) CHARACTER SET latin1 NULL",
+                "unknown",
+                "lost",
+            ),
+            (strict, "c VARBINARY(65536) NULL", "unknown", "kept"),
+            ("", "c VARBINARY(65536) NULL", "unknown", "lost"),
+            // BINARY holds 255 in every mode.
+            (
+                "",
+                "c BINARY(255) NULL",
+                "INSTANT, no rebuild, writes continue",
+                "kept",
+            ),
+            ("", "c BINARY(256) NULL", "unknown", "kept"),
+        ] {
+            let sql = format!("{session}\nALTER TABLE orders ADD COLUMN {column};\n{next};");
+            let mut predictions = predictions_with(LAB_TABLES, &sql);
+            let last = predictions.pop().unwrap();
+            let first = predictions.pop().unwrap();
+            assert!(said(&first).starts_with(said_first), "{sql}: {first:?}");
+            match then {
+                "kept" => assert_eq!(said(&last), INSTANT_ANSWER, "{sql}"),
+                _ => assert!(
+                    reason(last).starts_with("kilit lost track of orders"),
+                    "{sql}"
+                ),
+            }
+        }
+        // CREATE TABLE: MySQL refuses a row past 65,535 bytes (1118) and makes
+        // no table; at the limit it takes it.
+        for (create, made) in [
+            (
+                "CREATE TABLE t (c VARCHAR(65535) CHARACTER SET latin1 NULL)",
+                false,
+            ),
+            ("CREATE TABLE t (c VARBINARY(65535) NULL)", false),
+            (
+                "CREATE TABLE t (c VARCHAR(65533) CHARACTER SET latin1 NULL)",
+                false,
+            ),
+            (
+                "CREATE TABLE t (c VARCHAR(65533) CHARACTER SET latin1 NOT NULL)",
+                true,
+            ),
+            (
+                "CREATE TABLE t (c VARCHAR(65532) CHARACTER SET latin1 NULL)",
+                true,
+            ),
+            (
+                "CREATE TABLE t (c VARCHAR(16383) CHARACTER SET utf8mb4 NULL)",
+                true,
+            ),
+            (
+                "CREATE TABLE t (id BIGINT PRIMARY KEY, c VARCHAR(16383) CHARACTER SET utf8mb4)",
+                false,
+            ),
+            ("CREATE TABLE t (c BINARY(255) NULL)", true),
+        ] {
+            let after = predictions(&format!(
+                "{create};\nALTER TABLE t ADD COLUMN x TINYINT NULL;"
+            ))
+            .pop()
+            .unwrap();
+            if made {
+                assert!(!said(&after).starts_with("unknown"), "{create}: {after:?}");
+            } else {
+                assert!(
+                    reason(after).contains("past the 65535 it allows (error 1118)"),
+                    "{create}"
+                );
+            }
+        }
     }
 
     #[test]

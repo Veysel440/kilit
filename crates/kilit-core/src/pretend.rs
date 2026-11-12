@@ -185,6 +185,15 @@ pub fn read_pretend(text: &str) -> Option<Pretend> {
                 Some(migration) => {
                     for mut statement in parse(sql) {
                         statement.line = number;
+                        // Laravel prints a statement on one line: its
+                        // comments are on that line too.
+                        for (line, _) in statement
+                            .run_comments
+                            .iter_mut()
+                            .chain(statement.run_comments_after.iter_mut())
+                        {
+                            *line = number;
+                        }
                         if migration.first_read.is_none() && asks_the_database(&statement.sql) {
                             migration.first_read = Some(migration.statements.len());
                         }

@@ -1,0 +1,6 @@
+title = "Add a foreign key that sets a nullable column to NULL on delete, with foreign_key_checks on (the default)"
+setup = [
+    "ALTER TABLE orders MODIFY COLUMN user_id BIGINT UNSIGNED NULL",
+]
+session = ["SET foreign_key_checks = 1"]
+operation = "ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE SET NULL"

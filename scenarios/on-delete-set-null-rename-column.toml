@@ -1,0 +1,6 @@
+title = "Rename a column on a table whose foreign key sets NULL on delete"
+setup = [
+    "ALTER TABLE orders MODIFY COLUMN user_id BIGINT UNSIGNED NULL",
+    "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE SET NULL",
+]
+operation = "RENAME COLUMN note TO memo"

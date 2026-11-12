@@ -17,6 +17,12 @@ pub struct Piece<'a> {
     /// The statement without the final semicolon and surrounding whitespace.
     /// Comments before the statement are left out.
     pub sql: &'a str,
+    /// The `/*!` comments left out since the statement before: alone
+    /// between semicolons, or before this statement's first word. MySQL
+    /// runs their text; kilit does not read it. Each with its line.
+    pub run_comments: Vec<(usize, &'a str)>,
+    /// The same, after the last statement: MySQL runs them after it.
+    pub run_comments_after: Vec<(usize, &'a str)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -36,6 +42,9 @@ pub fn split(input: &str) -> Vec<Piece<'_>> {
     let mut line = 1;
     // The byte offset and line where the current statement starts.
     let mut start: Option<(usize, usize)> = None;
+    // A block comment outside any statement: where it starts, and its line.
+    let mut comment: Option<(usize, usize)> = None;
+    let mut run_comments = Vec::new();
     let mut chars = input.char_indices().peekable();
 
     while let Some((i, c)) = chars.next() {
@@ -46,6 +55,8 @@ pub fn split(input: &str) -> Vec<Piece<'_>> {
                         pieces.push(Piece {
                             line: begin_line,
                             sql: input[begin..i].trim_end(),
+                            run_comments: std::mem::take(&mut run_comments),
+                            run_comments_after: Vec::new(),
                         });
                     }
                 }
@@ -53,6 +64,9 @@ pub fn split(input: &str) -> Vec<Piece<'_>> {
                 '-' if starts_dash_comment(&input[i..]) => state = State::LineComment,
                 '/' if chars.peek().is_some_and(|&(_, next)| next == '*') => {
                     chars.next();
+                    if start.is_none() {
+                        comment = Some((i, line));
+                    }
                     state = State::BlockComment;
                 }
                 c if c.is_whitespace() => {}
@@ -86,6 +100,12 @@ pub fn split(input: &str) -> Vec<Piece<'_>> {
                 if c == '*' && chars.peek().is_some_and(|&(_, next)| next == '/') {
                     chars.next();
                     state = State::Code;
+                    if let Some((begin, begin_line)) = comment.take() {
+                        let text = &input[begin..i + 2];
+                        if text.starts_with("/*!") {
+                            run_comments.push((begin_line, text));
+                        }
+                    }
                 }
             }
         }
@@ -99,7 +119,13 @@ pub fn split(input: &str) -> Vec<Piece<'_>> {
         pieces.push(Piece {
             line: begin_line,
             sql: input[begin..].trim_end(),
+            run_comments,
+            run_comments_after: Vec::new(),
         });
+    } else if let Some(last) = pieces.last_mut() {
+        // No statement follows: they run after the last one, and may carry
+        // to later inputs.
+        last.run_comments_after = run_comments;
     }
     pieces
 }
@@ -204,8 +230,38 @@ SELECT 1";
             pieces,
             [Piece {
                 line: 4,
-                sql: "ALTER TABLE a ADD c INT"
+                sql: "ALTER TABLE a ADD c INT",
+                run_comments: Vec::new(),
+                run_comments_after: Vec::new(),
             }]
+        );
+    }
+
+    #[test]
+    fn comments_mysql_runs_are_kept_apart_with_their_line() {
+        let input = "SET sql_mode = 'STRICT_ALL_TABLES';\n/*!40101 SET SQL_MODE='' */;\n\
+                     /* plain */ /*!40014 SET FOREIGN_KEY_CHECKS=0 */ ALTER TABLE a ADD c INT;\n\
+                     ALTER TABLE a /*!50100 x */ ADD d INT;";
+        let pieces = split(input);
+        assert_eq!(pieces.len(), 3);
+        assert!(pieces[0].run_comments.is_empty());
+        assert_eq!(
+            pieces[1].run_comments,
+            [
+                (2, "/*!40101 SET SQL_MODE='' */"),
+                (3, "/*!40014 SET FOREIGN_KEY_CHECKS=0 */")
+            ]
+        );
+        assert_eq!(pieces[1].sql, "ALTER TABLE a ADD c INT");
+        // A comment inside a statement stays in its text.
+        assert!(pieces[2].run_comments.is_empty());
+        assert!(pieces[2].sql.contains("/*!50100 x */"));
+        // After the last statement, they run after it.
+        let trailer = split("ALTER TABLE a ADD c INT;\n/*!40014 SET FOREIGN_KEY_CHECKS=1 */;\n");
+        assert!(trailer[0].run_comments.is_empty());
+        assert_eq!(
+            trailer[0].run_comments_after,
+            [(2, "/*!40014 SET FOREIGN_KEY_CHECKS=1 */")]
         );
     }
 

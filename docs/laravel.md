@@ -162,6 +162,30 @@ note to the first read of each migration: `select`, `show`, `describe`, `desc`,
 change. In JSON the note is in that statement's `notes`. A later read in the
 same migration gets a one-line `read (not checked)` entry.
 
+## Foreign key actions and `fullText()`
+
+- `cascadeOnDelete()`, `cascadeOnUpdate()` and `nullOnDelete()` write `ON
+  DELETE CASCADE`, `ON UPDATE CASCADE` and `ON DELETE SET NULL`. MySQL's
+  [online DDL limitations][ddl-limits] say `LOCK=NONE` is not permitted on a
+  table with such a key. The lab measured INPLACE changes on tables with
+  these keys, and writes went on wherever they go on without the key, so
+  kilit's answers on such tables are the plain ones. See
+  [the findings](findings.md#tables-with-a-foreign-key-action).
+- `foreignId('user_id')->constrained()->nullOnDelete()` without `->nullable()`
+  fails with error 1830: MySQL does not take `SET NULL` on a `NOT NULL`
+  column. kilit says so on a table it knows, and says so in a note when it
+  does not know the table.
+- `nullOnUpdate()` on a non-nullable column is `UNKNOWN`: MySQL refuses it,
+  but the lab has not measured it.
+- `$table->fullText('note')` is answered for one or two `VARCHAR`, `TEXT`,
+  `MEDIUMTEXT` or `LONGTEXT` columns, in a character set that is not binary.
+  Laravel's `fullText()` takes no `ASC` or `DESC`; written by hand in raw
+  SQL it fails with error 1221. A `TEXT` column in the binary character set
+  fails with 1283. Other column types and three or more columns are
+  `UNKNOWN`.
+
+[ddl-limits]: https://dev.mysql.com/doc/refman/8.4/en/innodb-online-ddl-limitations.html
+
 ## `->change()` since Laravel 11
 
 Since Laravel 11, `->change()` replaces the whole column definition and

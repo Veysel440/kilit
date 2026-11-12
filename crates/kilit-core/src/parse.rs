@@ -37,7 +37,16 @@ pub fn parse(sql: &str) -> Vec<Statement> {
             line: piece.line,
             sql: piece.sql.to_owned(),
             kind: read(piece.sql),
+            run_comments: owned(piece.run_comments),
+            run_comments_after: owned(piece.run_comments_after),
         })
+        .collect()
+}
+
+fn owned(comments: Vec<(usize, &str)>) -> Vec<(usize, String)> {
+    comments
+        .into_iter()
+        .map(|(line, text)| (line, text.to_owned()))
         .collect()
 }
 
@@ -138,6 +147,11 @@ fn created_fulltext_index(sql: &str) -> Option<StatementKind> {
             return None;
         };
         columns.push(name(column)?);
+        // An explicit order, which MySQL refuses: see `ordered_index`.
+        let after = match after {
+            [order, after @ ..] if matches!(keyword(order), Keyword::ASC | Keyword::DESC) => after,
+            _ => after,
+        };
         match after {
             [Token::Comma, next @ ..] => rest = next,
             [Token::RParen, next @ ..] => {
@@ -195,6 +209,115 @@ fn created_fulltext_index(sql: &str) -> Option<StatementKind> {
         columns,
     }));
     Some(StatementKind::Alter(alter))
+}
+
+/// An index whose key parts are written with ASC or DESC, which MySQL
+/// refuses for these kinds (error 1221): FULLTEXT by the lab, SPATIAL and
+/// HASH by hand, on MySQL 8.0.46 and 8.4.13, in ALTER TABLE, CREATE INDEX
+/// and CREATE TABLE alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OrderedIndex {
+    Fulltext,
+    Spatial,
+    Hash,
+}
+
+impl OrderedIndex {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            OrderedIndex::Fulltext => "FULLTEXT",
+            OrderedIndex::Spatial => "SPATIAL",
+            OrderedIndex::Hash => "HASH",
+        }
+    }
+}
+
+/// The kind of the first FULLTEXT, SPATIAL or `USING HASH` index of `sql`
+/// that writes ASC or DESC on a key part, if any. Each definition between
+/// commas counts on its own, at any depth: an ALTER TABLE clause, or an
+/// index inside CREATE TABLE.
+pub(crate) fn ordered_index(sql: &str) -> Option<OrderedIndex> {
+    // Most statements name none of the three kinds: one pass over the bytes
+    // tells, before any tokens.
+    let bytes = sql.as_bytes();
+    let at = |from: usize, word: &[u8]| {
+        bytes
+            .get(from..from + word.len())
+            .is_some_and(|found| found.eq_ignore_ascii_case(word))
+    };
+    let special = bytes.iter().enumerate().any(|(i, byte)| match byte | 0x20 {
+        b'f' => at(i, b"fulltext"),
+        b's' => at(i, b"spatial"),
+        b'h' => at(i, b"hash"),
+        _ => false,
+    });
+    let ordered = || {
+        bytes.iter().enumerate().any(|(i, byte)| match byte | 0x20 {
+            b'a' => at(i, b"asc"),
+            b'd' => at(i, b"desc"),
+            _ => false,
+        })
+    };
+    if !special || !ordered() {
+        return None;
+    }
+    #[derive(Default)]
+    struct Definition {
+        kind: Option<OrderedIndex>,
+        ordered: bool,
+    }
+    let finished = |definition: &Definition| definition.kind.filter(|_| definition.ordered);
+    let mut open = vec![Definition::default()];
+    // HASH is the index kind only after USING; a name `hash` is not.
+    let mut after_using = false;
+    for token in words(sql) {
+        let plain = match &token {
+            Token::Word(word) if word.quote_style.is_none() => {
+                Some(word.value.to_ascii_uppercase())
+            }
+            _ => None,
+        };
+        let using = after_using;
+        after_using = plain.as_deref() == Some("USING");
+        match (&token, plain.as_deref()) {
+            (Token::LParen, _) => open.push(Definition::default()),
+            (Token::RParen, _) => {
+                if open.len() > 1
+                    && let Some(definition) = open.pop()
+                    && let Some(kind) = finished(&definition)
+                {
+                    return Some(kind);
+                }
+            }
+            (Token::Comma, _) => {
+                if let Some(definition) = open.last_mut() {
+                    if let Some(kind) = finished(definition) {
+                        return Some(kind);
+                    }
+                    *definition = Definition::default();
+                }
+            }
+            (_, Some("HASH")) if !using => {}
+            (_, Some(word @ ("FULLTEXT" | "SPATIAL" | "HASH"))) => {
+                if let Some(definition) = open.last_mut() {
+                    definition.kind.get_or_insert(match word {
+                        "FULLTEXT" => OrderedIndex::Fulltext,
+                        "SPATIAL" => OrderedIndex::Spatial,
+                        _ => OrderedIndex::Hash,
+                    });
+                }
+            }
+            // A key part's order belongs to the definition around its list.
+            (_, Some("ASC" | "DESC")) => {
+                let depth = open.len();
+                if depth >= 2 {
+                    open[depth - 2].ordered = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    open.iter().find_map(finished)
 }
 
 /// The table a `TRUNCATE TABLE` empties, in the form MySQL takes:

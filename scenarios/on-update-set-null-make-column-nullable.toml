@@ -1,0 +1,6 @@
+title = "Make a NOT NULL column nullable on a table whose foreign key sets NULL on update"
+setup = [
+    "ALTER TABLE orders MODIFY COLUMN user_id BIGINT UNSIGNED NULL",
+    "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id) ON UPDATE SET NULL",
+]
+operation = "MODIFY COLUMN amount INT NULL"

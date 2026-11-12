@@ -36,7 +36,8 @@ key_block_size = 8
 Every run starts from fresh `users` and `orders` tables, defined in
 [`tables.sql`](tables.sql) and filled by `crates/kilit-lab/src/fixture.rs`.
 kilit-core's tests read `tables.sql` and each scenario's `setup` too, so
-they judge every scenario on the tables it was measured on.
+they judge every scenario on the tables it was measured on. Some setups
+also create a child table `order_items` with a foreign key to `orders`.
 
 | Table    | Rows | What scenarios can rely on                                              |
 | -------- | ---- | ----------------------------------------------------------------------- |

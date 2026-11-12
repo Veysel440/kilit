@@ -1,10 +1,10 @@
 # Measured behavior
 
 Every row on this page is one kind of change that kilit-lab ran on real MySQL
-servers: 8.0.46 and 8.4.13. The lab ran each of the 281 scenarios in
+servers: 8.0.46 and 8.4.13. The lab ran each of the 339 scenarios in
 [`scenarios/`](../scenarios/) on both servers, in six variants, and kept the
-result in [`matrix/`](../matrix/). The scenarios are grouped into 81 case ids:
-35 for InnoDB, 12 for MyISAM, 26 for row formats and 8 for `old_alter_table`.
+result in [`matrix/`](../matrix/). The scenarios are grouped into 85 case ids:
+36 for InnoDB, 12 for MyISAM, 29 for row formats and 8 for `old_alter_table`.
 
 The tables are InnoDB tables of 1,000 rows (`orders`) and 100 rows (`users`).
 A table whose `CREATE TABLE` names no `ENGINE` is taken as InnoDB, the server
@@ -59,8 +59,9 @@ lab measured the change. Then:
 
 1. A failure that comes from the statement alone is the answer: error 1674 for
    a nondeterministic default (`UUID()`, `RAND()`, `UUID_SHORT()`,
-   `SYSDATE()`, `USER()`) and error 1101 for a quoted default on a `TEXT`,
-   `BLOB`, `JSON` or `GEOMETRY` column named in the statement.
+   `SYSDATE()`, `USER()`), error 1101 for a quoted default on a `TEXT`,
+   `BLOB`, `JSON` or `GEOMETRY` column named in the statement, and error 1221
+   for `ASC` or `DESC` on a `FULLTEXT` key part.
 2. If one situation has no measured answer, the statement is `UNKNOWN`.
 3. If every situation gives the same word, that word is the answer, except
    "writes continue": another engine or row format that nobody measured may
@@ -161,6 +162,10 @@ about it for each statement.
 | ↳ on a `TEXT`, `TINYTEXT`, `MEDIUMTEXT`, `LONGTEXT` or `BLOB` column without a prefix length<br>`$table->text('body')->unique()` | fails, error 1170 | – | `add-unique-index`, exception: BLOB or TEXT without prefix |
 | Add a FULLTEXT index<br>`$table->fullText('note')` | INPLACE, rebuilds the table | **wait** | `add-fulltext-index` |
 | ↳ when the table already has one | INPLACE | **wait** | `add-fulltext-index`, exception: FULLTEXT index |
+| ↳ on one `TEXT`, `MEDIUMTEXT` or `LONGTEXT` column, or on two columns | INPLACE, rebuilds the table | **wait** | `add-fulltext-index` (`add-fulltext-index-text`, `-mediumtext`, `-longtext`, `-two-columns`) |
+| ↳ on a `TEXT` column in the binary character set, which MySQL makes a BLOB<br>`TEXT CHARACTER SET binary` (raw SQL) | fails, error 1283 | – | `add-fulltext-index`, exception: binary TEXT |
+| ↳ with `ASC` or `DESC` on a key part | fails, error 1221 | – | `add-fulltext-index-with-order` |
+| ↳ on a binary `VARCHAR`, a `BLOB`, a `VARBINARY`, a `CHAR`, a `TINYTEXT`, a generated column, three or more columns or any other type | UNKNOWN | – | none |
 | Drop an index<br>`$table->dropIndex('orders_amount_index')` | INPLACE | continue | `drop-index` |
 | ↳ of the table's only FULLTEXT index, or of a UNIQUE index on one column | INPLACE | continue | `drop-index` (`drop-fulltext-index`, `drop-unique-index`) |
 | ↳ of one of several FULLTEXT indexes, of a UNIQUE index on several columns, or of a UNIQUE index of NOT NULL columns on a table without a primary key | UNKNOWN | – | none |
@@ -173,7 +178,12 @@ about it for each statement.
 | ↳ when no index of the parent table starts with the parent column, the column is only second in an index, or the index covers only a shorter prefix such as `name(10)` | fails, error 1822 on 8.0.46, 6125 on 8.4.13 | – | `add-foreign-key`, exception: no parent index |
 | ↳ when the only index that starts with the parent column is a plain one, a plain DESC one, or a longer one | COPY, copies every row on 8.0.46; fails, error 6125 on 8.4.13 | **wait** on 8.0.46, – on 8.4.13 | `add-foreign-key`, exception: non-unique parent index |
 | ↳ when the two columns differ in a way not measured, the key has several columns without a matching UNIQUE index or primary key, or the parent index has a prefix as long as the column or longer, is FULLTEXT only, or part of a longer primary key, or the parent column has a foreign key of its own | UNKNOWN | – | none |
+| ↳ with `ON DELETE CASCADE`, with `ON DELETE SET NULL` on a nullable column, or with `ON DELETE SET DEFAULT`<br>`$table->foreign('user_id')->references('id')->on('users')->cascadeOnDelete()` | COPY, copies every row | **wait** | `add-foreign-key` |
+| ↳ with `ON DELETE SET NULL` on a `NOT NULL` column, and no `ON UPDATE` clause<br>`$table->foreignId('user_id')->constrained()->nullOnDelete()` without `->nullable()` | fails, error 1830 | – | `add-foreign-key`, exception: SET NULL on a NOT NULL column |
+| ↳ with `ON UPDATE SET NULL`, or `ON DELETE SET NULL` with another `ON UPDATE` action, on a `NOT NULL` column, or with several columns | UNKNOWN: MySQL gives error 1830 by hand, but the lab has not measured it | – | none |
 | ↳ with the checks off²<br>`Schema::withoutForeignKeyConstraints(fn () => …)`, or `Schema::disableForeignKeyConstraints()` and `Schema::enableForeignKeyConstraints()` around the call | INPLACE | continue | `add-foreign-key-checks-off` |
+| ↳ with the checks off, and `ON DELETE CASCADE` or `ON DELETE SET NULL` on a nullable column | INPLACE | continue | `add-foreign-key-checks-off` |
+| ↳ with the checks off, and `ON DELETE SET NULL` on a `NOT NULL` column | fails, error 1830 | – | `add-foreign-key-checks-off`, exception: SET NULL on a NOT NULL column |
 | ↳ with the checks off, when the two columns visibly differ, the parent has no fitting index, the key points at its own table or the shape is not measured | UNKNOWN | – | none |
 | Drop a foreign key<br>`$table->dropForeign(['user_id'])` | INPLACE | continue | `drop-foreign-key` |
 | ↳ when the table has no foreign key of that name | UNKNOWN: MySQL gives error 1091, but kilit's table may be out of date | – | none (`drop-foreign-key-missing`) |
@@ -199,6 +209,52 @@ collation and comment, and a `TIMESTAMP` defaulting to `CURRENT_TIMESTAMP`.\
 ² Even when a row points to a missing parent: the foreign key is added, and the
 row stays as it is, unchecked. Laravel prints `SET FOREIGN_KEY_CHECKS=0;`
 before the call and `SET FOREIGN_KEY_CHECKS=1;` after it.
+
+### Tables with a foreign key action
+
+MySQL's page on [online DDL limitations][ddl-limits] says that `LOCK=NONE` is
+not permitted on a table with an `ON ... CASCADE` or `ON ... SET NULL`
+foreign key. Laravel's `cascadeOnDelete()`, `cascadeOnUpdate()` and
+`nullOnDelete()` write such keys, so the lab measured it. It ran 40 scenarios
+on both servers, each one the same change as an earlier scenario (its twin),
+on tables that have the key:
+
+- the child side, one key from `orders.user_id` to `users.id`, with `ON DELETE
+  CASCADE` and with `ON DELETE SET NULL` against twelve twins: add a nullable
+  column, drop a column, rename a column, set a default, `INT` to `BIGINT`,
+  add an index, add a unique index, drop an index, add a FULLTEXT index, make
+  a column nullable, lengthen a `VARCHAR`, and drop the key;
+- `ON UPDATE CASCADE`, `ON UPDATE SET NULL`, both actions `CASCADE`, no
+  clause, `RESTRICT` and `NO ACTION`, against add an index and make a column
+  nullable;
+- the parent side, a table `order_items` whose key points at `orders`: `ON
+  DELETE CASCADE` against add an index, make a column nullable and add a
+  nullable column, and `ON DELETE SET NULL` against add an index.
+
+Every one of them gave its twin's verdict and the same result in all six
+variants on MySQL 8.0.46 and 8.4.13, and both servers took `LOCK=NONE`
+wherever the twin did. So the limitation did not show in these runs, and
+kilit's answers stand: each scenario is listed under its twin's case, and the
+text report counts it (`measured as add-index (N lab scenarios)`). kilit
+does not treat a table with such a key in any other way. The lab did not
+measure keys of several columns, more than one such key on a table, or a key
+that points at its own table.
+
+Adding a foreign key was measured with each action too. `ON DELETE CASCADE`,
+`ON DELETE SET NULL` on a nullable column and `ON DELETE SET DEFAULT` (which
+MySQL 8.0.46 and 8.4.13 accept) gave the answer of the plain key, with the
+checks on and, for the first two, off. `ON DELETE SET NULL` on a `NOT NULL`
+column fails with error 1830 in all six variants, with the checks on and off.
+By hand, the same key fails with 1830 with `ON UPDATE SET NULL` and with other
+shapes, and a `MODIFY` that makes the column of a `SET NULL` key `NOT NULL`
+fails with 1830 too; kilit answers those `UNKNOWN` and names the error.
+
+In all, this made 54 new scenarios: the 40 above, 7 for adding a key with an
+action, 5 for FULLTEXT shapes (one `TEXT`, `MEDIUMTEXT`, `LONGTEXT` column,
+two columns, and a binary `TEXT` column) and 2 for `ASC` and `DESC` on a
+FULLTEXT key part.
+
+[ddl-limits]: https://dev.mysql.com/doc/refman/8.4/en/innodb-online-ddl-limitations.html
 
 ## Changing a column with `->change()`
 

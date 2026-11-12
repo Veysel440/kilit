@@ -1,0 +1,5 @@
+title = "Add a nullable column at the end of a table that another table's foreign key references with ON DELETE CASCADE"
+setup = [
+    "CREATE TABLE order_items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, order_id BIGINT UNSIGNED NOT NULL, CONSTRAINT fk_order_items_order FOREIGN KEY (order_id) REFERENCES orders (id) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+]
+operation = "ADD COLUMN coupon VARCHAR(255) NULL"

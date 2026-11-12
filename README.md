@@ -61,18 +61,18 @@ tables from database/schema/mysql-schema.sql: 4 (migrations, orders, shops, user
 2026_11_02_090100_widen_amount_on_orders_table
   alter table `orders` modify `amount` bigint not null
     COPY, copies every row, writes wait
-    measured as change-integer-type (3 lab scenarios)
+    measured as change-integer-type (5 lab scenarios)
     - changes the type from INT to BIGINT
     - if a value does not fit the new type (in strict SQL mode, the default): fails with error 1264 (int-to-tinyint-out-of-range)
 
 2026_11_02_090200_add_shop_to_orders_table
   alter table `orders` add `shop_id` bigint unsigned null
     INSTANT, no rebuild, writes continue
-    measured as add-column (7 lab scenarios)
+    measured as add-column (10 lab scenarios)
     - if the table has had 64 instant column changes since it was last rebuilt: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)
   alter table `orders` add constraint `orders_shop_id_foreign` foreign key (`shop_id`) references `shops` (`id`)
     COPY, copies every row, writes wait
-    measured as add-foreign-key (16 lab scenarios)
+    measured as add-foreign-key (19 lab scenarios)
     - assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it
     - if a row points to a parent row that does not exist: fails with error 1452 (add-foreign-key-orphans)
 
@@ -81,7 +81,7 @@ tables from database/schema/mysql-schema.sql: 4 (migrations, orders, shops, user
     not checked: creates a new table; no existing rows are touched
   alter table `order_events` add constraint `order_events_order_id_foreign` foreign key (`order_id`) references `orders` (`id`) on delete cascade
     COPY, copies every row, writes wait
-    measured as add-foreign-key (16 lab scenarios)
+    measured as add-foreign-key (19 lab scenarios)
     - assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it
     - order_events is created earlier in these migrations: nothing else uses it yet, so nothing waits for it
 
@@ -141,7 +141,7 @@ flowchart LR
     check --> status["exit status"]
 ```
 
-The lab runs each of 281 scenarios six ways on fresh tables. kilit follows your
+The lab runs each of 339 scenarios six ways on fresh tables. kilit follows your
 tables through the migration and answers each change from the matching
 measurement: [architecture](docs/architecture.md).
 
@@ -335,8 +335,8 @@ report. The text part is left out of the example:
 
 ```text
 $ php artisan migrate --pretend | kilit check --format github --schema database/schema/mysql-schema.sql
-::error file=database/migrations/2026_11_02_090100_widen_amount_on_orders_table.php,line=1,title=kilit%3A COPY%2C copies every row%2C writes wait::2026_11_02_090100_widen_amount_on_orders_table%0Aalter table `orders` modify `amount` bigint not null%0Ameasured as change-integer-type (3 lab scenarios)%0A- changes the type from INT to BIGINT%0A- if a value does not fit the new type (in strict SQL mode, the default): fails with error 1264 (int-to-tinyint-out-of-range)
-::error file=database/migrations/2026_11_02_090500_add_note_search_to_orders_table.php,line=1,title=kilit%3A INPLACE%2C rebuilds the table%2C writes wait::2026_11_02_090500_add_note_search_to_orders_table%0Aalter table `orders` add fulltext `orders_note_fulltext`(`note`)%0Ameasured as add-fulltext-index (1 lab scenario)
+::error file=database/migrations/2026_11_02_090100_widen_amount_on_orders_table.php,line=1,title=kilit%3A COPY%2C copies every row%2C writes wait::2026_11_02_090100_widen_amount_on_orders_table%0Aalter table `orders` modify `amount` bigint not null%0Ameasured as change-integer-type (5 lab scenarios)%0A- changes the type from INT to BIGINT%0A- if a value does not fit the new type (in strict SQL mode, the default): fails with error 1264 (int-to-tinyint-out-of-range)
+::error file=database/migrations/2026_11_02_090500_add_note_search_to_orders_table.php,line=1,title=kilit%3A INPLACE%2C rebuilds the table%2C writes wait::2026_11_02_090500_add_note_search_to_orders_table%0Aalter table `orders` add fulltext `orders_note_fulltext`(`note`)%0Ameasured as add-fulltext-index (7 lab scenarios)
 ```
 
 An annotation is an error when it is what makes the exit status non-zero: a
@@ -451,7 +451,8 @@ All of them are in [limitations](docs/limitations.md).
 - **Measured, not guessed.** Every answer names the scenarios behind it. A
   golden test fails if kilit's answer differs from what a server did.
 - **Never silently safe.** What kilit cannot read or measure is `UNKNOWN`. One
-  exception: a statement that is only a `/*! */` comment is skipped (see
+  exception: a statement that is only a `/*! */` comment is skipped, but a
+  setting its text names becomes unclear from that line on (see
   [limitations](docs/limitations.md#input)).
 - **Reproducible.** A new lab run changes a result file only if a server did.
 - **Pure Rust, no I/O in the core.** No C or assembly in the dependency tree;

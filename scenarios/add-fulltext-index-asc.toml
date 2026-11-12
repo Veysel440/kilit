@@ -1,0 +1,2 @@
+title = "Add a FULLTEXT index with an ascending key part"
+operation = "ADD FULLTEXT INDEX ft_orders_note (note ASC)"

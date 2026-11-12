@@ -1,0 +1,5 @@
+title = "Widen a VARCHAR(50) column to VARCHAR(60) on a table whose foreign key cascades on delete"
+setup = [
+    "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE",
+]
+operation = "MODIFY COLUMN note VARCHAR(60) NULL"

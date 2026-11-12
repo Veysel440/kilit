@@ -16,6 +16,13 @@ pub struct Statement {
     /// The statement as written, without the final semicolon.
     pub sql: String,
     pub kind: StatementKind,
+    /// The `/*!` comments before the statement that kilit left out of every
+    /// statement, with their lines: MySQL runs their text, which kilit does
+    /// not read.
+    pub run_comments: Vec<(usize, String)>,
+    /// The same after the last statement of an input, which MySQL runs
+    /// after it.
+    pub run_comments_after: Vec<(usize, String)>,
 }
 
 // A whole table is larger than the other kinds, but boxing it would change

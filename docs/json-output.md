@@ -163,7 +163,10 @@ SQL
             "add-column-not-null",
             "add-column-not-null-default",
             "add-column-options",
-            "add-column-current-timestamp"
+            "add-column-current-timestamp",
+            "on-delete-cascade-add-nullable-column",
+            "on-delete-set-null-add-nullable-column",
+            "cascade-parent-add-nullable-column"
           ],
           "notes": [
             "if the table has had 64 instant column changes since it was last rebuilt: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)"
@@ -181,7 +184,17 @@ SQL
           "copies_rows": false,
           "writes": "allowed",
           "evidence": [
-            "add-index"
+            "add-index",
+            "on-delete-cascade-add-index",
+            "on-delete-set-null-add-index",
+            "on-update-cascade-add-index",
+            "on-update-set-null-add-index",
+            "on-delete-and-update-cascade-add-index",
+            "foreign-key-add-index",
+            "on-delete-restrict-add-index",
+            "on-delete-no-action-add-index",
+            "cascade-parent-add-index",
+            "set-null-parent-add-index"
           ]
         }
       ]

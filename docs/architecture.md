@@ -120,7 +120,8 @@ differently, and the lab reports which scenarios changed.
   own types, in `statement.rs`. Only `parse.rs` touches sqlparser's types.
 
 Nothing is dropped silently, with one exception: a statement made only of a
-`/*! */` comment is skipped (see [limitations](limitations.md#input)). An
+`/*! */` comment is skipped, but a setting its text names becomes unclear from
+that line on (see [limitations](limitations.md#input)). An
 operation kilit reads but does not model becomes `Other`. A statement it
 cannot read becomes `Unparsed`, with a reason, without stopping the statements
 after it. Syntax that MySQL 8.0.46 and 8.4.13 reject is `Unparsed`, and so are

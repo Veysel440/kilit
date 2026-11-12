@@ -1,0 +1,5 @@
+title = "Add a secondary index on a table whose foreign key takes no action on delete"
+setup = [
+    "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE NO ACTION",
+]
+operation = "ADD INDEX idx_orders_amount (amount)"

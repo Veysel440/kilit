@@ -754,9 +754,9 @@ fn the_short_form_and_the_long_form_give_kilit_the_same_statements() {
 }
 
 #[test]
-fn a_foreign_id_that_is_not_nullable_with_null_on_delete_is_unknown_on_both_servers() {
+fn a_foreign_id_that_is_not_nullable_with_null_on_delete_fails_with_1830_on_both_servers() {
     // $table->foreignId('user_id')->constrained()->nullOnDelete(); the column is
-    // NOT NULL, so MySQL refuses the key before it looks at anything else.
+    // NOT NULL, so MySQL refuses the key (by hand on MySQL 8.0.46 and 8.4.13).
     // Laravel adds ` on delete set null` to the foreign key's statement.
     let output = concat!(
         "\n",
@@ -769,7 +769,161 @@ fn a_foreign_id_that_is_not_nullable_with_null_on_delete_is_unknown_on_both_serv
     );
     let schema = format!("{USERS}{ORDERS}");
     for server in ["mysql-8.0.46", "mysql-8.4.13"] {
-        assert_eq!(answers(server, &schema, output), [INSTANT, "unknown"]);
+        assert_eq!(
+            answers(server, &schema, output),
+            [INSTANT, "fails with error 1830"]
+        );
+    }
+}
+
+/// The two statements Laravel prints for `foreignId('user_id')` with
+/// `constrained()` and the action calls, in both forms.
+fn foreign_id(nullable: &str, action: &str) -> [String; 2] {
+    let statements = [
+        format!("alter table `orders` add `user_id` bigint unsigned {nullable}"),
+        format!(
+            "alter table `orders` add constraint `orders_user_id_foreign` foreign key (`user_id`) references `users` (`id`){action}"
+        ),
+    ];
+    let borrowed: Vec<&str> = statements.iter().map(String::as_str).collect();
+    [
+        long_form(&[(B1C_NAME, &borrowed)]),
+        short_form(&[(B1C_NAME, &borrowed)]),
+    ]
+}
+
+#[test]
+fn laravel_s_null_on_delete_fails_with_1830_in_both_forms_and_leaves_the_table_as_it_was() {
+    // $table->foreignId('user_id')->constrained()->nullOnDelete(), then a
+    // later migration $table->dropColumn('user_id'): the failed key is not
+    // there, so dropping the column is the plain INSTANT drop, not 1828.
+    let schema = format!("{USERS}{ORDERS}");
+    let statements = [
+        "alter table `orders` add `user_id` bigint unsigned not null",
+        "alter table `orders` add constraint `orders_user_id_foreign` foreign key (`user_id`) references `users` (`id`) on delete set null",
+        "alter table `orders` drop `user_id`",
+    ];
+    for (form, output) in [
+        ("long", long_form(&[(B1C_NAME, &statements)])),
+        ("short", short_form(&[(B1C_NAME, &statements)])),
+    ] {
+        assert_eq!(
+            b1b_answers(&schema, &output),
+            [INSTANT, "fails with error 1830", INSTANT],
+            "{form}"
+        );
+    }
+}
+
+#[test]
+fn laravel_s_null_on_delete_on_a_nullable_foreign_id_copies_the_table() {
+    // $table->foreignId('user_id')->nullable()->constrained()->nullOnDelete();
+    let schema = format!("{USERS}{ORDERS}");
+    for output in foreign_id("null", " on delete set null") {
+        assert_eq!(b1b_answers(&schema, &output), [INSTANT, COPY]);
+    }
+}
+
+#[test]
+fn laravel_s_null_on_update_on_a_not_null_foreign_id_stays_unknown() {
+    // $table->foreignId('user_id')->constrained()->nullOnUpdate(); the lab
+    // measured ON DELETE SET NULL only.
+    let schema = format!("{USERS}{ORDERS}");
+    for output in foreign_id("not null", " on update set null") {
+        assert_eq!(b1b_answers(&schema, &output), [INSTANT, "unknown"]);
+    }
+}
+
+#[test]
+fn laravel_s_cascade_restrict_and_no_action_keys_copy_the_table_in_both_forms() {
+    // ->cascadeOnDelete(); ->cascadeOnUpdate(); ->cascadeOnDelete()->cascadeOnUpdate();
+    // ->restrictOnDelete(); ->noActionOnDelete(); Laravel 10 to 13 print the same.
+    let schema = format!("{USERS}{ORDERS}");
+    for action in [
+        " on delete cascade",
+        " on update cascade",
+        " on delete cascade on update cascade",
+        " on delete restrict",
+        " on delete no action",
+    ] {
+        for output in foreign_id("not null", action) {
+            assert_eq!(b1b_answers(&schema, &output), [INSTANT, COPY], "{action}");
+        }
+    }
+}
+
+#[test]
+fn laravel_s_changes_to_a_table_with_a_cascade_or_set_null_key_keep_their_answers() {
+    // $table->index('email'); $table->dropForeign(['user_id']) on a dump that
+    // writes the key with the action Laravel put in it.
+    for action in [
+        "ON DELETE CASCADE",
+        "ON DELETE SET NULL",
+        "ON UPDATE CASCADE",
+    ] {
+        let nullable = if action.ends_with("SET NULL") {
+            "DEFAULT NULL"
+        } else {
+            "NOT NULL"
+        };
+        let schema = format!(
+            "{USERS}create table `orders` (`id` bigint unsigned not null auto_increment, \
+             `user_id` bigint unsigned {nullable}, `email` varchar(255) default null, \
+             primary key (`id`), key `orders_user_id_foreign` (`user_id`), \
+             constraint `orders_user_id_foreign` foreign key (`user_id`) references `users` (`id`) \
+             {action}) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;\n"
+        );
+        let statements = [
+            "alter table `orders` add index `orders_email_index`(`email`)",
+            "alter table `orders` drop foreign key `orders_user_id_foreign`",
+        ];
+        for (form, output) in [
+            ("long", long_form(&[(B1C_NAME, &statements)])),
+            ("short", short_form(&[(B1C_NAME, &statements)])),
+        ] {
+            assert_eq!(
+                b1b_answers(&schema, &output),
+                [INPLACE, INPLACE],
+                "{action}, {form}"
+            );
+        }
+    }
+}
+
+#[test]
+fn laravel_s_full_text_index_on_text_columns_has_the_lab_answer_and_on_a_blob_is_unknown() {
+    // $table->fullText('body'); $table->fullText(['title', 'body']);
+    // $table->binary('raw') then $table->fullText('raw'): a BLOB.
+    let schema = "create table `posts` (`id` bigint unsigned not null auto_increment, \
+                  `title` varchar(255) collate utf8mb4_unicode_ci not null, \
+                  `body` longtext collate utf8mb4_unicode_ci not null, `raw` blob, \
+                  primary key (`id`)) engine=InnoDB default charset=utf8mb4 \
+                  collate=utf8mb4_unicode_ci;\n";
+    for (statement, answer) in [
+        (
+            "alter table `posts` add fulltext `posts_body_fulltext`(`body`)",
+            "INPLACE, rebuilds the table, writes wait",
+        ),
+        (
+            "alter table `posts` add fulltext `posts_title_body_fulltext`(`title`, `body`)",
+            "INPLACE, rebuilds the table, writes wait",
+        ),
+        (
+            "alter table `posts` add fulltext `posts_raw_fulltext`(`raw`)",
+            "unknown",
+        ),
+    ] {
+        let statements = [statement];
+        for (form, output) in [
+            ("long", long_form(&[(B1C_NAME, &statements)])),
+            ("short", short_form(&[(B1C_NAME, &statements)])),
+        ] {
+            assert_eq!(
+                b1b_answers(schema, &output),
+                [answer],
+                "{statement}, {form}"
+            );
+        }
     }
 }
 

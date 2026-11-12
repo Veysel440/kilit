@@ -200,7 +200,7 @@ fn indexes_on_the_table_change_the_answer() {
          \x20   measured as drop-column (8 lab scenarios)\n\
          \x20   - status is in the index orders_status_index\n",
         "    INPLACE, rebuilds the table, writes wait\n\
-         \x20   measured as add-fulltext-index (1 lab scenario)\n\
+         \x20   measured as add-fulltext-index (7 lab scenarios)\n\
          \x20 line 3:",
         "    INPLACE, no rebuild, writes wait\n\
          \x20   measured as add-fulltext-index (1 lab scenario)\n\
@@ -1051,12 +1051,31 @@ fn every_way_of_setting_restrict_fk_on_non_standard_key_is_unknown_for_a_foreign
 }
 
 #[test]
-fn null_on_delete_on_a_not_null_column_is_unknown_and_strict_exits_with_3() {
+fn null_on_delete_on_a_not_null_column_fails_with_1830_and_exits_with_1() {
     // $table->foreignId('user_id')->constrained()->nullOnDelete(); on a column
     // that is not nullable.
     let sql = "alter table `orders` add `store_id` bigint unsigned not null;
                alter table `orders` add constraint `orders_store_id_foreign` \
                foreign key (`store_id`) references `users` (`id`) on delete set null;";
+    for server in [Some("mysql-8.0.46"), None] {
+        for strict in [false, true] {
+            let (json, status) = json_check(server, strict, sql);
+            let statement = &json["sources"][0]["statements"][1];
+            assert_eq!(statement["impact"], "fails", "{server:?}");
+            assert_eq!(statement["error"], 1830, "{server:?}: {statement}");
+            assert_eq!(status, Some(1), "{server:?} strict {strict}");
+            assert_eq!(json["exit_code"], 1);
+        }
+    }
+}
+
+#[test]
+fn null_on_update_on_a_not_null_column_stays_unknown_and_strict_exits_with_3() {
+    // $table->foreignId('user_id')->constrained()->nullOnUpdate(); on a column
+    // that is not nullable: the lab measured ON DELETE SET NULL only.
+    let sql = "alter table `orders` add `store_id` bigint unsigned not null;
+               alter table `orders` add constraint `orders_store_id_foreign` \
+               foreign key (`store_id`) references `users` (`id`) on update set null;";
     for server in [Some("mysql-8.0.46"), None] {
         let (json, status) = json_check(server, false, sql);
         assert_eq!(json["sources"][0]["statements"][1]["impact"], "unknown");
@@ -2449,7 +2468,7 @@ fn only_the_row_line_goes_from_a_new_tables_text_and_the_json_notes_are_what_the
         text.contains(
             "  line 4: alter table `children` modify `qty` smallint not null\n\
              \x20   COPY, copies every row, writes wait\n\
-             \x20   measured as change-integer-type (3 lab scenarios)\n\
+             \x20   measured as change-integer-type (5 lab scenarios)\n\
              \x20   - changes the type from INT to SMALLINT\n\
              \x20   - children is created earlier in these migrations: nothing else uses it yet, \
              so nothing waits for it\n"
@@ -2787,7 +2806,7 @@ no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE
     not checked: creates a new table; no existing rows are touched
   alter table `children` add constraint `children_parent_id_foreign` foreign key (`parent_id`) references `parents` (`id`)
     COPY, copies every row, writes wait
-    measured as add-foreign-key (16 lab scenarios)
+    measured as add-foreign-key (19 lab scenarios)
     - assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it
     - children is created earlier in these migrations: nothing else uses it yet, so nothing waits for it
 
@@ -2805,7 +2824,7 @@ no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE
     not checked: not a schema change
   alter table `children` add constraint `children_parent_id_foreign` foreign key (`parent_id`) references `parents` (`id`)
     COPY, copies every row, writes wait
-    measured as add-foreign-key (16 lab scenarios)
+    measured as add-foreign-key (19 lab scenarios)
     - assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it
     - if a row points to a parent row that does not exist: fails with error 1452 (add-foreign-key-orphans)
     - children is created earlier in these migrations: nothing else uses it yet, so nothing waits for it
@@ -2929,7 +2948,7 @@ no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE
   read (not checked): select exists(select * from `users`) as `exists`
   alter table `users` add `nickname` varchar(255) null
     INSTANT, no rebuild, writes continue
-    measured as add-column (7 lab scenarios)
+    measured as add-column (10 lab scenarios)
     - if the table has had 64 instant column changes since it was last rebuilt: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)
   read (not checked): select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as ...
 
@@ -2940,7 +2959,7 @@ no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE
   read (not checked): select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as ...
   alter table `users` add `phone` varchar(255) null
     INSTANT, no rebuild, writes continue
-    measured as add-column (7 lab scenarios)
+    measured as add-column (10 lab scenarios)
     - if the table has had 64 instant column changes since it was last rebuilt: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)
 
 metadata lock on users:
@@ -7293,8 +7312,8 @@ alter table ORDERS add fulltext (note);";
 
 #[test]
 fn a_second_spelling_of_a_table_made_in_the_input_is_unknown_and_exits_with_0() {
-    let sql = "create table posts (id int primary key, body text);
-create table Posts (id int primary key, body text);
+    let sql = "create table posts (id int primary key, body text) default charset=utf8mb4;
+create table Posts (id int primary key, body text) default charset=utf8mb4;
 alter table Posts add fulltext (body);";
     let (text, json, code) = text_and_json(&[], sql);
     // The second CREATE fails with 1 (1050), so Posts is a table of its own
@@ -7835,7 +7854,7 @@ fn demo_annotations(strict: bool) -> Vec<String> {
             &format!(
                 "{widen}\n\
                  alter table `orders` modify `amount` bigint not null\n\
-                 measured as change-integer-type (3 lab scenarios)\n\
+                 measured as change-integer-type (5 lab scenarios)\n\
                  - changes the type from INT to BIGINT\n\
                  - if a value does not fit the new type (in strict SQL mode, the default): fails \
                  with error 1264 (int-to-tinyint-out-of-range)"
@@ -7849,7 +7868,7 @@ fn demo_annotations(strict: bool) -> Vec<String> {
                 "{shop}\n\
                  alter table `orders` add constraint `orders_shop_id_foreign` foreign key \
                  (`shop_id`) references `shops` (`id`)\n\
-                 measured as add-foreign-key (16 lab scenarios)\n\
+                 measured as add-foreign-key (19 lab scenarios)\n\
                  - assumes foreign_key_checks is ON, the MySQL default: nothing before this \
                  statement sets it\n\
                  - if a row points to a parent row that does not exist: fails with error 1452 \
@@ -7876,7 +7895,7 @@ fn demo_annotations(strict: bool) -> Vec<String> {
             &format!(
                 "{search}\n\
                  alter table `orders` add fulltext `orders_note_fulltext`(`note`)\n\
-                 measured as add-fulltext-index (1 lab scenario)"
+                 measured as add-fulltext-index (7 lab scenarios)"
             ),
         ),
         lock_notice("orders", &lock, "mysql-8.4.13"),
@@ -8206,7 +8225,7 @@ fn a_foreign_key_that_the_other_server_answers_differently_is_noted_where_writes
                 "INSTANT, no rebuild, writes continue",
                 "standard input\n\
                  line 2: ALTER TABLE orders DROP COLUMN user_name\n\
-                 measured as drop-column (5 lab scenarios)\n\
+                 measured as drop-column (7 lab scenarios)\n\
                  - on mysql-8.0.46: fails with error 1828"
             ),
             lock_notice("orders", &lock, "mysql-8.4.13"),
@@ -8288,7 +8307,7 @@ fn a_schema_from_another_server_is_a_warning_before_the_statements() {
     let sql = "alter table orders modify amount bigint not null;";
     let widen = "standard input\n\
                  line 1: alter table orders modify amount bigint not null\n\
-                 measured as change-integer-type (3 lab scenarios)\n\
+                 measured as change-integer-type (5 lab scenarios)\n\
                  - changes the type from INT to BIGINT\n\
                  - if a value does not fit the new type (in strict SQL mode, the default): fails \
                  with error 1264 (int-to-tinyint-out-of-range)";
@@ -9642,8 +9661,13 @@ const B1B_TABLE_DEFAULTS_LONG: &str = concat!(
 );
 
 /// A schema file with `users` and `orders` (the tests' usual tables).
+///
+/// It is written once per test process: tests run in parallel, and a kilit
+/// process must never read the file while another test rewrites it.
 fn b1b_dump() -> PathBuf {
-    write_schema_with_engine("b1b_dump.sql", "InnoDB")
+    static FILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    FILE.get_or_init(|| write_schema_with_engine("b1b_dump.sql", "InnoDB"))
+        .clone()
 }
 
 /// kilit's JSON for `input` with `args` after `check`, and the exit status.
@@ -11575,4 +11599,391 @@ fn dropping_an_index_of_a_table_kilit_does_not_know_is_unknown_in_json_and_exits
             assert_eq!(json["exit_code"], code, "{clause} strict={strict}");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Foreign key actions, FULLTEXT shapes, and settings in `/*! */` comments:
+// the JSON impact and the exit status, with and without --strict.
+
+/// kilit's JSON for `sql` against the example's tables (or with no schema when
+/// `schema` is None) and the exit status, with `--strict` or without it.
+fn json_with(schema: Option<&Path>, strict: bool, sql: &str) -> (serde_json::Value, Option<i32>) {
+    let mut args = vec!["check", "--format", "json"];
+    if let Some(schema) = schema {
+        args.extend(["--schema", schema.to_str().unwrap()]);
+    }
+    if strict {
+        args.push("--strict");
+    }
+    let output = kilit(&args, sql);
+    (json_of(&output), output.status.code())
+}
+
+/// The statement at `at` of the first source.
+fn statement_at(json: &serde_json::Value, at: usize) -> serde_json::Value {
+    statements_of(json, 0)[at].clone()
+}
+
+#[test]
+fn a_fulltext_index_with_desc_fails_with_1221_and_exits_with_1_with_and_without_strict() {
+    // A hand-written migration: $table->fullText('note') has no order, but
+    // DB::statement can write one. The error comes from the statement alone,
+    // so a table kilit does not know gets it too.
+    let sql = "alter table `orders` add fulltext `orders_note_fulltext`(`note` desc);";
+    let example_schema = example("mysql-schema.sql");
+    for schema in [Some(example_schema.as_path()), None] {
+        for strict in [false, true] {
+            let (json, code) = json_with(schema, strict, sql);
+            let statement = statement_at(&json, 0);
+            assert_eq!(statement["impact"], "fails", "{schema:?} strict={strict}");
+            assert_eq!(statement["error"], 1221);
+            assert_eq!(statement["case"], "add-fulltext-index-with-order");
+            assert_eq!(
+                statement["evidence"],
+                serde_json::json!(["add-fulltext-index-desc", "add-fulltext-index-asc"])
+            );
+            assert_eq!(code, Some(1), "{schema:?} strict={strict}");
+            assert_eq!(json["exit_code"], 1);
+        }
+    }
+}
+
+#[test]
+fn a_fulltext_index_on_a_binary_text_column_fails_with_1283_and_exits_with_1_with_and_without_strict()
+ {
+    let schema = write_schema(
+        "b1d_binary_text.sql",
+        "CREATE TABLE `posts` (`id` int NOT NULL, `body` text CHARACTER SET binary, \
+         PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;\n",
+    );
+    let sql = "alter table `posts` add fulltext `posts_body_fulltext`(`body`);";
+    for strict in [false, true] {
+        let (json, code) = json_with(Some(&schema), strict, sql);
+        let statement = statement_at(&json, 0);
+        assert_eq!(statement["impact"], "fails", "strict={strict}");
+        assert_eq!(statement["error"], 1283);
+        assert_eq!(
+            statement["evidence"],
+            serde_json::json!(["add-fulltext-index-binary-text"])
+        );
+        assert_eq!(code, Some(1), "strict={strict}");
+    }
+}
+
+#[test]
+fn a_fulltext_index_on_a_shape_the_lab_did_not_measure_is_unknown_exits_with_0_and_strict_with_3() {
+    // $table->fullText(['a', 'b', 'c']) and a CHAR column.
+    let schema = write_schema(
+        "b1d_fulltext_shapes.sql",
+        "CREATE TABLE `posts` (`id` int NOT NULL, `a` varchar(50), `b` text, `c` text, \
+         `code` char(10), PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 \
+         COLLATE=utf8mb4_0900_ai_ci;\n",
+    );
+    for sql in [
+        "alter table `posts` add fulltext `posts_a_b_c_fulltext`(`a`, `b`, `c`);",
+        "alter table `posts` add fulltext `posts_code_fulltext`(`code`);",
+    ] {
+        for strict in [false, true] {
+            let (json, code) = json_with(Some(&schema), strict, sql);
+            assert_eq!(statement_at(&json, 0)["impact"], "unknown", "{sql}");
+            let expected = if strict { 3 } else { 0 };
+            assert_eq!(code, Some(expected), "{sql} strict={strict}");
+            assert_eq!(json["exit_code"], expected);
+        }
+    }
+    // The measured shape of the same table: one TEXT column makes writes wait.
+    let (json, code) = json_with(
+        Some(&schema),
+        false,
+        "alter table `posts` add fulltext `posts_b_fulltext`(`b`);",
+    );
+    assert_eq!(statement_at(&json, 0)["impact"], "writes_wait");
+    assert_eq!(code, Some(1));
+}
+
+#[test]
+fn a_foreign_key_that_sets_null_on_delete_on_a_not_null_column_names_1830_in_the_text() {
+    let schema = example("mysql-schema.sql");
+    let sql = "alter table `orders` add `store_id` bigint unsigned not null;
+               alter table `orders` add constraint `orders_store_id_foreign` \
+               foreign key (`store_id`) references `shops` (`id`) on delete set null;";
+    let output = kilit(&["check", "--schema", schema.to_str().unwrap()], sql);
+    let text = stdout(&output);
+    assert!(
+        text.contains(
+            "    fails with error 1830\n    measured as add-foreign-key (1 lab scenario)\n"
+        ),
+        "{text}"
+    );
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn a_cascade_key_on_the_table_leaves_an_index_change_writes_continue_with_the_new_evidence() {
+    // The example's orders has ON DELETE CASCADE on user_id. $table->index('note').
+    let schema = example("mysql-schema.sql");
+    for strict in [false, true] {
+        let (json, code) = json_with(
+            Some(&schema),
+            strict,
+            "alter table `orders` add index `orders_note_index`(`note`);",
+        );
+        let statement = statement_at(&json, 0);
+        assert_eq!(statement["impact"], "writes_continue");
+        assert_eq!(statement["algorithm"], "INPLACE");
+        assert!(
+            statement["evidence"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("on-delete-cascade-add-index")),
+            "{statement}"
+        );
+        assert_eq!(code, Some(0), "strict={strict}");
+    }
+}
+
+#[test]
+fn a_left_out_comment_that_names_foreign_key_checks_makes_the_next_key_unknown() {
+    // mysqldump's own line before a key: MySQL runs it, kilit does not read it.
+    let schema = example("mysql-schema.sql");
+    let sql = "alter table `orders` add `shop_id` bigint unsigned null;
+/*!40014 SET FOREIGN_KEY_CHECKS=0 */;
+alter table `orders` add constraint `orders_shop_id_foreign` foreign key (`shop_id`) references `shops` (`id`);";
+    let output = kilit(&["check", "--schema", schema.to_str().unwrap()], sql);
+    let text = stdout(&output);
+    assert!(
+        text.contains(
+            "UNKNOWN: line 2 runs a /*! */ comment that names foreign_key_checks, and kilit \
+             does not read such comments"
+        ),
+        "{text}"
+    );
+    assert_eq!(output.status.code(), Some(0));
+    for strict in [false, true] {
+        let (json, code) = json_with(Some(&schema), strict, sql);
+        assert_eq!(statement_at(&json, 1)["impact"], "unknown");
+        assert_eq!(code, Some(if strict { 3 } else { 0 }), "strict={strict}");
+    }
+}
+
+#[test]
+fn the_comment_lines_mysqldump_writes_after_the_last_statement_change_no_answer() {
+    // A dump or a migration file that ends with the lines that restore the
+    // settings: they run after the key, so the key keeps its answer.
+    let schema = example("mysql-schema.sql");
+    let sql = "alter table `orders` add `shop_id` bigint unsigned null;
+alter table `orders` add constraint `orders_shop_id_foreign` foreign key (`shop_id`) references `shops` (`id`);
+/*!40101 SET SQL_MODE=@OLD_SQL_MODE */;
+/*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;
+";
+    for strict in [false, true] {
+        let (json, code) = json_with(Some(&schema), strict, sql);
+        assert_eq!(
+            statement_at(&json, 1)["impact"],
+            "writes_wait",
+            "strict={strict}"
+        );
+        assert_eq!(code, Some(1), "strict={strict}");
+    }
+}
+
+#[test]
+fn a_global_setting_in_a_left_out_comment_reaches_the_next_file_and_a_session_one_does_not() {
+    let key = "alter table `orders` add constraint `orders_user_fk` foreign key (`user_id`) \
+               references `users` (`id`);\n";
+    // SET GLOBAL: the next file starts with the setting unclear, so the key
+    // is unknown (exit 0, and 3 with --strict).
+    let files = session_files(
+        "b1d_global_comment",
+        &[
+            (
+                "a.sql",
+                "/*!40014 SET GLOBAL foreign_key_checks = 0 */;\nSELECT 1;\n",
+            ),
+            ("b.sql", key),
+        ],
+    );
+    for strict in [false, true] {
+        let extra: &[&str] = if strict { &["--strict"] } else { &[] };
+        let (json, code) = files_json(&files, extra, "");
+        assert_eq!(last_of(&json, 1)["impact"], "unknown", "strict={strict}");
+        assert_eq!(code, Some(if strict { 3 } else { 0 }), "strict={strict}");
+    }
+    // Without GLOBAL it is a session setting: the next file is a new session
+    // with the checks on, and the key copies the table.
+    let files = session_files(
+        "b1d_session_comment",
+        &[
+            (
+                "a.sql",
+                "/*!40014 SET FOREIGN_KEY_CHECKS = 0 */;\nSELECT 1;\n",
+            ),
+            ("b.sql", key),
+        ],
+    );
+    for strict in [false, true] {
+        let extra: &[&str] = if strict { &["--strict"] } else { &[] };
+        let (json, code) = files_json(&files, extra, "");
+        assert_eq!(
+            last_of(&json, 1)["impact"],
+            "writes_wait",
+            "strict={strict}"
+        );
+        assert_eq!(code, Some(1), "strict={strict}");
+    }
+}
+
+#[test]
+fn a_sql_mode_in_a_left_out_comment_loses_the_table_that_an_over_long_column_changed() {
+    // SET sql_mode strict, then mysqldump's `SET SQL_MODE=''`: VARCHAR(70000)
+    // becomes MEDIUMTEXT (by hand on MySQL 8.0.46 and 8.4.13).
+    let schema = example("mysql-schema.sql");
+    let sql = "SET sql_mode = 'STRICT_TRANS_TABLES';
+/*!40101 SET SQL_MODE='' */;
+alter table `orders` add `big` varchar(70000) null;
+alter table `orders` add `c` int null;";
+    let output = kilit(&["check", "--schema", schema.to_str().unwrap()], sql);
+    let text = stdout(&output);
+    assert!(text.contains("kilit lost track of orders"), "{text}");
+    assert!(
+        text.contains("line 2 runs a /*! */ comment that names sql_mode"),
+        "{text}"
+    );
+    assert_eq!(output.status.code(), Some(0));
+    // Without the comment the strict mode holds and the table stays known.
+    let without = sql.replace("/*!40101 SET SQL_MODE='' */;\n", "");
+    let text = stdout(&kilit(
+        &["check", "--schema", schema.to_str().unwrap()],
+        &without,
+    ));
+    assert!(!text.contains("kilit lost track"), "{text}");
+}
+
+#[test]
+fn a_row_past_the_limit_in_a_create_table_loses_the_table_and_one_at_the_limit_keeps_it() {
+    // By hand on MySQL 8.0.46 and 8.4.13: a latin1 VARCHAR(65532) NULL alone
+    // is accepted, VARCHAR(65533) NULL is not (1118).
+    for (definition, lost) in [
+        ("varchar(65532) character set latin1 null", false),
+        ("varchar(65533) character set latin1 not null", false),
+        ("varchar(65533) character set latin1 null", true),
+        ("varchar(65535) character set latin1 null", true),
+    ] {
+        let sql = format!(
+            "create table `t` (`c` {definition}) engine=InnoDB default charset=utf8mb4;
+alter table `t` add `x` tinyint null;"
+        );
+        for strict in [false, true] {
+            let (json, code) = json_with(None, strict, &sql);
+            let statement = statement_at(&json, 1);
+            let reason = statement["reason"].as_str().unwrap_or("");
+            assert_eq!(
+                reason.contains("kilit lost track of t"),
+                lost,
+                "{definition}: {statement}"
+            );
+            if lost {
+                assert_eq!(
+                    code,
+                    Some(if strict { 3 } else { 0 }),
+                    "{definition} strict={strict}"
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Step B1d: a mysqldump trailer after the last statement of a
+// file, and a /*! */ comment under --pretend.
+
+#[test]
+fn a_global_setting_in_the_trailer_of_one_file_makes_the_next_file_unknown() {
+    // By hand on MySQL 8.0.46 and 8.4.13: after /*!40014 SET GLOBAL
+    // FOREIGN_KEY_CHECKS=0 */ a new session adds a foreign key without a
+    // copy, so kilit cannot say COPY in the next file. A session setting in
+    // the trailer ends with its file: the next file's key copies the table.
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("trailer_between_files");
+    std::fs::create_dir_all(&dir).unwrap();
+    let schema = example("mysql-schema.sql");
+    let key = "alter table `orders` add constraint `orders_user_id_foreign` foreign key \
+               (`user_id`) references `users` (`id`);\n";
+    std::fs::write(dir.join("2_key.sql"), key).unwrap();
+    for (trailer, impact, plain, strict) in [
+        (
+            "/*!40014 SET GLOBAL FOREIGN_KEY_CHECKS=0 */;",
+            "unknown",
+            Some(0),
+            Some(3),
+        ),
+        (
+            "/*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;",
+            "writes_wait",
+            Some(1),
+            Some(1),
+        ),
+    ] {
+        std::fs::write(
+            dir.join("1_column.sql"),
+            format!("alter table `orders` add `c` int null;\n{trailer}\n"),
+        )
+        .unwrap();
+        let first = dir.join("1_column.sql");
+        let second = dir.join("2_key.sql");
+        for (strict_flag, code) in [(false, plain), (true, strict)] {
+            let mut args = vec![
+                "check",
+                "--format",
+                "json",
+                "--schema",
+                schema.to_str().unwrap(),
+            ];
+            if strict_flag {
+                args.push("--strict");
+            }
+            args.extend([first.to_str().unwrap(), second.to_str().unwrap()]);
+            let output = kilit(&args, "");
+            let json = json_of(&output);
+            // The file's own last statement keeps its answer.
+            let first_file = statements_of(&json, 0);
+            assert_eq!(first_file[0]["impact"], "writes_continue", "{trailer}");
+            let second_file = statements_of(&json, 1);
+            assert_eq!(second_file[0]["impact"], impact, "{trailer}");
+            assert_eq!(output.status.code(), code, "{trailer} strict={strict_flag}");
+        }
+    }
+}
+
+#[test]
+fn a_comment_that_makes_a_setting_unclear_names_its_output_line_under_pretend() {
+    // Laravel prints one line per statement; a /*! */ comment in a statement is
+    // on that line, and the reason names it.
+    let migration = "2026_01_01_000000_add_things";
+    let input = format!(
+        "\n   INFO  Running migrations.  \n\n  {migration} {}  \n\
+         \x20 \u{21c2} alter table `orders` add `c` int null  \n\
+         \x20 \u{21c2} /*!40014 SET FOREIGN_KEY_CHECKS=0 */ alter table `orders` add constraint \
+         `orders_user_id_foreign` foreign key (`user_id`) references `users` (`id`)  \n",
+        ".".repeat(78 - migration.len())
+    );
+    let output = kilit(
+        &[
+            "check",
+            "--schema",
+            example("mysql-schema.sql").to_str().unwrap(),
+        ],
+        &input,
+    );
+    let text = stdout(&output);
+    let line = input
+        .lines()
+        .position(|line| line.contains("/*!40014"))
+        .unwrap()
+        + 1;
+    assert!(
+        text.contains(&format!(
+            "line {line} runs a /*! */ comment that names foreign_key_checks"
+        )),
+        "expected line {line}: {text}"
+    );
 }
