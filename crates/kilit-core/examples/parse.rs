@@ -40,6 +40,14 @@ fn main() -> ExitCode {
                     println!("    {operation}");
                 }
             }
+            StatementKind::CreateTableLike {
+                name,
+                source,
+                if_not_exists,
+            } => {
+                let condition = if if_not_exists { " if not exists" } else { "" };
+                println!("  create table{condition} {name} like {source}");
+            }
             StatementKind::CreateTable {
                 table,
                 if_not_exists,

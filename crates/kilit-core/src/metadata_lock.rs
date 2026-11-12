@@ -9,7 +9,7 @@
 //! each kind in [`STATEMENTS_THAT_WAIT`] (`crates/kilit-lab/src/facts.rs`).
 
 use crate::check::Finding;
-use crate::impact::{as_followed, follow, key};
+use crate::impact::key;
 use crate::parse::{
     alters_named_table, drops_temporary_table, parse, truncated_table, with_table_for_tables,
 };
@@ -93,26 +93,21 @@ pub fn metadata_lock_warning() -> String {
 /// `DROP TEMPORARY`; a RENAME TABLE (also `RENAME TABLES`) each old name; a
 /// TRUNCATE TABLE its table. Other statements name none.
 pub fn locked_tables(statements: &[Statement], findings: &[Finding]) -> Vec<Vec<String>> {
-    let mut new_tables: Vec<String> = Vec::new();
     statements
         .iter()
         .zip(findings)
         .map(|(statement, finding)| {
-            let tables = named_tables(&statement.kind, &statement.sql)
+            named_tables(&statement.kind, &statement.sql)
                 .into_iter()
-                .filter(|table| !new_tables.contains(&key(table)))
-                .collect();
-            if let Some(followed) = as_followed(statement, finding) {
-                follow(&followed, &mut new_tables);
-            }
-            tables
+                .filter(|table| !finding.created_here.contains(table))
+                .collect()
         })
         .collect()
 }
 
 /// The tables whose metadata lock the statement `sql`, read as `kind`,
 /// waits for, as named before it runs.
-fn named_tables(kind: &StatementKind, sql: &str) -> Vec<String> {
+pub(crate) fn named_tables(kind: &StatementKind, sql: &str) -> Vec<String> {
     match kind {
         StatementKind::Alter(alter) => vec![alter.table.clone()],
         StatementKind::Unparsed {

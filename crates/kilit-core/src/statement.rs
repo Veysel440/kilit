@@ -39,6 +39,15 @@ pub enum StatementKind {
         /// `IF NOT EXISTS`: nothing happens when the table already exists.
         if_not_exists: bool,
     },
+    /// `CREATE TABLE name LIKE source`, also `CREATE TABLE name (LIKE
+    /// source)`: a new table, with no rows, with what MySQL copies of
+    /// `source`.
+    CreateTableLike {
+        name: String,
+        source: String,
+        /// `IF NOT EXISTS`: nothing happens when the table already exists.
+        if_not_exists: bool,
+    },
     /// `DROP TABLE`: the tables are gone, with all their rows.
     DropTable { tables: Vec<String> },
     /// `RENAME TABLE a TO b, c TO d`

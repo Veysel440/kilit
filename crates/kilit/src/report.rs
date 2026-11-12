@@ -65,6 +65,9 @@ pub struct Report<'a> {
     /// does not know: one no `--schema` and no statement before shows, or
     /// one it lost track of.
     on_unknown_tables: usize,
+    /// How many CREATE TABLE statements name a table the `--schema` dump
+    /// has, which MySQL refuses.
+    creates_dump_tables: usize,
 }
 
 struct SchemaSummary {
@@ -103,6 +106,9 @@ struct Checked<'a> {
     /// What other measured servers do with the statement, where it is not
     /// what the checked server does.
     others: Vec<OtherServer>,
+    /// Without `--schema`: the earlier input file that created the table
+    /// the statement changes, when it is new there.
+    created_in_file: Option<&'a str>,
 }
 
 /// Another measured server's answer to a statement.
@@ -158,6 +164,27 @@ impl<'a> Report<'a> {
             .collect();
         let findings = check_files(&sessions, &file_names, tables, results);
         let impacts = impacts(&statements, &findings);
+        // Without a dump, a table an earlier input file created may already
+        // be on the database, if that file ran before.
+        let statement_sessions: Vec<usize> = input
+            .sources
+            .iter()
+            .flat_map(|source| std::iter::repeat_n(source.session, source.statements.len()))
+            .collect();
+        let created_in_files: Vec<Option<&str>> = findings
+            .iter()
+            .zip(&statement_sessions)
+            .map(|(finding, session)| match finding.created_in {
+                Some(created) if schema.is_none() && created != *session => {
+                    input.session_names.get(created).map(String::as_str)
+                }
+                _ => None,
+            })
+            .collect();
+        let creates_dump_tables = findings
+            .iter()
+            .filter(|finding| finding.creates_a_dump_table)
+            .count();
         let mut others_said: Vec<Vec<OtherServer>> = vec![Vec::new(); statements.len()];
         // When no answer used a result or a rule that differs between the
         // servers, every server answers every statement the same way.
@@ -173,7 +200,12 @@ impl<'a> Report<'a> {
                         others_said[at].push(OtherServer {
                             server: other.server.name(),
                             impact,
-                            answer: other_answer(&finding.prediction, impact, &statements[at]),
+                            answer: other_answer(
+                                &finding.prediction,
+                                impact,
+                                &statements[at],
+                                created_in_files[at],
+                            ),
                         });
                     }
                 }
@@ -221,6 +253,7 @@ impl<'a> Report<'a> {
             })
             .collect();
         let mut table_states = table_states.into_iter();
+        let mut created_in_files = created_in_files.into_iter();
         let mut checked = findings
             .into_iter()
             .zip(impacts)
@@ -245,6 +278,9 @@ impl<'a> Report<'a> {
                         let table_state = table_states
                             .next()
                             .expect("check gives one finding per statement");
+                        let created_in_file = created_in_files
+                            .next()
+                            .expect("check gives one finding per statement");
                         Checked {
                             statement,
                             table: table_of(statement),
@@ -258,6 +294,7 @@ impl<'a> Report<'a> {
                                 && matches!(statement.kind, StatementKind::Other)
                                 && only_reads(&statement.sql),
                             others,
+                            created_in_file,
                         }
                     })
                     .collect(),
@@ -297,6 +334,7 @@ impl<'a> Report<'a> {
             several_inputs: input.inputs() > 1,
             locked_tables,
             on_unknown_tables: unseen,
+            creates_dump_tables,
         }
     }
 
@@ -372,6 +410,24 @@ impl<'a> Report<'a> {
                 }
                 for warning in &self.server_warnings {
                     writeln!(out, "  {warning}")?;
+                }
+                if self.creates_dump_tables > 0 {
+                    let count = self.creates_dump_tables;
+                    let (statements, name, them, tables) = if count == 1 {
+                        ("statement", "names a table", "it", "table")
+                    } else {
+                        ("statements", "name tables", "them", "tables")
+                    };
+                    writeln!(
+                        out,
+                        "  {count} CREATE TABLE {statements} {name} the dump has: MySQL refuses \
+                         {them} (error 1050), and kilit keeps the dump's {tables}"
+                    )?;
+                    writeln!(
+                        out,
+                        "  migrate --pretend must run on a database with production's \
+                         migrations, and the dump must be of that database"
+                    )?;
                 }
             }
             None if self.on_unknown_tables == 0 => writeln!(
@@ -951,14 +1007,32 @@ impl std::fmt::Display for AnswerLine<'_> {
 
 /// What another server's report says first about a statement: its answer
 /// line, and for a table the input created earlier, that nothing waits.
-fn other_answer(prediction: &Prediction, impact: Impact, statement: &Statement) -> String {
+fn other_answer(
+    prediction: &Prediction,
+    impact: Impact,
+    statement: &Statement,
+    created_in_file: Option<&str>,
+) -> String {
     let answer = AnswerLine(prediction).to_string();
     if impact == Impact::NewTable {
         let table = changed_table(statement).unwrap_or("the table");
-        format!("{answer}; {table} is created earlier in these migrations, so nothing waits for it")
+        match created_in_file {
+            Some(file) => format!("{answer}; {}", created_in_another_file(table, file)),
+            None => format!(
+                "{answer}; {table} is created earlier in these migrations, so nothing waits for it"
+            ),
+        }
     } else {
         answer
     }
+}
+
+/// The note on a table an earlier input file created, without `--schema`.
+fn created_in_another_file(table: &str, file: &str) -> String {
+    format!(
+        "{table} is created in {file}: kilit takes it as new and empty; if that file already \
+         ran on your database, check this file alone with --schema"
+    )
 }
 
 /// What an answer shows, to compare two servers' answers: notes and reasons
@@ -1102,11 +1176,14 @@ fn write_prediction(out: &mut String, checked: &Checked) -> std::fmt::Result {
     }
     if checked.impact == Impact::NewTable {
         let table = changed_table(checked.statement).unwrap_or("the table");
-        writeln!(
-            out,
-            "    - {table} is created earlier in these migrations: nothing else uses it yet, \
-             so nothing waits for it"
-        )?;
+        match checked.created_in_file {
+            Some(file) => writeln!(out, "    - {}", created_in_another_file(table, file))?,
+            None => writeln!(
+                out,
+                "    - {table} is created earlier in these migrations: nothing else uses it yet, \
+                 so nothing waits for it"
+            )?,
+        }
     }
     if checked.first_read {
         writeln!(out, "    - {PRETEND_READ_NOTE}")?;

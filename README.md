@@ -287,13 +287,20 @@ Laravel's schema dump has no `-- Server version` line, so kilit cannot warn
 when the server differs; [the Action's page](docs/github-action.md) explains
 why.
 
-`migrate --pretend` must run against a database that already has production's migrations applied, because
-its `migrations` table decides which migrations are pending. On a fresh
-database it prints every migration, `CREATE TABLE` statements included, and
-kilit takes the later `ALTER`s for changes to new tables and exits 0. Load
+`migrate --pretend` must run against a database that already has production's
+migrations applied, because its `migrations` table decides which migrations are
+pending. On a fresh database it prints every migration, `CREATE TABLE`
+statements included. With `--schema`, a `CREATE TABLE` of a table the dump
+already has is `UNKNOWN` (MySQL refuses it with error 1050), kilit keeps the
+dump's table, and the text header counts such statements once. Load
 production's schema dump into the database with the `mysql` client first
 (Laravel's dump holds the `migrations` rows): `--pretend` then prints only the
 pending migrations.
+
+Without `--schema`, when you give several files, a table that an earlier file
+creates gets a note in the later ones: kilit takes it as new and empty, and
+if that file already ran on your database, you should check the later file
+alone with `--schema`.
 
 `kilit check` exits with:
 

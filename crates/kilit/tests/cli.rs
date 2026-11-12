@@ -6811,16 +6811,43 @@ fn index_statements_kilit_cannot_read_still_name_their_table_and_stay_unknown() 
 
 #[test]
 fn dropping_a_temporary_table_waits_for_nothing_and_gives_no_warning() {
-    // 1051 at once, or returns at once with IF EXISTS: no wait.
-    for sql in [
-        "drop temporary table orders;",
-        "drop temporary table if exists orders;",
+    // 1051 at once, or returns at once with IF EXISTS: no wait. with
+    // IF EXISTS the statement is not checked; without it and with no
+    // temporary table of that name in the session MySQL gives 1051 (by hand
+    // on MySQL 8.0.46 and 8.4.13), which kilit has not measured as a
+    // scenario, so it is unknown (exit 0, and 3 with --strict). Neither
+    // gets a warning.
+    for (sql, impact, strict_code) in [
+        ("drop temporary table orders;", "unknown", Some(3)),
+        (
+            "drop temporary table if exists orders;",
+            "not_checked",
+            Some(0),
+        ),
     ] {
         let (text, json, code) = lock_run(&[], sql);
         assert_not_locked(&text, &json);
-        assert_eq!(impacts_of(&json), ["not_checked"], "{sql}");
+        assert_eq!(impacts_of(&json), [impact], "{sql}");
         assert_eq!(code, Some(0), "{sql}");
+        let (_, _, strict) = lock_run(&["--strict"], sql);
+        assert_eq!(strict, strict_code, "{sql}");
     }
+}
+
+#[test]
+fn dropping_a_temporary_table_that_is_not_there_is_unknown_and_names_error_1051() {
+    // By hand on MySQL 8.0.46 and 8.4.13: DROP TEMPORARY TABLE orders with no
+    // temporary table of that name is error 1051 (Unknown table), and the
+    // base table orders is untouched.
+    let (text, json, code) = lock_run(&[], "drop temporary table orders;");
+    let statement = &json["sources"][0]["statements"][0];
+    assert_eq!(statement["impact"], "unknown", "{statement}");
+    assert!(
+        statement["reason"].as_str().unwrap().contains("1051"),
+        "{statement}"
+    );
+    assert!(text.contains("1051"), "{text}");
+    assert_eq!(code, Some(0));
 }
 
 #[test]
@@ -10705,22 +10732,36 @@ fn a_database_qualified_name_of_a_table_in_the_dump_says_which_database_kilit_do
 }
 
 #[test]
-fn a_table_the_input_dropped_with_drop_temporary_table_says_the_statement_before_dropped_it() {
-    // DROP TEMPORARY TABLE IF EXISTS orders; then an ALTER of orders, a base
-    // table of the dump.
+fn drop_temporary_table_leaves_the_base_table_of_the_dump_and_the_next_alter_is_measured() {
+    // DROP TEMPORARY TABLE IF EXISTS orders; then an ALTER of orders, a
+    // base table of the dump with a FULLTEXT index. By hand on MySQL 8.0.46
+    // and 8.4.13: with no temporary table of that name the statement drops
+    // nothing (a Note 1051 with IF EXISTS), and the base table is still
+    // there. The ALTER gets the answer the lab measured for a table with a
+    // FULLTEXT index (add-column-with-fulltext: COPY, writes wait).
     let input =
         "DROP TEMPORARY TABLE IF EXISTS orders;\nALTER TABLE orders ADD COLUMN c INT NULL;\n";
     let (json, alter, text, code) = b1b_reason_run(input);
-    assert_eq!(alter["impact"], "unknown", "{alter}");
-    let reason = alter["reason"].as_str().unwrap();
-    let wording = "which kilit takes as dropped by the statement on line 1 \
-(MySQL may have dropped only a temporary table of that name)";
-    assert!(reason.contains(wording), "{reason}");
-    assert!(!reason.contains("neither in the schema dump"), "{reason}");
-    assert!(text.contains(wording), "{text}");
+    assert_eq!(alter["impact"], "writes_wait", "{alter}");
+    assert_eq!(alter["algorithm"], "COPY", "{alter}");
+    assert_eq!(alter["rebuilds_table"], true, "{alter}");
+    assert_eq!(alter["case"], "add-column", "{alter}");
+    assert_eq!(
+        alter["evidence"],
+        serde_json::json!(["add-column-with-fulltext"]),
+        "{alter}"
+    );
+    assert_eq!(alter["table_state"], "known", "{alter}");
+    assert!(alter.get("reason").is_none(), "{alter}");
+    assert!(!text.contains("which kilit takes as dropped"), "{text}");
     assert!(!text.contains("neither in the schema dump"), "{text}");
-    assert_eq!(json["summary"]["unknown"], 1, "{json}");
-    assert_eq!(code, Some(0));
+    assert_eq!(json["summary"]["unknown"], 0, "{json}");
+    assert_eq!(code, Some(1));
+    // The DROP TEMPORARY TABLE itself is not checked and the metadata lock
+    // warning still names orders for the ALTER.
+    let first = statements_of(&json, 0)[0].clone();
+    assert_eq!(first["impact"], "not_checked", "{first}");
+    assert!(text.contains("\nmetadata lock on orders:\n"), "{text}");
 }
 
 #[test]
@@ -11906,7 +11947,10 @@ fn a_global_setting_in_the_trailer_of_one_file_makes_the_next_file_unknown() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("trailer_between_files");
     std::fs::create_dir_all(&dir).unwrap();
     let schema = example("mysql-schema.sql");
-    let key = "alter table `orders` add constraint `orders_user_id_foreign` foreign key \
+    // the dump's orders already has orders_user_id_foreign, and MySQL
+    // refuses a second key of that name (1826), so the key here has a name
+    // the dump does not have.
+    let key = "alter table `orders` add constraint `orders_buyer_foreign` foreign key \
                (`user_id`) references `users` (`id`);\n";
     std::fs::write(dir.join("2_key.sql"), key).unwrap();
     for (trailer, impact, plain, strict) in [
@@ -11957,13 +12001,15 @@ fn a_global_setting_in_the_trailer_of_one_file_makes_the_next_file_unknown() {
 #[test]
 fn a_comment_that_makes_a_setting_unclear_names_its_output_line_under_pretend() {
     // Laravel prints one line per statement; a /*! */ comment in a statement is
-    // on that line, and the reason names it.
+    // on that line, and the reason names it. the key has a constraint
+    // name the dump does not have (the dump's orders_user_id_foreign is
+    // refused by MySQL with 1826).
     let migration = "2026_01_01_000000_add_things";
     let input = format!(
         "\n   INFO  Running migrations.  \n\n  {migration} {}  \n\
          \x20 \u{21c2} alter table `orders` add `c` int null  \n\
          \x20 \u{21c2} /*!40014 SET FOREIGN_KEY_CHECKS=0 */ alter table `orders` add constraint \
-         `orders_user_id_foreign` foreign key (`user_id`) references `users` (`id`)  \n",
+         `orders_buyer_foreign` foreign key (`user_id`) references `users` (`id`)  \n",
         ".".repeat(78 - migration.len())
     );
     let output = kilit(
@@ -11986,4 +12032,589 @@ fn a_comment_that_makes_a_setting_unclear_names_its_output_line_under_pretend() 
         )),
         "expected line {line}: {text}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The tables kilit follows cannot be made wrong by valid
+// input. The JSON impact and the exit status, with and without --strict.
+// Facts: by hand on MySQL 8.0.46 and 8.4.13 (the same on both) and the
+// lab's own measurements, named in each test.
+
+/// A dump with `users` and `orders`.
+const USERS_AND_ORDERS_DUMP: &str = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  `email` varchar(255) DEFAULT NULL,
+  `note` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ix_amount` (`amount`),
+  KEY `fk_orders_user` (`user_id`),
+  CONSTRAINT `fk_orders_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+
+/// kilit's text, JSON and exit status for `input` against `dump` (or no
+/// schema), with `extra` options.
+fn check_with_dump(
+    dump: Option<&str>,
+    file: &str,
+    extra: &[&str],
+    input: &str,
+) -> (String, serde_json::Value, Option<i32>) {
+    let mut args: Vec<&str> = Vec::new();
+    let path;
+    if let Some(dump) = dump {
+        path = write_schema(file, dump);
+        args.extend(["--schema", path.to_str().unwrap()]);
+    }
+    args.extend(extra);
+    text_and_json(&args, input)
+}
+
+/// The lines of the text report before the first input's name: the header.
+fn text_header(text: &str) -> &str {
+    let at = text.find("\nstandard input").unwrap_or(text.len());
+    &text[..at]
+}
+
+/// The statements of the files of `dir`, given to kilit by path in order.
+fn write_input_files(dir: &str, files: &[(&str, &str)]) -> Vec<String> {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    files
+        .iter()
+        .map(|(name, text)| {
+            let path = dir.join(name);
+            std::fs::write(&path, text).unwrap();
+            path.to_str().unwrap().to_owned()
+        })
+        .collect()
+}
+
+const CREATE_EXISTING_ORDERS_THEN_ALTER: &str =
+    "CREATE TABLE orders (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, note VARCHAR(50));
+ALTER TABLE orders ADD FULLTEXT INDEX ft (note);
+ALTER TABLE orders MODIFY note VARCHAR(40);
+";
+
+#[test]
+fn a_create_table_of_a_table_the_dump_has_is_unknown_and_the_later_alters_run_on_the_dump_s_table()
+{
+    // With --schema: the dump has orders, the input runs
+    // CREATE TABLE orders and then ALTERs of it. By hand on MySQL 8.0.46 and
+    // 8.4.13 the CREATE is error 1050, so the ALTERs are on the real table:
+    // add-fulltext-index is INPLACE with a rebuild and writes wait.
+    let (text, json, code) = check_with_dump(
+        Some(USERS_AND_ORDERS_DUMP),
+        "create_of_a_dump_table.sql",
+        &[],
+        CREATE_EXISTING_ORDERS_THEN_ALTER,
+    );
+    let statements = statements_of(&json, 0);
+    assert_eq!(statements[0]["impact"], "unknown", "{text}");
+    assert!(
+        statements[0]["reason"].as_str().unwrap().contains("1050"),
+        "{}",
+        statements[0]
+    );
+    assert_eq!(statements[1]["impact"], "writes_wait", "{text}");
+    assert_eq!(statements[1]["case"], "add-fulltext-index");
+    assert_eq!(statements[1]["algorithm"], "INPLACE");
+    assert_eq!(statements[1]["table_state"], "known");
+    assert_eq!(statements[2]["impact"], "writes_wait", "{text}");
+    assert_eq!(statements[2]["table_state"], "known");
+    assert_eq!(json["summary"]["unknown"], 1);
+    assert_eq!(json["summary"]["writes_wait"], 2);
+    assert_eq!(json["summary"]["new_table"], 0);
+    assert_eq!(code, Some(1), "{text}");
+    // Not a table created here.
+    assert!(
+        !text.contains("is created earlier in these migrations"),
+        "{text}"
+    );
+    assert!(text.contains("\nmetadata lock on orders:\n"), "{text}");
+    // --strict: the same exit status; the unknown CREATE is counted too.
+    let (_, strict, strict_code) = check_with_dump(
+        Some(USERS_AND_ORDERS_DUMP),
+        "create_of_a_dump_table.sql",
+        &["--strict"],
+        CREATE_EXISTING_ORDERS_THEN_ALTER,
+    );
+    assert_eq!(strict["exit_code"], 1);
+    assert_eq!(strict_code, Some(1));
+}
+
+#[test]
+fn the_text_header_says_once_how_many_create_tables_name_a_table_the_dump_has() {
+    let (text, json, _) = check_with_dump(
+        Some(USERS_AND_ORDERS_DUMP),
+        "text_header.sql",
+        &[],
+        CREATE_EXISTING_ORDERS_THEN_ALTER,
+    );
+    let header = text_header(&text);
+    assert_eq!(header.matches("error 1050").count(), 1, "{text}");
+    assert!(header.contains("1 CREATE TABLE"), "{text}");
+    // Two such statements: said once, with the count.
+    let two = "CREATE TABLE orders (id INT PRIMARY KEY);
+               CREATE TABLE users (id INT PRIMARY KEY);
+               ALTER TABLE orders ADD COLUMN probe_col INT NULL;";
+    let (text, json2, _) =
+        check_with_dump(Some(USERS_AND_ORDERS_DUMP), "text_header.sql", &[], two);
+    let header = text_header(&text);
+    assert_eq!(header.matches("error 1050").count(), 1, "{text}");
+    assert!(header.contains("2 CREATE TABLE"), "{text}");
+    // Without such a statement the header says nothing about it.
+    let (text, _, _) = check_with_dump(
+        Some(USERS_AND_ORDERS_DUMP),
+        "text_header.sql",
+        &[],
+        "ALTER TABLE orders ADD COLUMN probe_col INT NULL;",
+    );
+    assert!(!text_header(&text).contains("1050"), "{text}");
+    assert!(!text.contains("error 1050"), "{text}");
+    // The JSON has no new key or warning for it.
+    for json in [&json, &json2] {
+        let ids: Vec<&str> = json["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|warning| warning["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["metadata-lock"]);
+    }
+}
+
+#[test]
+fn a_create_table_if_not_exists_of_a_dump_table_is_not_counted_in_the_header() {
+    let (text, json, code) = check_with_dump(
+        Some(USERS_AND_ORDERS_DUMP),
+        "create_if_not_exists_of_a_dump_table.sql",
+        &[],
+        "CREATE TABLE IF NOT EXISTS orders (id INT PRIMARY KEY);
+         ALTER TABLE orders ADD COLUMN probe_col INT NULL;",
+    );
+    assert!(!text.contains("error 1050"), "{text}");
+    let statements = statements_of(&json, 0);
+    assert_eq!(statements[1]["impact"], "writes_continue", "{text}");
+    assert_eq!(statements[1]["table_state"], "known");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn an_alter_in_a_later_file_of_a_table_an_earlier_file_creates_keeps_its_answer_and_says_where_the_table_comes_from()
+ {
+    // Without --schema, two files: 001_create.sql and 002_alter.sql.
+    // The answer stays (change-integer-type, a copy, and orders is new); the
+    // note names the file, in the text only.
+    let files = write_input_files(
+        "create_and_alter_in_two_files",
+        &[
+            (
+                "001_create.sql",
+                "CREATE TABLE orders (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, amount INT NOT NULL, note VARCHAR(50));\n",
+            ),
+            (
+                "002_alter.sql",
+                "ALTER TABLE orders MODIFY amount BIGINT NOT NULL;\n",
+            ),
+        ],
+    );
+    let args: Vec<&str> = files.iter().map(String::as_str).collect();
+    let mut text_args = vec!["check"];
+    text_args.extend(&args);
+    let output = kilit(&text_args, "");
+    let text = stdout(&output);
+    let note = format!(
+        "orders is created in {}: kilit takes it as new and empty; if that file already ran \
+         on your database, check this file alone with --schema",
+        files[0]
+    );
+    assert_eq!(text.matches(&note).count(), 1, "{text}");
+    assert!(text.contains(&format!("    - {note}\n")), "{text}");
+    // The old wording is gone for that statement.
+    assert!(
+        !text.contains("orders is created earlier in these migrations"),
+        "{text}"
+    );
+    assert_eq!(output.status.code(), Some(0), "{text}");
+    // The JSON format does not change: the answer is the same and the note
+    // is text only.
+    let mut json_args = vec!["check", "--format", "json"];
+    json_args.extend(&args);
+    let json = json_of(&kilit(&json_args, ""));
+    let statement = &statements_of(&json, 1)[0];
+    assert_eq!(statement["impact"], "new_table", "{statement}");
+    assert_eq!(statement["case"], "change-integer-type");
+    assert_eq!(statement["algorithm"], "COPY");
+    assert_eq!(statement["table_state"], "created");
+    assert!(!statement.to_string().contains("created in"), "{statement}");
+    assert_eq!(json["exit_code"], 0);
+}
+
+#[test]
+fn a_table_created_and_altered_in_the_same_file_keeps_the_old_note_and_one_pretend_run_never_gets_the_new_one()
+ {
+    let files = write_input_files(
+        "create_and_alter_in_one_file",
+        &[(
+            "001.sql",
+            "CREATE TABLE orders (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, amount INT NOT NULL);
+ALTER TABLE orders MODIFY amount BIGINT NOT NULL;
+",
+        )],
+    );
+    let text = stdout(&kilit(&["check", &files[0]], ""));
+    assert!(
+        text.contains("    - orders is created earlier in these migrations: nothing else uses it yet, so nothing waits for it\n"),
+        "{text}"
+    );
+    assert!(!text.contains("kilit takes it as new and empty"), "{text}");
+    // One migrate --pretend output is one run, whatever its migrations: the
+    // demo creates order_events in one migration and alters it in the next.
+    let demo = stdout(&laravel_demo(&[]));
+    assert!(
+        demo.contains("order_events is created earlier in these migrations"),
+        "{demo}"
+    );
+    assert!(!demo.contains("kilit takes it as new and empty"), "{demo}");
+}
+
+#[test]
+fn a_new_table_swapped_onto_a_live_name_is_not_a_table_created_here_and_an_unreadable_one_is_unknown()
+ {
+    // CREATE TABLE orders_new, RENAME TABLE orders TO
+    // orders_old, orders_new TO orders, ADD FULLTEXT on orders. orders_new
+    // writes no character set, so the FULLTEXT index is unknown (B1d: kilit
+    // cannot tell which one note uses). The swapped table is known and not
+    // "created".
+    let input =
+        "CREATE TABLE orders_new (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, note VARCHAR(50));
+RENAME TABLE orders TO orders_old, orders_new TO orders;
+ALTER TABLE orders ADD FULLTEXT INDEX ft (note);
+";
+    let (text, json, code) = check_with_dump(
+        Some(USERS_AND_ORDERS_DUMP),
+        "swap_onto_orders.sql",
+        &[],
+        input,
+    );
+    let statements = statements_of(&json, 0);
+    assert_eq!(statements[2]["impact"], "unknown", "{text}");
+    assert_eq!(statements[2]["table_state"], "known", "{text}");
+    assert!(
+        statements[2]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("names no character set"),
+        "{}",
+        statements[2]
+    );
+    assert!(
+        !text.contains("orders is created earlier in these migrations"),
+        "{text}"
+    );
+    assert_eq!(code, Some(0), "{text}");
+    let (_, strict, strict_code) = check_with_dump(
+        Some(USERS_AND_ORDERS_DUMP),
+        "swap_onto_orders.sql",
+        &["--strict"],
+        input,
+    );
+    assert_eq!(strict["exit_code"], 3);
+    assert_eq!(strict_code, Some(3));
+}
+
+#[test]
+fn a_new_table_swapped_onto_a_live_name_with_a_character_set_makes_writes_wait_for_a_fulltext_index()
+ {
+    // The same input with DEFAULT CHARSET=utf8mb4 on orders_new: ADD FULLTEXT
+    // on a table kilit knows is the lab's add-fulltext-index, INPLACE with a
+    // rebuild, writes wait, and the exit status says so.
+    let input = "CREATE TABLE orders_new (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, note VARCHAR(50)) DEFAULT CHARSET=utf8mb4;
+RENAME TABLE orders TO orders_old, orders_new TO orders;
+ALTER TABLE orders ADD FULLTEXT INDEX ft (note);
+";
+    let (text, json, code) = check_with_dump(
+        Some(USERS_AND_ORDERS_DUMP),
+        "swap_onto_orders_with_charset.sql",
+        &[],
+        input,
+    );
+    let statement = &statements_of(&json, 0)[2];
+    assert_eq!(statement["impact"], "writes_wait", "{text}");
+    assert_eq!(statement["case"], "add-fulltext-index");
+    assert_eq!(statement["algorithm"], "INPLACE");
+    assert_eq!(statement["rebuilds_table"], true);
+    assert_eq!(statement["table_state"], "known");
+    assert!(text.contains("\nmetadata lock on orders"), "{text}");
+    assert_eq!(code, Some(1), "{text}");
+    assert_eq!(
+        check_with_dump(
+            Some(USERS_AND_ORDERS_DUMP),
+            "swap_onto_orders_with_charset.sql",
+            &["--strict"],
+            input
+        )
+        .2,
+        Some(1)
+    );
+}
+
+#[test]
+fn a_modify_after_a_copy_and_swap_is_a_copy_of_the_live_table_and_exits_with_1() {
+    // A copy and swap: new table, INSERT ... SELECT, RENAME
+    // TABLE swap, then MODIFY amount BIGINT. By hand: orders is the live
+    // table with every row.
+    let input = "CREATE TABLE orders_new (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, amount INT NOT NULL, note VARCHAR(50));
+INSERT INTO orders_new (id, amount, note) SELECT id, amount, note FROM orders;
+RENAME TABLE orders TO orders_old, orders_new TO orders;
+ALTER TABLE orders MODIFY amount BIGINT NOT NULL;
+ALTER TABLE orders ADD FULLTEXT INDEX ft (note);
+";
+    let (text, json, code) = check_with_dump(
+        Some(USERS_AND_ORDERS_DUMP),
+        "copy_and_swap_orders.sql",
+        &[],
+        input,
+    );
+    let statements = statements_of(&json, 0);
+    assert_eq!(statements[3]["impact"], "writes_wait", "{text}");
+    assert_eq!(statements[3]["case"], "change-integer-type");
+    assert_eq!(statements[3]["algorithm"], "COPY");
+    assert_eq!(statements[3]["table_state"], "known");
+    // orders_new writes no character set: the FULLTEXT index is unknown.
+    assert_eq!(statements[4]["impact"], "unknown", "{text}");
+    assert!(
+        !text.contains("orders is created earlier in these migrations"),
+        "{text}"
+    );
+    assert_eq!(code, Some(1), "{text}");
+    assert_eq!(
+        check_with_dump(
+            Some(USERS_AND_ORDERS_DUMP),
+            "copy_and_swap_orders.sql",
+            &["--strict"],
+            input
+        )
+        .2,
+        Some(1)
+    );
+}
+
+#[test]
+fn drop_temporary_table_if_exists_of_a_base_table_exits_with_1_on_the_fulltext_table() {
+    // DROP TEMPORARY TABLE IF EXISTS of a base table, with its exit status: the ALTER is
+    // the lab's add-column-with-fulltext, a copy.
+    let input =
+        "DROP TEMPORARY TABLE IF EXISTS orders;\nALTER TABLE orders ADD COLUMN c INT NULL;\n";
+    let (text, json, code) = check_with_dump(
+        Some(B1B_REASON_DUMP),
+        "drop_temporary_of_a_base_table.sql",
+        &[],
+        input,
+    );
+    assert_eq!(
+        statements_of(&json, 0)[1]["impact"],
+        "writes_wait",
+        "{text}"
+    );
+    assert_eq!(code, Some(1), "{text}");
+    assert_eq!(
+        check_with_dump(
+            Some(B1B_REASON_DUMP),
+            "drop_temporary_of_a_base_table.sql",
+            &["--strict"],
+            input
+        )
+        .2,
+        Some(1)
+    );
+}
+
+#[test]
+fn create_table_if_not_exists_of_a_table_kilit_never_saw_leaves_the_following_alters_unknown() {
+    // CREATE TABLE IF NOT EXISTS of a table kilit never saw (answered by an earlier
+    // step): with no --schema, MySQL does nothing if orders exists, so kilit
+    // does not take it as a table created here.
+    let input = "CREATE TABLE IF NOT EXISTS orders (id INT PRIMARY KEY, amount SMALLINT NOT NULL);
+ALTER TABLE orders MODIFY amount SMALLINT NOT NULL;
+ALTER TABLE orders ADD COLUMN c INT NULL;
+";
+    let (text, json, code) =
+        check_with_dump(None, "create_if_not_exists_without_dump.sql", &[], input);
+    let statements = statements_of(&json, 0);
+    assert_eq!(statements[1]["impact"], "unknown", "{text}");
+    assert_eq!(statements[2]["impact"], "unknown", "{text}");
+    assert_eq!(json["summary"]["new_table"], 0);
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(
+        check_with_dump(
+            None,
+            "create_if_not_exists_without_dump.sql",
+            &["--strict"],
+            input
+        )
+        .2,
+        Some(3)
+    );
+}
+
+#[test]
+fn a_temporary_table_of_one_file_is_gone_in_the_next_and_the_real_table_is_named_by_the_warning() {
+    // CREATE TEMPORARY TABLE orders in the first file, ALTER TABLE orders in
+    // the second: a new session, the temporary table ended with the first.
+    let files = write_input_files(
+        "temporary_table_across_files",
+        &[
+            (
+                "1.sql",
+                "CREATE TEMPORARY TABLE orders (id INT PRIMARY KEY, tmp_col INT NULL);\n",
+            ),
+            ("2.sql", "ALTER TABLE orders ADD COLUMN c INT NULL;\n"),
+        ],
+    );
+    let dump = write_schema("temporary_table_across_files.sql", B1B_REASON_DUMP);
+    // With the dump: its orders (with a FULLTEXT index), a copy.
+    let output = kilit(
+        &[
+            "check",
+            "--format",
+            "json",
+            "--schema",
+            dump.to_str().unwrap(),
+            &files[0],
+            &files[1],
+        ],
+        "",
+    );
+    let json = json_of(&output);
+    let statement = &statements_of(&json, 1)[0];
+    assert_eq!(statement["impact"], "writes_wait", "{statement}");
+    assert_eq!(statement["table_state"], "known");
+    assert_eq!(json["warnings"][0]["tables"], serde_json::json!(["orders"]));
+    assert_eq!(output.status.code(), Some(1));
+    // Without a dump: a table kilit never saw, not "created here".
+    let output = kilit(&["check", "--format", "json", &files[0], &files[1]], "");
+    let json = json_of(&output);
+    let statement = &statements_of(&json, 1)[0];
+    assert_eq!(statement["impact"], "unknown", "{statement}");
+    assert_ne!(statement["table_state"], "created");
+    assert_eq!(json["warnings"][0]["tables"], serde_json::json!(["orders"]));
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn a_refused_name_is_unknown_and_changes_the_exit_status_from_1_to_0_or_to_3_with_strict() {
+    // By hand on MySQL 8.0.46 and 8.4.13: a foreign key named like one the
+    // table has is error 1826. It used to be a copy, writes wait, exit 1.
+    let sql = "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) \
+               REFERENCES users (id);";
+    let (text, json, code) =
+        check_with_dump(Some(USERS_AND_ORDERS_DUMP), "refused_names.sql", &[], sql);
+    let statement = &statements_of(&json, 0)[0];
+    assert_eq!(statement["impact"], "unknown", "{text}");
+    assert!(
+        statement["reason"].as_str().unwrap().contains("1826"),
+        "{statement}"
+    );
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(
+        check_with_dump(
+            Some(USERS_AND_ORDERS_DUMP),
+            "refused_names.sql",
+            &["--strict"],
+            sql
+        )
+        .2,
+        Some(3)
+    );
+    // ADD COLUMN of a column the table has: error 1060.
+    let sql = "ALTER TABLE orders ADD COLUMN note VARCHAR(50) NULL;";
+    let (text, json, code) =
+        check_with_dump(Some(USERS_AND_ORDERS_DUMP), "refused_names.sql", &[], sql);
+    let statement = &statements_of(&json, 0)[0];
+    assert_eq!(statement["impact"], "unknown", "{text}");
+    assert!(
+        statement["reason"].as_str().unwrap().contains("1060"),
+        "{statement}"
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        check_with_dump(
+            Some(USERS_AND_ORDERS_DUMP),
+            "refused_names.sql",
+            &["--strict"],
+            sql
+        )
+        .2,
+        Some(3)
+    );
+}
+
+#[test]
+fn a_table_copied_with_like_is_a_table_created_here_with_the_source_s_answers() {
+    // By hand: CREATE TABLE b LIKE orders copies the columns and the
+    // indexes. The dump's orders has the index ix_amount, so b has it: a
+    // second index of that name is error 1061.
+    let (text, json, code) = check_with_dump(
+        Some(USERS_AND_ORDERS_DUMP),
+        "create_like_of_orders.sql",
+        &[],
+        "CREATE TABLE b LIKE orders;
+         ALTER TABLE b ADD COLUMN probe_col INT NULL;
+         ALTER TABLE b ADD INDEX ix_amount (note);",
+    );
+    let statements = statements_of(&json, 0);
+    assert_eq!(statements[0]["impact"], "not_checked", "{text}");
+    assert_eq!(statements[1]["impact"], "new_table", "{text}");
+    assert_eq!(statements[1]["table_state"], "created");
+    assert_eq!(statements[2]["impact"], "unknown", "{text}");
+    assert!(
+        statements[2]["reason"].as_str().unwrap().contains("1061"),
+        "{}",
+        statements[2]
+    );
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn a_create_after_a_rename_away_and_back_and_a_create_if_not_exists_like_exit_with_1() {
+    // The dump's orders is renamed away and back, CREATE TABLE orders is
+    // refused (1050), and the MODIFY is the measured copy of the live table.
+    let input = "RENAME TABLE orders TO orders_tmp;
+RENAME TABLE orders_tmp TO orders;
+CREATE TABLE orders (id BIGINT UNSIGNED NOT NULL PRIMARY KEY, amount INT NOT NULL) DEFAULT CHARSET=utf8mb4;
+ALTER TABLE orders MODIFY amount BIGINT NOT NULL;
+";
+    let (text, json, code) = check_with_dump(
+        Some(USERS_AND_ORDERS_DUMP),
+        "rename_away_and_back.sql",
+        &[],
+        input,
+    );
+    let statements = statements_of(&json, 0);
+    assert_eq!(statements[2]["impact"], "unknown", "{text}");
+    assert!(statements[2]["reason"].as_str().unwrap().contains("1050"));
+    assert_eq!(statements[3]["impact"], "writes_wait", "{text}");
+    assert_eq!(code, Some(1), "{text}");
+    // CREATE TABLE IF NOT EXISTS ... LIKE of a name the dump lacks is not a
+    // new table, like the plain IF NOT EXISTS form.
+    let input = "CREATE TABLE IF NOT EXISTS x2 LIKE orders;
+ALTER TABLE x2 MODIFY amount BIGINT NOT NULL;
+";
+    let (text, json, code) = check_with_dump(
+        Some(USERS_AND_ORDERS_DUMP),
+        "create_if_not_exists_like.sql",
+        &[],
+        input,
+    );
+    assert_ne!(statements_of(&json, 0)[1]["impact"], "new_table", "{text}");
+    assert_eq!(code, Some(1), "{text}");
 }

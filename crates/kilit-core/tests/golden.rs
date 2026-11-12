@@ -3295,22 +3295,40 @@ fn a_quoted_engine_name_that_the_parser_cannot_read_makes_the_table_unknown() {
 }
 
 #[test]
-fn a_table_copied_with_like_from_a_myisam_table_is_lost_and_unknown() {
-    // The copy has the engine of the table after LIKE.
+fn a_table_copied_with_like_from_a_myisam_table_is_a_known_myisam_table() {
+    // By hand on MySQL 8.0.46 and 8.4.13: CREATE TABLE b LIKE a copies the
+    // engine of a (ENGINE=MyISAM stays MyISAM). kilit reads LIKE, so the copy
+    // is a known MyISAM table made here: ADD COLUMN gets the MyISAM
+    // answer the lab measured (COPY, myisam-add-nullable-column), on a table
+    // created here, and a copy of an InnoDB table is an InnoDB table
+    // (INSTANT).
     let sql = "CREATE TABLE orders_copy LIKE orders;
                ALTER TABLE orders_copy ADD COLUMN c INT NULL;";
     for server in [MYSQL_80, MYSQL_84] {
         let predictions = predictions_on(server, &myisam_lab_after(&[]), sql);
         match predictions.last().unwrap() {
-            Prediction::Unknown { reason, .. } => {
-                assert!(reason.contains("MyISAM"), "{server}: {reason}")
+            Prediction::Measured {
+                verdict, evidence, ..
+            } => {
+                assert_eq!(verdict.to_string(), COPY, "{server}");
+                assert!(
+                    evidence.contains(&"myisam-add-nullable-column"),
+                    "{evidence:?}"
+                );
             }
             other => panic!("{server}: {other:?}"),
         }
     }
-    // The control: kilit does not read LIKE, so a copy of an InnoDB table is
-    // lost too (unknown).
-    assert_answer("InnoDB copy", LAB_TABLES, sql, UNKNOWN);
+    // The control: a copy of an InnoDB table is an InnoDB table.
+    assert_answer("InnoDB copy", LAB_TABLES, sql, INSTANT);
+    // The copy is made here, so nothing else uses it yet.
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(
+            impacts_on(server, &myisam_lab_after(&[]), sql),
+            [Impact::NotChecked, Impact::NewTable],
+            "{server}"
+        );
+    }
 }
 
 #[test]
@@ -3661,8 +3679,12 @@ fn a_temporary_table_created_after_default_tmp_storage_engine_was_set_has_no_kno
 }
 
 #[test]
-fn create_table_if_not_exists_like_over_a_myisam_table_leaves_the_following_alter_unknown() {
-    // p6: MySQL does nothing here, the table stays MyISAM.
+fn create_table_if_not_exists_like_over_a_myisam_table_leaves_the_table_myisam_so_the_alter_is_copy()
+ {
+    // p6: MySQL does nothing here (by hand on MySQL 8.0.46 and 8.4.13 the
+    // statement is accepted with Note 1050), the table stays MyISAM. kilit
+    // reads the statement and does nothing too, so the ADD COLUMN gets the
+    // MyISAM answer the lab measured: COPY.
     let schema = "CREATE TABLE `users` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
   `name` varchar(100) NOT NULL,
@@ -3681,7 +3703,7 @@ CREATE TABLE `orders` (
         schema,
         "CREATE TABLE IF NOT EXISTS orders LIKE users;
          ALTER TABLE orders ADD COLUMN c INT NULL;",
-        "unknown",
+        COPY,
     );
 }
 
@@ -9776,14 +9798,19 @@ fn a_temporary_table_in_another_letter_case_hides_the_known_table_only_inside_th
 }
 
 #[test]
-fn a_create_table_like_in_another_letter_case_keeps_its_reason_and_the_known_table() {
-    // CREATE TABLE ORDERS LIKE users: kilit cannot read LIKE. It keeps that
-    // reason, loses ORDERS (ambiguous next to orders) and leaves orders known.
+fn a_create_table_like_in_another_letter_case_is_unknown_for_the_letter_case_and_keeps_the_known_table()
+ {
+    // CREATE TABLE ORDERS LIKE users: kilit reads LIKE, so the statement gets
+    // the letter-case reason of any new name in another case (not the
+    // unreadable-statement reason), ORDERS is lost (ambiguous next to
+    // orders) and orders stays known.
     let schema = case_fulltext();
     let create = "CREATE TABLE ORDERS LIKE users";
     assert_eq!(case_last_answer(&schema, create), UNKNOWN);
-    let reason = case_reason(&schema, create);
-    assert!(!reason.contains("lower_case_table_names"), "{reason}");
+    let reason = assert_case_unknown(&schema, create, "orders", "ORDERS");
+    assert!(!reason.starts_with("kilit could not read"), "{reason}");
+    // The same words as a plain CREATE TABLE ORDERS.
+    assert!(reason.contains(CASE_NEW_NAME), "{reason}");
     let sql = format!("{create};\nALTER TABLE orders ADD COLUMN x INT NULL");
     assert_eq!(case_last_answer(&schema, &sql), COPY);
     // ORDERS is lost, and ambiguous next to orders like the new name of a
@@ -13601,7 +13628,9 @@ fn a_unique_index_on_a_whole_column_keys_the_rows_and_the_same_column_is_instant
 fn dropping_a_temporary_table_with_a_comment_inside_is_read_as_without_it() {
     // A comment between DROP and TEMPORARY does not make it a drop of the
     // base table. By hand on MySQL 8.0.46 and 8.4.13: DROP TEMPORARY TABLE
-    // leaves a base table of the same name alone.
+    // leaves a base table of the same name alone. both forms leave the
+    // base table known, so the ALTER gets its measured answer (INSTANT), and
+    // the two forms give the same answer.
     let dump = Schema::from_dump(LAB_TABLES);
     let alter = "ALTER TABLE orders ADD COLUMN c INT NULL;";
     for drop in [
@@ -13610,21 +13639,19 @@ fn dropping_a_temporary_table_with_a_comment_inside_is_read_as_without_it() {
     ] {
         let commented = drop.replacen("DROP ", "DROP /* x */ ", 1);
         for server in [MYSQL_80, MYSQL_84] {
-            let plain = b1c_reason(server, &dump, &format!("{drop};\n{alter}"));
-            let with = b1c_reason(server, &dump, &format!("{commented};\n{alter}"));
+            let plain = b1c_answer(server, &dump, &format!("{drop};\n{alter}"));
+            let with = b1c_answer(server, &dump, &format!("{commented};\n{alter}"));
+            assert_eq!(plain, INSTANT, "{server}: {drop}");
             assert_eq!(with, plain, "{server}: {commented}");
         }
     }
     for server in [MYSQL_80, MYSQL_84] {
-        let reason = b1c_reason(
+        let answer = b1c_answer(
             server,
             &dump,
             &format!("DROP /* x */ TEMPORARY TABLE IF EXISTS orders;\n{alter}"),
         );
-        assert!(
-            reason.contains("may have dropped only a temporary table"),
-            "{server}: {reason}"
-        );
+        assert_eq!(answer, INSTANT, "{server}");
     }
 }
 
@@ -16127,7 +16154,10 @@ fn old_alter_table_set_in_a_left_out_comment_makes_every_later_alter_unknown() {
         answers_of(LAB_TABLES, &format!("{NEXT_COLUMN};")),
         [INSTANT]
     );
-    let sql = format!("{NEXT_COLUMN};\n/*!80000 SET old_alter_table = ON */;\n{NEXT_COLUMN};");
+    // the second ADD names another column; the same column twice would
+    // be error 1060.
+    let another_column = "ALTER TABLE orders ADD COLUMN d INT NULL";
+    let sql = format!("{NEXT_COLUMN};\n/*!80000 SET old_alter_table = ON */;\n{another_column};");
     for server in [MYSQL_80, MYSQL_84] {
         let reason = b1c_reason(server, &Schema::from_sql(LAB_TABLES), &sql);
         assert!(
@@ -17136,13 +17166,13 @@ fn a_refused_fulltext_index_on_a_new_binary_text_column_adds_neither_column_nor_
 }
 
 #[test]
-fn dropping_and_adding_back_a_binary_text_column_with_a_fulltext_index_loses_the_table() {
+fn dropping_and_adding_back_a_binary_text_column_with_a_fulltext_index_is_followed() {
     // bin is TEXT CHARACTER SET binary. DROP COLUMN bin, ADD COLUMN bin TEXT
     // (utf8mb4), ADD FULLTEXT (bin) in one ALTER is accepted by MySQL (hand
-    // test), but it names bin in two clauses beside a FULLTEXT index, which
-    // MySQL may refuse: kilit cannot tell whether it ran and loses the table.
-    // The later ADD FULLTEXT gets the lost-table answer (depends on the
-    // table: writes wait), never a failure or a measured FULLTEXT answer.
+    // test). kilit follows it: the table then has one FULLTEXT index, fb, on a
+    // TEXT column of a character set that is not binary, so the later ADD
+    // FULLTEXT is a second FULLTEXT index on a known table and gets the lab's
+    // add-second-fulltext-index answer.
     let statements = [
         "ALTER TABLE orders ADD COLUMN bin TEXT CHARACTER SET binary NULL",
         "ALTER TABLE orders DROP COLUMN bin, ADD COLUMN bin TEXT NULL, \
@@ -17150,21 +17180,14 @@ fn dropping_and_adding_back_a_binary_text_column_with_a_fulltext_index_loses_the
         "ALTER TABLE orders ADD FULLTEXT INDEX fn (note)",
     ];
     let said = said_in_order(LAB_TABLES, &statements);
-    assert_eq!(
-        said.answer, "depends on the table: writes wait",
-        "{}",
-        said.reason
-    );
+    assert_eq!(said.answer, FULLTEXT_SECOND, "{}", said.reason);
     assert!(!said.answer.contains("fails"));
-    assert!(
-        said.reason.contains(
-            "in two of its clauses, which MySQL takes against the names before the statement"
-        ),
-        "{}",
-        said.reason
-    );
-    assert_ne!(said.answer, FULLTEXT_SECOND);
     assert_ne!(said.answer, FULLTEXT_REBUILD_WAIT);
+    assert!(said.reason.is_empty(), "{}", said.reason);
+    // The control: without the first ADD FULLTEXT the table has none, and
+    // the same statement is the first FULLTEXT index.
+    let control = said_in_order(LAB_TABLES, &[statements[2]]);
+    assert_eq!(control.answer, FULLTEXT_REBUILD_WAIT);
 }
 
 // A refused ADD FULLTEXT on a binary TEXT column written with a prefix, and
@@ -17319,6 +17342,8 @@ fn a_primary_key_on_a_set_null_key_column_is_not_followed_so_dropping_the_column
     // ALTER TABLE n4 CHANGE uid uid BIGINT UNSIGNED PRIMARY KEY
     // ALTER TABLE p1 DROP PRIMARY KEY, ADD PRIMARY KEY (uid)
     // ALTER TABLE p2 DROP PRIMARY KEY, MODIFY uid BIGINT UNSIGNED, ADD PRIMARY KEY (id, uid)
+    // n2 and n4 used to lose the table (the inline PRIMARY KEY was not
+    // read); they are refused with 1830 now, the table kept.
     let mut problems = Vec::new();
     let schema = format!("{B1D_PK_USERS}{B1D_PK_TABLES}");
     for (table, change) in [
@@ -17334,16 +17359,15 @@ fn a_primary_key_on_a_set_null_key_column_is_not_followed_so_dropping_the_column
         let alter = format!("ALTER TABLE {table} {change};\n");
         let drop_column = format!("ALTER TABLE {table} DROP COLUMN uid;\n");
         let answers = answers_of(&schema, &format!("{alter}{drop_column}"));
-        // kilit does not follow an inline PRIMARY KEY option: it loses the
-        // table, so the later drop is unknown, never a runs answer.
-        let inline = change.ends_with("PRIMARY KEY") && !change.contains("ADD");
-        let ok = if inline {
-            answers[1] == UNKNOWN
-        } else {
-            answers[1] == FAILS_1828
-        };
-        if !ok {
+        // the inline PRIMARY KEY of n2 and n4 is read now. It is
+        // refused with 1830 like the other forms and leaves the table as it
+        // was, so the later drop fails with 1828 for every table.
+        if answers[1] != FAILS_1828 {
             problems.push(format!("{table}: {change}: got {answers:?}"));
+        }
+        // The refused statement is not a measured success.
+        if answers[0] != UNKNOWN {
+            problems.push(format!("{table}: {change}: first answer {answers:?}"));
         }
     }
     assert!(problems.is_empty(), "{problems:#?}");
@@ -17418,11 +17442,14 @@ fn dropping_the_only_index_of_a_set_null_key_still_fails_with_1553_after_a_refus
 }
 
 #[test]
-fn swapping_two_column_names_with_two_changes_is_neither_refused_nor_a_failed_drop() {
+fn swapping_two_column_names_with_two_changes_is_followed_so_the_key_column_is_the_one_that_cannot_be_dropped()
+ {
     // By hand on MySQL 8.0.46 and 8.4.13: ALTER TABLE s1 CHANGE id uid BIGINT
-    // UNSIGNED NOT NULL, CHANGE uid x BIGINT UNSIGNED NULL is accepted. What
-    // kilit says afterwards is an older limit; it must not call the swap
-    // refused, and must not fail a later DROP COLUMN with 1828 or 1830.
+    // UNSIGNED NOT NULL, CHANGE uid x BIGINT UNSIGNED NULL is accepted, each
+    // clause against the names before the statement: uid is the old id (the
+    // primary key) and x the old uid (the SET NULL key's column). kilit follows
+    // it, so DROP COLUMN x fails with 1828 and DROP COLUMN uid, the primary
+    // key column, is neither 1828 nor 1830. The swap itself is not refused.
     let schema = "CREATE TABLE `users` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, \
         `name` varchar(100) NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n\
         CREATE TABLE `s1` (`id` bigint unsigned NOT NULL, `uid` bigint unsigned DEFAULT NULL, \
@@ -17439,7 +17466,11 @@ fn swapping_two_column_names_with_two_changes_is_neither_refused_nor_a_failed_dr
                 sql.clone()
             };
             let said = said(schema, &sql_to);
-            assert_ne!(said.answer, FAILS_1828, "{name} of {drop}");
+            if at == 1 && drop == "x" {
+                assert_eq!(said.answer, FAILS_1828, "{name} of {drop}");
+            } else {
+                assert_ne!(said.answer, FAILS_1828, "{name} of {drop}");
+            }
             assert_ne!(said.answer, FAILS_1830, "{name} of {drop}");
             assert!(
                 !said.reason.contains(NOT_ACCEPTED),
@@ -17455,11 +17486,12 @@ fn swapping_two_column_names_with_two_changes_is_neither_refused_nor_a_failed_dr
 // cannot tell how MySQL takes it and loses the table.
 
 #[test]
-fn a_dropped_fulltext_index_and_a_not_null_set_null_key_column_beside_a_column_drop_and_add_loses_the_table()
+fn a_dropped_fulltext_index_and_a_not_null_set_null_key_column_beside_a_column_drop_and_add_is_refused_and_keeps_the_index()
  {
-    // The first ALTER fails with 1830 (MODIFY uid NOT NULL under a SET NULL
-    // key) and the FULLTEXT index stays, so a later ADD COLUMN cannot be
-    // INSTANT. kilit does not know whether it ran: the table is lost.
+    // DROP x with ADD x is followed (accepted by hand). The ALTER is
+    // refused as a whole with 1830 (MODIFY uid NOT NULL under a SET NULL
+    // key), so the FULLTEXT index stays and the later ADD COLUMN w is the
+    // measured add-column-with-fulltext answer: COPY.
     let schema = "CREATE TABLE `users` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, \
         `name` varchar(100) NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n\
         CREATE TABLE `n` (`id` bigint unsigned NOT NULL, `uid` bigint unsigned DEFAULT NULL, \
@@ -17467,28 +17499,26 @@ fn a_dropped_fulltext_index_and_a_not_null_set_null_key_column_beside_a_column_d
         PRIMARY KEY (`id`), FULLTEXT KEY `ft` (`body`), KEY `f1` (`uid`), \
         CONSTRAINT `f1` FOREIGN KEY (`uid`) REFERENCES `users` (`id`) ON DELETE SET NULL) \
         ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n";
-    let sql = "ALTER TABLE n DROP INDEX ft, MODIFY uid BIGINT UNSIGNED NOT NULL, \
-               DROP COLUMN x, ADD COLUMN x INT NULL;\n\
-               ALTER TABLE n ADD COLUMN w INT NULL;\n";
-    let said = said(schema, sql);
-    assert_eq!(said.answer, "unknown");
-    assert!(
-        said.reason.contains(
-            "in two of its clauses, which MySQL takes against the names before the statement"
-        ),
-        "{}",
-        said.reason
+    let first = "ALTER TABLE n DROP INDEX ft, MODIFY uid BIGINT UNSIGNED NOT NULL, \
+                 DROP COLUMN x, ADD COLUMN x INT NULL;\n";
+    // The ALTER itself has several changes, which the lab measured one at a
+    // time: unknown.
+    assert_eq!(said(schema, first).answer, "unknown");
+    let said = said(
+        schema,
+        &format!("{first}ALTER TABLE n ADD COLUMN w INT NULL;\n"),
     );
-    assert_ne!(said.answer, INSTANT);
+    assert_eq!(said.answer, COPY, "{}", said.reason);
+    assert_eq!(said.case, Some("add-column"));
+    assert_eq!(said.evidence, ["add-column-with-fulltext"]);
 }
 
 #[test]
 fn a_refused_binary_text_fulltext_beside_a_column_drop_and_add_does_not_make_a_later_add_column_copy()
  {
-    // The first ALTER fails with 1283 (FULLTEXT on a binary TEXT column), so
-    // there is no q and no index, and a later ADD COLUMN w runs INSTANT. kilit
-    // does not know whether it ran: the table is lost, so the answer is
-    // unknown, never COPY.
+    // DROP x with ADD x is followed. The first ALTER fails with 1283
+    // (FULLTEXT on a binary TEXT column), so there is no q and no index, the
+    // table is unchanged, and a later ADD COLUMN w runs INSTANT, never COPY.
     let schema = "CREATE TABLE `users` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, \
         `name` varchar(100) NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n\
         CREATE TABLE `n` (`id` bigint unsigned NOT NULL, `uid` bigint unsigned DEFAULT NULL, \
@@ -17496,18 +17526,20 @@ fn a_refused_binary_text_fulltext_beside_a_column_drop_and_add_does_not_make_a_l
         PRIMARY KEY (`id`), KEY `f1` (`uid`), \
         CONSTRAINT `f1` FOREIGN KEY (`uid`) REFERENCES `users` (`id`) ON DELETE SET NULL) \
         ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n";
-    let sql = "ALTER TABLE n ADD COLUMN q TEXT CHARACTER SET binary, ADD FULLTEXT ft (q), \
-               DROP COLUMN x, ADD COLUMN x INT NULL;\n\
-               ALTER TABLE n ADD COLUMN w INT NULL;\n";
-    let said = said(schema, sql);
-    assert_eq!(said.answer, "unknown");
+    let first = "ALTER TABLE n ADD COLUMN q TEXT CHARACTER SET binary, ADD FULLTEXT ft (q), \
+                 DROP COLUMN x, ADD COLUMN x INT NULL;\n";
+    // The ALTER itself is never a measured success.
+    let refused = said(schema, first);
     assert!(
-        said.reason.contains(
-            "in two of its clauses, which MySQL takes against the names before the statement"
-        ),
-        "{}",
-        said.reason
+        refused.answer == FAILS_1283 || refused.answer == "unknown",
+        "{refused:?}"
     );
+    let said = said(
+        schema,
+        &format!("{first}ALTER TABLE n ADD COLUMN w INT NULL;\n"),
+    );
+    assert_eq!(said.answer, INSTANT, "{}", said.reason);
+    assert_eq!(said.case, Some("add-column"));
     assert!(!said.answer.starts_with(COPY_PREFIX));
 }
 
@@ -17518,6 +17550,11 @@ fn a_refused_binary_text_fulltext_beside_a_column_drop_and_add_does_not_make_a_l
 
 #[test]
 fn a_clause_kilit_cannot_follow_beside_a_change_mysql_may_refuse_loses_the_table() {
+    // the first case adds a column the table has. By hand on MySQL
+    // 8.0.46 and 8.4.13 that is error 1060 (as is the MODIFY: 1830), so the
+    // ALTER is refused as a whole and the table is kept, not lost: the next
+    // ADD COLUMN is INSTANT. The other cases name a clause kilit does not
+    // follow, so they still lose the table.
     let schema = "CREATE TABLE `users` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, \
         PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n\
         CREATE TABLE `t` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, \
@@ -17528,22 +17565,2755 @@ fn a_clause_kilit_cannot_follow_beside_a_change_mysql_may_refuse_loses_the_table
     let cases = [
         (
             "ALTER TABLE t MODIFY uid BIGINT UNSIGNED NOT NULL, ADD COLUMN note INT NULL;",
-            "adds note, which the table already has, beside a change MySQL may refuse",
+            "1060",
+            false,
         ),
         (
             "ALTER TABLE t MODIFY uid BIGINT UNSIGNED NOT NULL, ADD COLUMN z INT UNIQUE;",
             "options kilit does not follow",
+            true,
         ),
         (
             "ALTER TABLE t MODIFY uid BIGINT UNSIGNED NOT NULL, ADD COLUMN z INT UNIQUE;",
             "beside a change MySQL may refuse",
+            true,
         ),
     ];
-    for (first, words) in cases {
+    for (first, words, lost) in cases {
         let sql = format!("{first}\nALTER TABLE t ADD COLUMN q INT;\n");
-        let said = said(schema, &sql);
-        assert_eq!(said.answer, "unknown", "{first}");
-        assert!(said.reason.contains(words), "{first}: {}", said.reason);
-        assert_ne!(said.answer, INSTANT, "{first}");
+        let later = said(schema, &sql);
+        if lost {
+            assert_eq!(later.answer, "unknown", "{first}");
+            assert!(later.reason.contains(words), "{first}: {}", later.reason);
+            assert_ne!(later.answer, INSTANT, "{first}");
+        } else {
+            let refused = said(schema, first);
+            assert_eq!(refused.answer, "unknown", "{first}");
+            assert!(
+                refused.reason.contains(words),
+                "{first}: {}",
+                refused.reason
+            );
+            assert_eq!(later.answer, INSTANT, "{first}");
+            assert_eq!(later.case, Some("add-column"), "{first}");
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The tables kilit follows cannot be made wrong by valid
+// input. Every expectation below comes from hand tests on MySQL 8.0.46 and
+// 8.4.13 (the same on both) or from a lab measurement named in the test.
+// The tables are the ones the hand tests used, written as mysqldump writes
+// them.
+
+/// `users` and `orders` of the hand tests: `orders` has no key.
+const USERS_AND_ORDERS_DUMP: &str = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  `email` varchar(255) DEFAULT NULL,
+  `note` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `orders_email_unique` (`email`)
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+
+/// The same, with the foreign key `orders_user_id_foreign` on `orders`.
+const USERS_AND_ORDERS_WITH_FK_DUMP: &str = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  `email` varchar(255) DEFAULT NULL,
+  `note` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `orders_email_unique` (`email`),
+  KEY `orders_user_id_foreign` (`user_id`),
+  CONSTRAINT `orders_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+
+/// The tables of the hand tests for the names a table lacks or has: `orders`
+/// with a foreign key, an index and a CHECK, `invoices` with a foreign key and
+/// a CHECK of their own, `nopk` without a primary key, `other` with an index,
+/// and `s3` with a CHECK and a UNIQUE index of one name.
+const TABLES_WITH_NAMES_DUMP: &str = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  `email` varchar(255) DEFAULT NULL,
+  `note` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `orders_email_unique` (`email`),
+  KEY `orders_user_id_foreign` (`user_id`),
+  KEY `ix_amount` (`amount`),
+  CONSTRAINT `orders_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`),
+  CONSTRAINT `orders_amount_check` CHECK ((`amount` > 0))
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `invoices` (
+  `id` bigint unsigned NOT NULL,
+  `user_id` bigint unsigned NOT NULL,
+  `total` int NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `invoices_user_id_foreign` (`user_id`),
+  CONSTRAINT `invoices_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`),
+  CONSTRAINT `invoices_total_check` CHECK ((`total` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `nopk` (
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `other` (
+  `id` int NOT NULL,
+  `c` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ix_other` (`c`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `s3` (
+  `id` int NOT NULL,
+  `c` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `dup` (`c`),
+  CONSTRAINT `dup` CHECK ((`c` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+
+/// A statement after a refused one: it is measured (INSTANT, add-column)
+/// only on a table kilit still knows, and unknown on one it lost.
+fn add_probe_column(table: &str) -> String {
+    format!("ALTER TABLE {table} ADD COLUMN probe_col INT NULL;")
+}
+
+/// What kilit says about each statement of the files, run in order as
+/// sessions of their own, against `dump` (the `--schema` file) or, with
+/// `None`, against nothing.
+struct FilesRun {
+    statements: Vec<Statement>,
+    findings: Vec<kilit_core::Finding>,
+}
+
+impl FilesRun {
+    fn on(server: &str, dump: Option<&str>, files: &[&str]) -> FilesRun {
+        let parsed: Vec<Vec<Statement>> = files.iter().map(|file| parse(file)).collect();
+        let sessions: Vec<&[Statement]> = parsed.iter().map(Vec::as_slice).collect();
+        let schema = match dump {
+            Some(dump) => Schema::from_dump(dump),
+            None => Schema::new(),
+        };
+        let results = Knowledge::built_in().server(server).unwrap();
+        let findings = check_sessions(&sessions, &schema, results);
+        FilesRun {
+            statements: parsed.into_iter().flatten().collect(),
+            findings,
+        }
+    }
+
+    fn answers(&self) -> Vec<String> {
+        self.findings
+            .iter()
+            .map(|finding| answer_word(&finding.prediction))
+            .collect()
+    }
+
+    fn impacts(&self) -> Vec<Impact> {
+        impacts(&self.statements, &self.findings)
+    }
+
+    /// The reason of statement `at`, which must be unknown.
+    fn reason(&self, at: usize) -> String {
+        match &self.findings[at].prediction {
+            Prediction::Unknown { reason, .. } => reason.clone(),
+            other => panic!("statement {at}: expected unknown, got {other:?}"),
+        }
+    }
+
+    /// The tables each statement waits for, as the metadata lock warning
+    /// names them.
+    fn locked(&self) -> Vec<Vec<String>> {
+        kilit_core::locked_tables(&self.statements, &self.findings)
+    }
+
+    fn last_answer(&self) -> String {
+        self.answers().pop().unwrap()
+    }
+
+    fn last_impact(&self) -> Impact {
+        self.impacts().pop().unwrap()
+    }
+}
+
+fn answer_word(prediction: &Prediction) -> String {
+    match prediction {
+        Prediction::Measured {
+            verdict: Verdict::Fails { code, .. },
+            ..
+        } => format!("fails with error {code}"),
+        Prediction::Measured { verdict, .. } => verdict.to_string(),
+        Prediction::Unknown { .. } => "unknown".to_owned(),
+        Prediction::NotChecked { .. } => "not checked".to_owned(),
+        Prediction::DependsOnTable { shared, .. } => match shared {
+            Shared::WritesWait => "depends on the table: writes wait".to_owned(),
+            Shared::Fails => "depends on the table: fails".to_owned(),
+        },
+    }
+}
+
+/// The run on both servers, which must answer and weigh every statement the
+/// same way; the run on 8.4.13.
+fn run_files_on_both_servers(dump: Option<&str>, files: &[&str]) -> FilesRun {
+    let on_80 = FilesRun::on(MYSQL_80, dump, files);
+    let on_84 = FilesRun::on(MYSQL_84, dump, files);
+    assert_eq!(on_80.answers(), on_84.answers(), "{files:?}");
+    assert_eq!(on_80.impacts(), on_84.impacts(), "{files:?}");
+    assert_eq!(on_80.locked(), on_84.locked(), "{files:?}");
+    on_84
+}
+
+/// One input file against the dump `dump`.
+fn run_on_dump(dump: &str, sql: &str) -> FilesRun {
+    run_files_on_both_servers(Some(dump), &[sql])
+}
+
+/// One input file and no `--schema`.
+fn run_without_dump(sql: &str) -> FilesRun {
+    run_files_on_both_servers(None, &[sql])
+}
+
+/// The statement at `at` must be unknown and name the error.
+fn assert_refused_with(run: &FilesRun, at: usize, code: &str, what: &str) -> Result<(), String> {
+    if run.answers()[at] != "unknown" || run.impacts()[at] != Impact::Unknown {
+        return Err(format!(
+            "{what}: expected unknown, got {:?} / {:?}",
+            run.answers()[at],
+            run.impacts()[at]
+        ));
+    }
+    let reason = run.reason(at);
+    if !reason.contains(code) {
+        return Err(format!("{what}: the reason does not name {code}: {reason}"));
+    }
+    Ok(())
+}
+
+/// The reasons of the refusals this step adds also say that the error comes
+/// from hand tests on both servers.
+fn assert_refused_by_hand(run: &FilesRun, at: usize, code: &str, what: &str) -> Result<(), String> {
+    assert_refused_with(run, at, code, what)?;
+    let reason = run.reason(at);
+    if !reason.contains("8.0.46 and 8.4.13") {
+        return Err(format!(
+            "{what}: the reason does not say which servers: {reason}"
+        ));
+    }
+    Ok(())
+}
+
+// CREATE TABLE of a table the dump has.
+
+const CREATE_ORDERS_AGAIN: &str =
+    "CREATE TABLE orders (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, note VARCHAR(50));";
+
+#[test]
+fn create_table_of_a_table_the_dump_has_is_unknown_and_says_why() {
+    // By hand on MySQL 8.0.46 and 8.4.13: CREATE TABLE orders where orders
+    // exists is error 1050 and changes nothing.
+    let run = run_on_dump(USERS_AND_ORDERS_DUMP, CREATE_ORDERS_AGAIN);
+    assert_eq!(run.answers(), ["unknown"]);
+    assert_eq!(run.impacts(), [Impact::Unknown]);
+    let reason = run.reason(0);
+    // The three things the reason says: MySQL refuses it (1050), where the
+    // advice is (a database with production's migrations, or the dump is of
+    // another database), and the guard that prints the CREATE where it would
+    // skip it.
+    for words in [
+        "1050",
+        "migrate --pretend",
+        "production's migrations",
+        "hasTable",
+    ] {
+        assert!(reason.contains(words), "{words}: {reason}");
+    }
+}
+
+#[test]
+fn the_tables_of_the_dump_stay_when_a_create_table_names_one_so_later_statements_are_measured_on_them()
+ {
+    // The input creates orders with (id, note); the dump's orders has
+    // (id, user_id, amount, email, note). MySQL refuses the CREATE, so every
+    // later statement runs on the dump's table.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "CREATE TABLE orders (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, note VARCHAR(50));
+         ALTER TABLE orders MODIFY amount BIGINT NOT NULL;
+         ALTER TABLE orders ADD COLUMN email INT NULL;
+         ALTER TABLE orders ADD COLUMN probe_col INT NULL;",
+    );
+    // amount is a column of the dump only: change-integer-type, a copy.
+    assert_eq!(run.answers()[1], COPY);
+    assert_eq!(run.impacts()[1], Impact::WritesWait);
+    // email is a column of the dump only: adding it again is 1060.
+    assert_eq!(run.answers()[2], "unknown");
+    assert!(run.reason(2).contains("1060"), "{}", run.reason(2));
+    assert_eq!(run.answers()[3], INSTANT);
+    assert_eq!(run.impacts()[3], Impact::WritesContinue);
+    // Nothing is created here, so the ALTERs wait for the metadata lock.
+    assert_eq!(run.locked()[1], ["orders"]);
+    assert_eq!(run.locked()[3], ["orders"]);
+    assert!(
+        run.findings
+            .iter()
+            .all(|finding| finding.created_here.is_empty())
+    );
+}
+
+#[test]
+fn a_create_table_of_a_dump_table_that_the_input_dropped_first_makes_a_new_table() {
+    // DROP TABLE orders; CREATE TABLE orders (...): the table is new (a
+    // Laravel dropIfExists then create).
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "DROP TABLE IF EXISTS orders;
+         CREATE TABLE orders (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, note VARCHAR(50)) DEFAULT CHARSET=utf8mb4;
+         ALTER TABLE orders ADD COLUMN probe_col INT NULL;",
+    );
+    assert_eq!(run.answers(), ["not checked", "not checked", INSTANT]);
+    assert_eq!(
+        run.impacts(),
+        [Impact::NotChecked, Impact::NotChecked, Impact::NewTable]
+    );
+}
+
+#[test]
+fn a_create_table_if_not_exists_of_a_dump_table_leaves_the_dump_s_table() {
+    // By hand on MySQL 8.0.46 and 8.4.13: accepted with Note 1050, the table
+    // is unchanged.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "CREATE TABLE IF NOT EXISTS orders (id INT PRIMARY KEY);
+         ALTER TABLE orders ADD COLUMN email INT NULL;
+         ALTER TABLE orders ADD COLUMN probe_col INT NULL;",
+    );
+    assert_eq!(run.answers()[0], "not checked");
+    assert_eq!(run.answers()[1], "unknown");
+    assert!(run.reason(1).contains("1060"), "{}", run.reason(1));
+    assert_eq!(run.answers()[2], INSTANT);
+    assert_eq!(run.impacts()[2], Impact::WritesContinue);
+}
+
+#[test]
+fn a_create_table_of_a_name_the_dump_lacks_makes_a_new_table() {
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "CREATE TABLE fresh (id INT PRIMARY KEY) DEFAULT CHARSET=utf8mb4;
+         ALTER TABLE fresh ADD COLUMN probe_col INT NULL;",
+    );
+    assert_eq!(run.answers(), ["not checked", INSTANT]);
+    assert_eq!(run.impacts(), [Impact::NotChecked, Impact::NewTable]);
+}
+
+#[test]
+fn a_create_table_like_of_a_dump_table_is_refused_too_and_the_dump_s_table_stays() {
+    // CREATE TABLE users_copy LIKE users where users_copy is in the dump: 1050.
+    let dump = format!(
+        "{USERS_AND_ORDERS_DUMP}CREATE TABLE `users_copy` (`id` int NOT NULL, PRIMARY KEY (`id`)) \
+         ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;\n"
+    );
+    let run = run_on_dump(
+        &dump,
+        "CREATE TABLE users_copy LIKE users;
+         ALTER TABLE users_copy ADD COLUMN name INT NULL;
+         ALTER TABLE users_copy ADD COLUMN probe_col INT NULL;",
+    );
+    assert_eq!(run.answers()[0], "unknown");
+    assert!(run.reason(0).contains("1050"), "{}", run.reason(0));
+    // users has a column name, users_copy of the dump does not: the dump's
+    // table stays, so adding name is measured.
+    assert_eq!(run.answers()[1], INSTANT);
+    assert_eq!(run.answers()[2], INSTANT);
+}
+
+// A table swapped onto a live name is not new.
+
+const CREATE_ORDERS_NEW: &str = "CREATE TABLE orders_new (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, \
+     amount INT NOT NULL, note VARCHAR(50)) DEFAULT CHARSET=utf8mb4;";
+
+const SWAPS_ONTO_ORDERS: [&str; 3] = [
+    "RENAME TABLE orders TO orders_old, orders_new TO orders;",
+    "RENAME TABLE orders TO orders_old;\nRENAME TABLE orders_new TO orders;",
+    "ALTER TABLE orders RENAME TO orders_old;\nALTER TABLE orders_new RENAME TO orders;",
+];
+
+#[test]
+fn a_new_table_swapped_onto_a_name_of_the_dump_gets_its_measured_impact() {
+    // CREATE TABLE orders_new; RENAME TABLE orders TO orders_old, orders_new
+    // TO orders; then ALTERs of orders: the live table with every row.
+    for swap in SWAPS_ONTO_ORDERS {
+        let sql = format!(
+            "{CREATE_ORDERS_NEW}\n{swap}\n\
+             ALTER TABLE orders MODIFY amount BIGINT NOT NULL;\n\
+             ALTER TABLE orders ADD COLUMN email INT NULL;\n\
+             ALTER TABLE orders_old ADD COLUMN probe_col INT NULL;"
+        );
+        let run = run_on_dump(USERS_AND_ORDERS_DUMP, &sql);
+        let n = run.answers().len();
+        // The swapped table is orders_new's: change-integer-type, a copy.
+        assert_eq!(run.answers()[n - 3], COPY, "{swap}");
+        assert_eq!(run.impacts()[n - 3], Impact::WritesWait, "{swap}");
+        // It has no email column (the old orders had one): INSTANT, and
+        // writes continue.
+        assert_eq!(run.answers()[n - 2], INSTANT, "{swap}");
+        assert_eq!(run.impacts()[n - 2], Impact::WritesContinue, "{swap}");
+        // The old live table, kept as orders_old, was there before the input.
+        assert_eq!(run.answers()[n - 1], INSTANT, "{swap}");
+        assert_eq!(run.impacts()[n - 1], Impact::WritesContinue, "{swap}");
+        // Both are named by the metadata lock warning, orders_new's table
+        // under its new name.
+        assert_eq!(run.locked()[n - 3], ["orders"], "{swap}");
+        assert_eq!(run.locked()[n - 1], ["orders_old"], "{swap}");
+    }
+}
+
+#[test]
+fn a_new_table_swapped_onto_a_name_the_input_used_as_an_existing_table_is_not_new_without_a_dump() {
+    // No --schema: the input alters or renames orders without creating it,
+    // so the name held a table from before the input.
+    for (name, before, swap) in [
+        ("renamed", "", SWAPS_ONTO_ORDERS[0]),
+        ("renamed by ALTER", "", SWAPS_ONTO_ORDERS[2]),
+        (
+            "altered",
+            "ALTER TABLE orders ADD COLUMN x INT NULL;\n",
+            SWAPS_ONTO_ORDERS[0],
+        ),
+    ] {
+        let sql = format!(
+            "{before}{CREATE_ORDERS_NEW}\n{swap}\n\
+             ALTER TABLE orders MODIFY amount BIGINT NOT NULL;"
+        );
+        let run = run_without_dump(&sql);
+        assert_eq!(run.last_answer(), COPY, "{name}");
+        assert_eq!(run.last_impact(), Impact::WritesWait, "{name}");
+    }
+}
+
+#[test]
+fn a_new_table_renamed_onto_a_fresh_name_stays_new() {
+    for rename in [
+        "RENAME TABLE orders_new TO orders_v2;",
+        "ALTER TABLE orders_new RENAME TO orders_v2;",
+    ] {
+        for dump in [Some(USERS_AND_ORDERS_DUMP), None] {
+            let sql = format!(
+                "{CREATE_ORDERS_NEW}\n{rename}\nALTER TABLE orders_v2 MODIFY amount BIGINT NOT NULL;"
+            );
+            let run = run_files_on_both_servers(dump, &[&sql]);
+            assert_eq!(run.last_answer(), COPY, "{rename}");
+            assert_eq!(run.last_impact(), Impact::NewTable, "{rename}");
+        }
+    }
+}
+
+// Temporary tables live in their session. By hand on MySQL
+// 8.0.46 and 8.4.13: a temporary table hides the base table of its name,
+// DROP TABLE and DROP TEMPORARY TABLE drop the temporary one, ALTER and
+// TRUNCATE act on it, RENAME TABLE does not see it, ALTER ... RENAME TO
+// moves it, and it ends with the session.
+
+const CREATE_TEMPORARY_ORDERS: &str =
+    "CREATE TEMPORARY TABLE orders (id INT PRIMARY KEY, tmp_col INT NULL);";
+
+/// `amount` is a column of the base table only and `tmp_col` of the
+/// temporary one only: adding it says which table a statement was on.
+const ADD_AMOUNT_TO_ORDERS: &str = "ALTER TABLE orders ADD COLUMN amount INT NULL;";
+const ADD_TMP_COL_TO_ORDERS: &str = "ALTER TABLE orders ADD COLUMN tmp_col INT NULL;";
+
+/// The statement after `sql` adds `tmp_col`: INSTANT on the base table, with
+/// writes continuing.
+fn assert_base_table_is_back(sql: &str, what: &str) {
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        &format!("{sql}\n{ADD_TMP_COL_TO_ORDERS}"),
+    );
+    assert_eq!(run.last_answer(), INSTANT, "{what}");
+    assert_eq!(run.last_impact(), Impact::WritesContinue, "{what}");
+}
+
+/// The statement after `sql` adds `amount`: INSTANT on a new table that has
+/// no such column, whatever the base table is.
+fn assert_temporary_table_is_still_there(sql: &str, what: &str) {
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        &format!("{sql}\n{ADD_AMOUNT_TO_ORDERS}"),
+    );
+    assert_eq!(run.last_answer(), INSTANT, "{what}");
+    assert_eq!(run.last_impact(), Impact::NewTable, "{what}");
+}
+
+#[test]
+fn drop_temporary_table_if_exists_of_a_base_table_leaves_it_so_the_next_alter_is_measured() {
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "DROP TEMPORARY TABLE IF EXISTS orders;\nALTER TABLE orders ADD COLUMN probe_col INT NULL;",
+    );
+    assert_eq!(run.answers()[1], INSTANT);
+    assert_eq!(run.impacts()[1], Impact::WritesContinue);
+    // And the table is still the dump's: amount exists.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "DROP TEMPORARY TABLE IF EXISTS orders;\nALTER TABLE orders MODIFY amount BIGINT NOT NULL;",
+    );
+    assert_eq!(run.last_answer(), COPY);
+}
+
+#[test]
+fn drop_temporary_table_without_a_temporary_table_is_unknown_naming_1051_and_leaves_the_base_table()
+{
+    // Without IF EXISTS: error 1051 (Unknown table), the base table is
+    // untouched.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "DROP TEMPORARY TABLE orders;\nALTER TABLE orders ADD COLUMN probe_col INT NULL;",
+    );
+    assert_eq!(run.answers()[0], "unknown");
+    assert!(run.reason(0).contains("1051"), "{}", run.reason(0));
+    assert_eq!(run.answers()[1], INSTANT);
+    assert_eq!(run.impacts()[1], Impact::WritesContinue);
+    // Two names, one of them has no temporary table: 1051 for it and nothing
+    // is dropped.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        &format!(
+            "{CREATE_TEMPORARY_ORDERS}\nDROP TEMPORARY TABLE orders, users;\n{ADD_AMOUNT_TO_ORDERS}"
+        ),
+    );
+    assert_eq!(run.answers()[1], "unknown");
+    assert!(run.reason(1).contains("1051"), "{}", run.reason(1));
+    // The temporary orders is still there (it has no amount column).
+    assert_eq!(run.last_answer(), INSTANT);
+    assert_eq!(run.last_impact(), Impact::NewTable);
+}
+
+#[test]
+fn drop_temporary_table_with_if_exists_of_a_name_without_one_is_not_checked_and_drops_nothing() {
+    // Accepted with Note 1051 for every name that has none; the base tables
+    // stay.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "DROP TEMPORARY TABLE IF EXISTS orders, users, nosuch;
+         ALTER TABLE orders ADD COLUMN probe_col INT NULL;
+         ALTER TABLE users ADD COLUMN probe_col INT NULL;",
+    );
+    assert_eq!(run.answers(), ["not checked", INSTANT, INSTANT]);
+    assert_eq!(
+        run.impacts(),
+        [
+            Impact::NotChecked,
+            Impact::WritesContinue,
+            Impact::WritesContinue
+        ]
+    );
+}
+
+#[test]
+fn dropping_a_temporary_table_makes_the_base_table_visible_again() {
+    for drop in [
+        "DROP TEMPORARY TABLE orders;",
+        "DROP TEMPORARY TABLE IF EXISTS orders;",
+        // DROP TABLE drops the temporary one only.
+        "DROP TABLE orders;",
+        "DROP TABLE IF EXISTS orders;",
+    ] {
+        assert_base_table_is_back(&format!("{CREATE_TEMPORARY_ORDERS}\n{drop}"), drop);
+    }
+    // The temporary table is gone: the next CREATE TEMPORARY of the name is
+    // new again.
+    assert_base_table_is_back(
+        &format!(
+            "{CREATE_TEMPORARY_ORDERS}\nDROP TABLE orders;\n{CREATE_TEMPORARY_ORDERS}\nDROP TEMPORARY TABLE orders;"
+        ),
+        "twice",
+    );
+}
+
+#[test]
+fn drop_table_of_a_temporary_name_beside_a_base_name_drops_the_temporary_one_and_the_base_one() {
+    // DROP TABLE orders, users with a temporary orders: the temporary orders
+    // and the base users go; the base orders is back. Then users is gone.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        &format!(
+            "{CREATE_TEMPORARY_ORDERS}
+             DROP TABLE orders, users;
+             {ADD_TMP_COL_TO_ORDERS}
+             ALTER TABLE users ADD COLUMN probe_col INT NULL;"
+        ),
+    );
+    assert_eq!(run.answers()[2], INSTANT);
+    assert_eq!(run.impacts()[2], Impact::WritesContinue);
+    // MySQL 1146: users is gone.
+    assert_eq!(run.answers()[3], "unknown");
+    assert_eq!(run.impacts()[3], Impact::Unknown);
+}
+
+#[test]
+fn alter_and_truncate_of_a_name_act_on_its_temporary_table_and_leave_the_base_table_alone() {
+    // ALTER TABLE orders ADD COLUMN extra on the temporary orders; adding
+    // amount works (the temporary table has none): a new table.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        &format!(
+            "{CREATE_TEMPORARY_ORDERS}\nALTER TABLE orders ADD COLUMN extra INT NULL;\n{ADD_AMOUNT_TO_ORDERS}"
+        ),
+    );
+    assert_eq!(run.answers()[1], INSTANT);
+    assert_eq!(run.impacts()[1], Impact::NewTable);
+    assert_eq!(run.last_answer(), INSTANT);
+    assert_eq!(run.last_impact(), Impact::NewTable);
+    // MODIFY amount on the temporary table is 1054 (it has no amount), and
+    // dropping the temporary table brings the base table back, untouched
+    // by that refusal.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        &format!(
+            "{CREATE_TEMPORARY_ORDERS}
+             ALTER TABLE orders MODIFY amount BIGINT NOT NULL;
+             DROP TEMPORARY TABLE orders;
+             ALTER TABLE orders MODIFY amount BIGINT NOT NULL;"
+        ),
+    );
+    assert_eq!(run.answers()[1], "unknown");
+    assert_eq!(run.impacts()[1], Impact::Unknown);
+    assert_eq!(run.last_answer(), COPY);
+    assert_eq!(run.last_impact(), Impact::WritesWait);
+    // TRUNCATE acts on the temporary table: it waits for no lock, and the
+    // base table comes back when the temporary one is dropped.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        &format!(
+            "{CREATE_TEMPORARY_ORDERS}\nTRUNCATE TABLE orders;\nDROP TEMPORARY TABLE orders;\n{ADD_TMP_COL_TO_ORDERS}"
+        ),
+    );
+    assert!(run.locked()[1].is_empty(), "{:?}", run.locked());
+    assert_eq!(run.last_answer(), INSTANT);
+    assert_eq!(run.last_impact(), Impact::WritesContinue);
+}
+
+#[test]
+fn rename_table_does_not_see_a_temporary_table_so_it_renames_the_base_table() {
+    // RENAME TABLE orders TO orders_tmp with a temporary orders renames the
+    // base table; the temporary one keeps its name. kilit may
+    // follow that or lose the names; it never gives orders_tmp the temporary
+    // table's columns.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        &format!(
+            "{CREATE_TEMPORARY_ORDERS}
+             RENAME TABLE orders TO orders_tmp;
+             ALTER TABLE orders_tmp ADD COLUMN tmp_col INT NULL;
+             ALTER TABLE orders ADD COLUMN amount INT NULL;"
+        ),
+    );
+    // orders_tmp is the base table, which has no tmp_col: INSTANT with
+    // writes continuing, or unknown because kilit lost the name; never
+    // the 1060 of the temporary table.
+    match run.answers()[2].as_str() {
+        "unknown" => assert!(!run.reason(2).contains("1060"), "{}", run.reason(2)),
+        answer => {
+            assert_eq!(answer, INSTANT);
+            assert_eq!(run.impacts()[2], Impact::WritesContinue);
+        }
+    }
+    // orders is the temporary table, which has no amount: INSTANT on a new
+    // table, or unknown because kilit lost the name; never the 1060 of the
+    // base table.
+    match run.last_answer().as_str() {
+        "unknown" => assert!(!run.reason(3).contains("1060"), "{}", run.reason(3)),
+        answer => {
+            assert_eq!(answer, INSTANT);
+            assert_eq!(run.impacts()[3], Impact::NewTable);
+        }
+    }
+}
+
+#[test]
+fn rename_table_of_a_name_that_only_a_temporary_table_has_is_refused_and_creates_nothing() {
+    // By hand: CREATE TEMPORARY TABLE t2; RENAME TABLE t2 TO t2b is error
+    // 1146, and t2b does not exist. kilit may keep or lose t2, but never
+    // gives t2b a measured answer.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "CREATE TEMPORARY TABLE t2 (id INT PRIMARY KEY);
+         RENAME TABLE t2 TO t2b;
+         ALTER TABLE t2b ADD COLUMN probe_col INT NULL;",
+    );
+    assert_eq!(run.answers()[1], "unknown");
+    assert_eq!(run.answers()[2], "unknown");
+    assert_eq!(run.impacts()[2], Impact::Unknown);
+}
+
+#[test]
+fn alter_table_rename_to_moves_the_temporary_table_and_leaves_the_base_table() {
+    // By hand: ALTER TABLE orders RENAME TO o3 with a temporary orders
+    // renames the temporary one; the base orders stays, visible again.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        &format!(
+            "{CREATE_TEMPORARY_ORDERS}
+             ALTER TABLE orders RENAME TO o3;
+             ALTER TABLE orders ADD COLUMN tmp_col INT NULL;
+             ALTER TABLE o3 ADD COLUMN tmp_col INT NULL;
+             ALTER TABLE o3 ADD COLUMN amount INT NULL;"
+        ),
+    );
+    // orders is the base table again: tmp_col is new on it, writes continue.
+    assert_eq!(run.answers()[2], INSTANT);
+    assert_eq!(run.impacts()[2], Impact::WritesContinue);
+    // o3 is the temporary table. kilit may follow the move or lose
+    // the name; it never answers o3 as the base table (which has
+    // amount and no tmp_col): a measured answer for tmp_col or a 1060 for
+    // amount.
+    assert_eq!(run.answers()[3], "unknown");
+    assert!(!run.reason(3).is_empty());
+    assert_ne!(run.answers()[4], COPY);
+    assert_ne!(run.impacts()[4], Impact::WritesContinue);
+    assert_ne!(run.impacts()[4], Impact::WritesWait);
+    if run.answers()[4] == "unknown" {
+        assert!(!run.reason(4).contains("1060"), "{}", run.reason(4));
+    } else {
+        assert_eq!(run.impacts()[4], Impact::NewTable);
+    }
+}
+
+#[test]
+fn a_new_input_file_has_the_base_table_back_and_the_temporary_table_gone() {
+    // The first file creates a temporary orders and a temporary tmp_only;
+    // the second is a new session.
+    let first = format!(
+        "{CREATE_TEMPORARY_ORDERS}\nCREATE TEMPORARY TABLE tmp_only (id INT PRIMARY KEY);\n"
+    );
+    let second = "ALTER TABLE orders ADD COLUMN tmp_col INT NULL;
+                  ALTER TABLE orders MODIFY amount BIGINT NOT NULL;
+                  ALTER TABLE tmp_only ADD COLUMN probe_col INT NULL;";
+    let run = run_files_on_both_servers(Some(USERS_AND_ORDERS_DUMP), &[&first, second]);
+    // orders is the dump's table: tmp_col is new, amount exists. Both wait
+    // for the metadata lock, nothing is created here.
+    assert_eq!(run.answers()[2], INSTANT);
+    assert_eq!(run.impacts()[2], Impact::WritesContinue);
+    assert_eq!(run.answers()[3], COPY);
+    assert_eq!(run.impacts()[3], Impact::WritesWait);
+    assert_eq!(run.locked()[2], ["orders"]);
+    assert_eq!(run.locked()[3], ["orders"]);
+    // tmp_only ended with the first session: error 1146 on the server.
+    assert_eq!(run.answers()[4], "unknown");
+    assert_eq!(run.impacts()[4], Impact::Unknown);
+}
+
+#[test]
+fn a_temporary_table_of_one_file_is_not_a_table_created_here_in_the_next_file_without_a_dump() {
+    // Without --schema the second file's orders is a table kilit never saw:
+    // unknown, not "a table created here".
+    let run = run_files_on_both_servers(
+        None,
+        &[
+            &format!("{CREATE_TEMPORARY_ORDERS}\n"),
+            "ALTER TABLE orders ADD COLUMN probe_col INT NULL;",
+        ],
+    );
+    assert_eq!(run.last_answer(), "unknown");
+    assert_eq!(run.last_impact(), Impact::Unknown);
+    // The real table is named by the metadata lock warning.
+    assert_eq!(run.locked()[1], ["orders"]);
+}
+
+#[test]
+fn a_temporary_table_made_in_the_same_file_is_still_a_table_created_here() {
+    // Control: inside its own session the temporary table is new.
+    let run = run_without_dump(&format!(
+        "{CREATE_TEMPORARY_ORDERS}\nALTER TABLE orders ADD COLUMN probe_col INT NULL;"
+    ));
+    assert_eq!(run.last_answer(), INSTANT);
+    assert_eq!(run.last_impact(), Impact::NewTable);
+}
+
+#[test]
+fn the_temporary_table_hides_the_base_table_until_it_is_dropped() {
+    // Both statements name amount: on the temporary table it is new, on the
+    // base table it is 1060.
+    assert_temporary_table_is_still_there(CREATE_TEMPORARY_ORDERS, "created");
+    assert_temporary_table_is_still_there(
+        &format!("{CREATE_TEMPORARY_ORDERS}\nDROP TEMPORARY TABLE IF EXISTS nosuch;"),
+        "an unrelated DROP TEMPORARY",
+    );
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        &format!("{CREATE_TEMPORARY_ORDERS}\nDROP TEMPORARY TABLE orders;\n{ADD_AMOUNT_TO_ORDERS}"),
+    );
+    assert_eq!(run.last_answer(), "unknown");
+    assert!(run.reason(2).contains("1060"), "{}", run.reason(2));
+    assert_eq!(run.last_impact(), Impact::Unknown);
+}
+
+// Renaming a table renames the parent of the foreign keys that
+// point at it. By hand on MySQL 8.0.46 and 8.4.13: after RENAME TABLE users
+// TO people (and ALTER TABLE users RENAME TO people) the key of orders
+// references people, and MODIFY id INT UNSIGNED on people is error 3780,
+// as it is on users without the rename.
+
+#[test]
+fn changing_the_referenced_column_of_a_renamed_parent_is_unknown_as_without_the_rename() {
+    // By hand: MODIFY id INT UNSIGNED NOT NULL AUTO_INCREMENT on people is
+    // error 3780 after the rename. Without the key, the same change is the
+    // lab's change-integer-type.
+    let alone = "ALTER TABLE users MODIFY id INT UNSIGNED NOT NULL AUTO_INCREMENT;";
+    let control = run_on_dump(USERS_AND_ORDERS_WITH_FK_DUMP, alone);
+    assert_eq!(control.last_answer(), "unknown");
+    assert!(
+        control.reason(0).contains("referenced"),
+        "{}",
+        control.reason(0)
+    );
+    assert_eq!(
+        run_on_dump(USERS_AND_ORDERS_DUMP, alone).last_answer(),
+        COPY
+    );
+    for rename in [
+        "RENAME TABLE users TO people;",
+        "ALTER TABLE users RENAME TO people;",
+    ] {
+        let run = run_on_dump(
+            USERS_AND_ORDERS_WITH_FK_DUMP,
+            &format!(
+                "{rename}\nALTER TABLE people MODIFY id INT UNSIGNED NOT NULL AUTO_INCREMENT;"
+            ),
+        );
+        assert_eq!(run.last_answer(), "unknown", "{rename}");
+        assert_eq!(run.last_impact(), Impact::Unknown, "{rename}");
+        assert!(
+            run.reason(1).contains("referenced"),
+            "{rename}: {}",
+            run.reason(1)
+        );
+        // The same rename without the key gives the lab's answer.
+        let no_key = run_on_dump(
+            USERS_AND_ORDERS_DUMP,
+            &format!(
+                "{rename}\nALTER TABLE people MODIFY id INT UNSIGNED NOT NULL AUTO_INCREMENT;"
+            ),
+        );
+        assert_eq!(no_key.last_answer(), COPY, "{rename}");
+    }
+}
+
+#[test]
+fn renaming_a_parent_twice_keeps_the_key_with_the_last_name() {
+    let run = run_on_dump(
+        USERS_AND_ORDERS_WITH_FK_DUMP,
+        "RENAME TABLE users TO people;
+         RENAME TABLE people TO members;
+         ALTER TABLE members MODIFY id INT UNSIGNED NOT NULL AUTO_INCREMENT;",
+    );
+    assert_eq!(run.last_answer(), "unknown");
+    assert!(run.reason(2).contains("referenced"), "{}", run.reason(2));
+}
+
+#[test]
+fn a_parent_without_a_child_key_is_still_changed_with_a_measured_answer_after_a_rename() {
+    // Control: no foreign key points at users, so the rename changes
+    // nothing about its columns.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "RENAME TABLE users TO people;
+         ALTER TABLE people MODIFY id INT UNSIGNED NOT NULL AUTO_INCREMENT;",
+    );
+    assert_eq!(run.last_answer(), COPY);
+}
+
+#[test]
+fn the_keys_of_a_table_kilit_does_not_know_follow_their_parent_s_rename() {
+    // The dump has users only. The ADD FOREIGN KEY is on orders, which kilit
+    // does not know; the key still points at users, and after RENAME TABLE
+    // users TO people at people.
+    let dump = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+    let key = "ALTER TABLE orders ADD CONSTRAINT orders_user_id_foreign FOREIGN KEY (user_id) \
+               REFERENCES users (id);";
+    let modify = "MODIFY id INT UNSIGNED NOT NULL AUTO_INCREMENT;";
+    // Without the rename the key is a reason for unknown.
+    let plain = run_on_dump(dump, &format!("{key}\nALTER TABLE users {modify}"));
+    assert_eq!(plain.last_answer(), "unknown");
+    // With it the key follows the parent: unknown the same way.
+    let renamed = run_on_dump(
+        dump,
+        &format!("{key}\nRENAME TABLE users TO people;\nALTER TABLE people {modify}"),
+    );
+    assert_eq!(renamed.last_answer(), "unknown");
+    // Without the key the same MODIFY of the renamed table is the lab's
+    // change-integer-type, so the unknown above comes from the key.
+    let no_key = run_on_dump(
+        dump,
+        &format!("RENAME TABLE users TO people;\nALTER TABLE people {modify}"),
+    );
+    assert_eq!(no_key.last_answer(), COPY);
+}
+
+// Names a known table lacks or already has. By hand on MySQL
+// 8.0.46 and 8.4.13 (the same on both) each statement below is refused with
+// the error named. Where the table says "kept", the table is as it was and
+// the next ADD COLUMN is measured; where it says "lost", kilit no longer
+// trusts the table and the next ADD COLUMN is unknown.
+
+/// (tables to probe afterwards, statement, error) of the refusals after which
+/// kilit keeps the table.
+const REFUSALS_THAT_KEEP_THE_TABLE: [(&[&str], &str, &str); 19] = [
+    (
+        &["orders"],
+        "ALTER TABLE orders ALTER COLUMN zzz DROP DEFAULT",
+        "1054",
+    ),
+    (
+        &["orders"],
+        "ALTER TABLE orders ADD COLUMN note VARCHAR(50) NULL",
+        "1060",
+    ),
+    (
+        &["orders"],
+        "ALTER TABLE orders ADD COLUMN note INT NULL",
+        "1060",
+    ),
+    (&["orders"], "ALTER TABLE orders DROP COLUMN zzz", "1091"),
+    (
+        &["orders"],
+        "ALTER TABLE orders ADD INDEX orders_email_unique (amount)",
+        "1061",
+    ),
+    (
+        &["orders"],
+        "ALTER TABLE orders ADD INDEX ix_amount (note)",
+        "1061",
+    ),
+    (
+        &["orders"],
+        "ALTER TABLE orders RENAME INDEX nosuch TO ix_new",
+        "1176",
+    ),
+    (
+        &["orders"],
+        "ALTER TABLE orders RENAME INDEX ix_amount TO orders_email_unique",
+        "1061",
+    ),
+    (
+        &["orders"],
+        "ALTER TABLE orders ADD CONSTRAINT orders_user_id_foreign FOREIGN KEY (user_id) REFERENCES users (id)",
+        "1826",
+    ),
+    (
+        &["orders"],
+        "ALTER TABLE orders ADD CONSTRAINT invoices_user_id_foreign FOREIGN KEY (user_id) REFERENCES users (id)",
+        "1826",
+    ),
+    (
+        &["orders"],
+        "ALTER TABLE orders ADD PRIMARY KEY (amount)",
+        "1068",
+    ),
+    (&["nopk"], "ALTER TABLE nopk DROP PRIMARY KEY", "1091"),
+    (
+        &["orders"],
+        "ALTER TABLE orders ADD CONSTRAINT orders_amount_check CHECK (amount < 100000)",
+        "3822",
+    ),
+    (
+        &["orders"],
+        "ALTER TABLE orders ADD CONSTRAINT invoices_total_check CHECK (amount < 100000)",
+        "3822",
+    ),
+    (&["orders", "users"], "RENAME TABLE orders TO users", "1050"),
+    (
+        &["orders", "users"],
+        "ALTER TABLE orders RENAME TO users",
+        "1050",
+    ),
+    (
+        &["orders", "invoices"],
+        "RENAME TABLE orders TO invoices",
+        "1050",
+    ),
+    (&["orders"], "RENAME TABLE orders TO orders", "1050"),
+    // One name on a CHECK and on a UNIQUE index.
+    (&["s3"], "ALTER TABLE s3 DROP CONSTRAINT dup", "3939"),
+];
+
+/// The same for the refusals after which kilit loses the table.
+const REFUSALS_THAT_LOSE_THE_TABLE: [(&str, &str, &str); 11] = [
+    ("orders", "ALTER TABLE orders MODIFY zzz INT NULL", "1054"),
+    (
+        "orders",
+        "ALTER TABLE orders CHANGE zzz yyy INT NULL",
+        "1054",
+    ),
+    (
+        "orders",
+        "ALTER TABLE orders RENAME COLUMN zzz TO yyy",
+        "1054",
+    ),
+    (
+        "orders",
+        "ALTER TABLE orders ALTER COLUMN zzz SET DEFAULT 1",
+        "1054",
+    ),
+    (
+        "orders",
+        "ALTER TABLE orders ALTER COLUMN zzz SET VISIBLE",
+        "1054",
+    ),
+    (
+        "orders",
+        "ALTER TABLE orders ALTER COLUMN zzz SET INVISIBLE",
+        "1054",
+    ),
+    (
+        "orders",
+        "ALTER TABLE orders CHANGE email note VARCHAR(50) NULL",
+        "1060",
+    ),
+    (
+        "orders",
+        "ALTER TABLE orders RENAME COLUMN email TO note",
+        "1060",
+    ),
+    (
+        "orders",
+        "ALTER TABLE orders RENAME COLUMN email TO NOTE",
+        "1060",
+    ),
+    (
+        "orders",
+        "ALTER TABLE orders CHANGE email Note VARCHAR(50) NULL",
+        "1060",
+    ),
+    ("orders", "ALTER TABLE orders MODIFY ZZZ INT NULL", "1054"),
+];
+
+#[test]
+fn a_name_a_known_table_has_or_lacks_is_unknown_naming_the_error_and_the_table_stays_known() {
+    // The reasons of the refusals B1b and B1c made say the error and the lab
+    // scenario; the ones this step adds also say that it comes from hand
+    // tests on MySQL 8.0.46 and 8.4.13.
+    let from_the_lab = ["1091", "1061", "1176"];
+    let mut problems = Vec::new();
+    for (probes, statement, code) in REFUSALS_THAT_KEEP_THE_TABLE {
+        let mut sql = format!("{statement};\n");
+        for table in probes {
+            sql.push_str(&add_probe_column(table));
+            sql.push('\n');
+        }
+        let run = run_on_dump(TABLES_WITH_NAMES_DUMP, &sql);
+        let refused = if from_the_lab.contains(&code) && !statement.contains("nopk") {
+            assert_refused_with(&run, 0, code, statement)
+        } else {
+            assert_refused_by_hand(&run, 0, code, statement)
+        };
+        if let Err(problem) = refused {
+            problems.push(problem);
+        }
+        for (at, table) in probes.iter().enumerate() {
+            if run.answers()[at + 1] != INSTANT || run.impacts()[at + 1] != Impact::WritesContinue {
+                problems.push(format!(
+                    "{statement}: the table {table} should be kept, got {} / {:?}",
+                    run.answers()[at + 1],
+                    run.impacts()[at + 1]
+                ));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn a_column_a_known_table_lacks_or_a_name_it_has_for_a_change_is_unknown_and_loses_the_table() {
+    let mut problems = Vec::new();
+    for (table, statement, code) in REFUSALS_THAT_LOSE_THE_TABLE {
+        let run = run_on_dump(
+            TABLES_WITH_NAMES_DUMP,
+            &format!("{statement};\n{}", add_probe_column(table)),
+        );
+        // The parser cannot read SET VISIBLE and SET INVISIBLE: unknown with
+        // another reason, and the table lost.
+        let unreadable = statement.contains("SET VISIBLE") || statement.contains("SET INVISIBLE");
+        if unreadable {
+            if run.answers()[0] != "unknown" {
+                problems.push(format!("{statement}: expected unknown"));
+            }
+        } else if let Err(problem) = assert_refused_by_hand(&run, 0, code, statement) {
+            problems.push(problem);
+        }
+        if run.answers()[1] != "unknown" || run.impacts()[1] != Impact::Unknown {
+            problems.push(format!(
+                "{statement}: the table should be lost, got {} / {:?}",
+                run.answers()[1],
+                run.impacts()[1]
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn a_refused_add_column_of_a_name_the_table_has_keeps_the_definition_kilit_had() {
+    // note is VARCHAR(50) in the dump. After the refused ADD COLUMN note INT
+    // the table is as it was: MODIFY note to the same definition is the
+    // measured modify-same-definition, and shortening it is a copy.
+    for add in [
+        "ALTER TABLE orders ADD COLUMN note INT NULL;",
+        "ALTER TABLE orders ADD COLUMN note VARCHAR(10) NULL;",
+    ] {
+        let run = run_on_dump(
+            TABLES_WITH_NAMES_DUMP,
+            &format!(
+                "{add}\nALTER TABLE orders MODIFY note VARCHAR(50) NULL;\n\
+                 ALTER TABLE orders MODIFY note VARCHAR(40) NULL;"
+            ),
+        );
+        assert_eq!(run.answers()[1], INSTANT, "{add}");
+        assert_eq!(run.answers()[2], COPY, "{add}");
+    }
+}
+
+#[test]
+fn forms_the_server_accepts_are_not_refused_for_a_name() {
+    // By hand: each of these is accepted, as kilit's tables say it should
+    // be. kilit must not call them a duplicate or a missing name (1060,
+    // 1061, 1050, 1054); where it cannot follow one it says something
+    // else, or answers.
+    for statement in [
+        "ALTER TABLE orders CHANGE amount amount BIGINT NOT NULL",
+        "ALTER TABLE orders RENAME COLUMN note TO note",
+        "ALTER TABLE orders RENAME COLUMN note TO NOTE",
+        "ALTER TABLE orders RENAME INDEX ix_amount TO ix_amount",
+        "ALTER TABLE orders RENAME INDEX ix_amount TO IX_AMOUNT",
+        "ALTER TABLE orders RENAME TO orders",
+        // A foreign key may take the name of an index of another table.
+        "ALTER TABLE orders ADD CONSTRAINT ix_other FOREIGN KEY (user_id) REFERENCES users (id)",
+        // A CHECK may take the name of a foreign key, and a foreign key the
+        // name of a CHECK.
+        "ALTER TABLE orders ADD CONSTRAINT orders_user_id_foreign CHECK (amount < 100000)",
+        "ALTER TABLE orders ADD CONSTRAINT orders_amount_check FOREIGN KEY (user_id) REFERENCES users (id)",
+    ] {
+        let run = run_on_dump(TABLES_WITH_NAMES_DUMP, &format!("{statement};"));
+        if run.answers()[0] == "unknown" {
+            let reason = run.reason(0);
+            for refused in ["1060", "1061", "1050", "1054", "1826", "3822"] {
+                assert!(!reason.contains(refused), "{statement}: {reason}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_foreign_key_that_takes_the_name_of_an_index_of_its_own_table_is_refused_with_1061() {
+    // By hand: ADD CONSTRAINT ix_amount FOREIGN KEY ... where ix_amount is an
+    // index of orders is error 1061 and the table is unchanged.
+    let run = run_on_dump(
+        TABLES_WITH_NAMES_DUMP,
+        "ALTER TABLE orders ADD CONSTRAINT ix_amount FOREIGN KEY (user_id) REFERENCES users (id);",
+    );
+    assert_ne!(run.answers()[0], COPY);
+    assert!(
+        !matches!(
+            run.impacts()[0],
+            Impact::WritesWait | Impact::WritesContinue | Impact::NewTable
+        ),
+        "{:?}",
+        run.answers()
+    );
+}
+
+#[test]
+fn a_chain_of_renames_in_one_alter_names_a_column_the_table_lacks_and_loses_the_table() {
+    // By hand: RENAME COLUMN amount TO total, RENAME COLUMN total TO sum
+    // names total, which the table does not have before the statement:
+    // 1054, for CHANGE the same. The table cannot be trusted afterwards.
+    for chain in [
+        "ALTER TABLE orders RENAME COLUMN note TO total, RENAME COLUMN total TO sum",
+        "ALTER TABLE orders CHANGE note total VARCHAR(50) NULL, CHANGE total sum VARCHAR(50) NULL",
+    ] {
+        let run = run_on_dump(
+            USERS_AND_ORDERS_DUMP,
+            &format!("{chain};\n{}", add_probe_column("orders")),
+        );
+        assert_eq!(run.answers()[0], "unknown", "{chain}");
+        assert_eq!(run.answers()[1], "unknown", "{chain}");
+    }
+}
+
+/// The ways to give a column the table lacks, and to take a name the table
+/// has, for each clause kilit reads.
+fn missing_and_taken_names() -> Vec<(String, bool, &'static str)> {
+    // (statement, kilit keeps the table, the error)
+    let mut sweep = Vec::new();
+    for missing in ["zzz", "no_such", "ZZZ", "Note2"] {
+        for clause in [
+            format!("MODIFY {missing} INT NULL"),
+            format!("CHANGE {missing} q INT NULL"),
+            format!("RENAME COLUMN {missing} TO q"),
+            format!("ALTER COLUMN {missing} SET DEFAULT 1"),
+            format!("ALTER COLUMN {missing} SET VISIBLE"),
+            format!("ALTER COLUMN {missing} SET INVISIBLE"),
+        ] {
+            sweep.push((format!("ALTER TABLE orders {clause}"), false, "1054"));
+        }
+        sweep.push((
+            format!("ALTER TABLE orders DROP COLUMN {missing}"),
+            true,
+            "1091",
+        ));
+        sweep.push((
+            format!("ALTER TABLE orders ALTER COLUMN {missing} DROP DEFAULT"),
+            true,
+            "1054",
+        ));
+    }
+    for taken in ["id", "user_id", "amount", "email", "note"] {
+        sweep.push((
+            format!("ALTER TABLE orders ADD COLUMN {taken} INT NULL"),
+            true,
+            "1060",
+        ));
+    }
+    for taken in ["id", "user_id", "amount", "note"] {
+        sweep.push((
+            format!("ALTER TABLE orders CHANGE email {taken} VARCHAR(255) NULL"),
+            false,
+            "1060",
+        ));
+        sweep.push((
+            format!("ALTER TABLE orders RENAME COLUMN email TO {taken}"),
+            false,
+            "1060",
+        ));
+    }
+    for taken in ["orders_email_unique", "ix_amount"] {
+        sweep.push((
+            format!("ALTER TABLE orders ADD INDEX {taken} (note)"),
+            true,
+            "1061",
+        ));
+        sweep.push((
+            format!("ALTER TABLE orders ADD UNIQUE INDEX {taken} (note)"),
+            true,
+            "1061",
+        ));
+        sweep.push((
+            format!("CREATE INDEX {taken} ON orders (note)"),
+            true,
+            "1061",
+        ));
+    }
+    sweep
+}
+
+#[test]
+fn no_clause_with_a_name_the_table_lacks_or_has_gets_a_measured_runs_answer_or_a_failure() {
+    // A property over every operation kilit reads: with a missing or a taken
+    // name the statement is never writes_continue, writes_wait, new_table or
+    // a measured failure, and the next ADD COLUMN is measured exactly when
+    // the table is kept.
+    let sweep = missing_and_taken_names();
+    assert!(sweep.len() >= 50, "{}", sweep.len());
+    let mut problems = Vec::new();
+    for (statement, kept, _code) in sweep {
+        let sql = format!("{statement};\n{}", add_probe_column("orders"));
+        let run = run_on_dump(TABLES_WITH_NAMES_DUMP, &sql);
+        if run.answers()[0] != "unknown"
+            || matches!(
+                run.impacts()[0],
+                Impact::WritesContinue | Impact::WritesWait | Impact::NewTable | Impact::Fails
+            )
+        {
+            problems.push(format!(
+                "{statement}: {} / {:?}",
+                run.answers()[0],
+                run.impacts()[0]
+            ));
+        }
+        let probe = run.last_answer();
+        if kept && probe != INSTANT {
+            problems.push(format!("{statement} should keep the table, got {probe}"));
+        }
+        if !kept && probe != "unknown" {
+            problems.push(format!("{statement} should lose the table, got {probe}"));
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn the_same_clauses_with_a_name_the_table_has_not_on_a_table_made_here_are_refused_too() {
+    // The table is made in the input: it is kilit's only picture of it.
+    let create = "CREATE TABLE orders (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, \
+                  amount INT NOT NULL, note VARCHAR(50) NULL, KEY ix_amount (amount)) \
+                  DEFAULT CHARSET=utf8mb4;";
+    for statement in [
+        "ALTER TABLE orders ADD COLUMN note INT NULL",
+        "ALTER TABLE orders MODIFY zzz INT NULL",
+        "ALTER TABLE orders RENAME COLUMN zzz TO yyy",
+        "ALTER TABLE orders ADD INDEX ix_amount (note)",
+    ] {
+        let run = run_without_dump(&format!("{create}\n{statement};"));
+        assert_eq!(run.answers()[1], "unknown", "{statement}");
+        assert_ne!(run.impacts()[1], Impact::NewTable, "{statement}");
+    }
+}
+
+// Two clauses of one ALTER that name one column. By hand on MySQL
+// 8.0.46 and 8.4.13 (the same on both): every clause is taken against the
+// names the table had before the statement.
+
+const INPLACE_REBUILD_CONTINUE: &str = "INPLACE, rebuilds the table, writes continue";
+
+/// `orders` of USERS_AND_ORDERS_DUMP with the index `ix_amount` on `amount`.
+fn orders_with_amount_index_dump() -> String {
+    format!(
+        "{}ALTER TABLE orders ADD INDEX ix_amount (amount);\n",
+        USERS_AND_ORDERS_DUMP
+    )
+}
+
+#[test]
+fn swapping_two_column_names_in_one_alter_is_followed() {
+    // After the swap note is the old amount (INT NOT NULL) and amount the old
+    // note (VARCHAR(50) NULL), whichever way it is written.
+    for swap in [
+        "ALTER TABLE orders CHANGE amount note INT NOT NULL, CHANGE note amount VARCHAR(50) NULL",
+        "ALTER TABLE orders CHANGE note amount VARCHAR(50) NULL, CHANGE amount note INT NOT NULL",
+        "ALTER TABLE orders RENAME COLUMN amount TO note, RENAME COLUMN note TO amount",
+    ] {
+        for (probe, answer) in [
+            ("MODIFY note INT NOT NULL", INSTANT),
+            ("MODIFY amount VARCHAR(50) NULL", INSTANT),
+            ("MODIFY amount VARCHAR(40) NULL", COPY),
+            ("ADD COLUMN probe_col INT NULL", INSTANT),
+        ] {
+            let run = run_on_dump(
+                USERS_AND_ORDERS_DUMP,
+                &format!("{swap};\nALTER TABLE orders {probe};"),
+            );
+            assert_eq!(run.last_answer(), answer, "{swap}: {probe}");
+        }
+    }
+}
+
+#[test]
+fn a_swap_moves_the_index_with_the_column() {
+    // By hand: the index on amount ends up on the column that was amount,
+    // now named note. Dropping an indexed column rebuilds the table
+    // (drop-column-indexed), dropping one without an index is INSTANT.
+    let dump = orders_with_amount_index_dump();
+    let swap =
+        "ALTER TABLE orders CHANGE amount note INT NOT NULL, CHANGE note amount VARCHAR(50) NULL;";
+    let indexed = run_on_dump(
+        &dump,
+        &format!("{swap}\nALTER TABLE orders DROP COLUMN note;"),
+    );
+    assert_eq!(indexed.last_answer(), INPLACE_REBUILD_CONTINUE);
+    let plain = run_on_dump(
+        &dump,
+        &format!("{swap}\nALTER TABLE orders DROP COLUMN amount;"),
+    );
+    assert_eq!(plain.last_answer(), INSTANT);
+}
+
+#[test]
+fn a_chain_of_renames_in_one_alter_names_a_column_that_is_not_there_yet_and_is_refused() {
+    // By hand: RENAME COLUMN amount TO total, RENAME COLUMN total TO sum and
+    // the CHANGE form are error 1054.
+    for chain in [
+        "ALTER TABLE orders RENAME COLUMN amount TO total, RENAME COLUMN total TO sum",
+        "ALTER TABLE orders CHANGE amount total INT NOT NULL, CHANGE total sum INT NOT NULL",
+    ] {
+        let run = run_on_dump(
+            USERS_AND_ORDERS_DUMP,
+            &format!("{chain};\n{}", add_probe_column("orders")),
+        );
+        assert_eq!(run.answers()[0], "unknown", "{chain}");
+        assert_eq!(run.last_answer(), "unknown", "{chain}");
+    }
+}
+
+#[test]
+fn dropping_and_adding_a_column_of_one_name_in_one_alter_is_followed() {
+    // DROP COLUMN note, ADD COLUMN note INT NULL: note is INT NULL.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "ALTER TABLE orders DROP COLUMN note, ADD COLUMN note INT NULL;
+         ALTER TABLE orders MODIFY note INT NULL;
+         ALTER TABLE orders ADD COLUMN note INT NULL;",
+    );
+    assert_eq!(run.answers()[1], INSTANT);
+    assert_eq!(run.answers()[2], "unknown");
+    assert!(run.reason(2).contains("1060"), "{}", run.reason(2));
+    // The other order is accepted by MySQL too (ADD COLUMN note INT NULL,
+    // DROP COLUMN note): note is INT NULL. kilit follows it or loses the
+    // table; it never keeps the old VARCHAR(50).
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "ALTER TABLE orders ADD COLUMN note INT NULL, DROP COLUMN note;
+         ALTER TABLE orders MODIFY note INT NULL;",
+    );
+    assert!(
+        [INSTANT, "unknown"].contains(&run.last_answer().as_str()),
+        "{}",
+        run.last_answer()
+    );
+}
+
+#[test]
+fn adding_and_dropping_a_new_column_in_one_alter_is_refused_with_1091() {
+    // By hand: ADD COLUMN extra INT NULL, DROP COLUMN extra is error 1091
+    // (extra is not a column before the statement). Whether kilit keeps the
+    // table (the refused statement and the statement as written leave the
+    // same names) or loses it (it names extra in two clauses), a later ADD
+    // COLUMN extra is INSTANT or unknown, never 1060.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "ALTER TABLE orders ADD COLUMN extra INT NULL, DROP COLUMN extra;
+         ALTER TABLE orders ADD COLUMN extra INT NULL;",
+    );
+    assert_eq!(run.answers()[0], "unknown");
+    assert_eq!(run.impacts()[0], Impact::Unknown);
+    assert!(
+        [INSTANT, "unknown"].contains(&run.last_answer().as_str()),
+        "{}",
+        run.last_answer()
+    );
+    if run.last_answer() == "unknown" {
+        assert!(!run.reason(1).contains("1060"), "{}", run.reason(1));
+    }
+}
+
+#[test]
+fn a_new_or_renamed_column_named_in_a_new_index_of_the_same_alter_is_followed() {
+    for change in [
+        "ADD COLUMN c INT NULL, ADD INDEX ix_c (c)",
+        "CHANGE amount c INT NOT NULL, ADD INDEX ix_c (c)",
+        "RENAME COLUMN amount TO c, ADD INDEX ix_c (c)",
+    ] {
+        let run = run_on_dump(
+            USERS_AND_ORDERS_DUMP,
+            &format!(
+                "ALTER TABLE orders {change};
+                 ALTER TABLE orders DROP INDEX ix_c;"
+            ),
+        );
+        // The index ix_c exists: a measured drop-index.
+        assert_eq!(
+            run.last_answer(),
+            "INPLACE, no rebuild, writes continue",
+            "{change}"
+        );
+        // c is a column; adding it again is 1060.
+        let run = run_on_dump(
+            USERS_AND_ORDERS_DUMP,
+            &format!("ALTER TABLE orders {change};\nALTER TABLE orders ADD COLUMN c INT NULL;"),
+        );
+        assert_eq!(run.last_answer(), "unknown", "{change}");
+        assert!(
+            run.reason(1).contains("1060"),
+            "{change}: {}",
+            run.reason(1)
+        );
+    }
+    // After a CHANGE or RENAME of amount, amount is a free name.
+    for change in [
+        "CHANGE amount c INT NOT NULL, ADD INDEX ix_c (c)",
+        "RENAME COLUMN amount TO c, ADD INDEX ix_c (c)",
+    ] {
+        let run = run_on_dump(
+            USERS_AND_ORDERS_DUMP,
+            &format!(
+                "ALTER TABLE orders {change};\nALTER TABLE orders ADD COLUMN amount INT NULL;"
+            ),
+        );
+        assert_eq!(run.last_answer(), INSTANT, "{change}");
+    }
+}
+
+#[test]
+fn an_index_on_the_old_name_of_a_renamed_column_is_unknown_naming_1072_and_loses_the_table() {
+    // By hand: CHANGE amount c ..., ADD INDEX ix_a (amount) is error 1072.
+    // The statement names amount in two clauses and is not one of the shapes
+    // the step follows or refuses, so kilit loses the table: nothing is
+    // measured on it afterwards.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "ALTER TABLE orders CHANGE amount c INT NOT NULL, ADD INDEX ix_a (amount);
+         ALTER TABLE orders ADD COLUMN c INT NULL;",
+    );
+    assert_eq!(run.answers()[0], "unknown");
+    assert!(run.reason(0).contains("1072"), "{}", run.reason(0));
+    assert_eq!(run.last_answer(), "unknown");
+    assert_eq!(run.last_impact(), Impact::Unknown);
+}
+
+#[test]
+fn modify_beside_a_rename_of_the_same_column_is_refused_with_1054_and_the_table_stays() {
+    // By hand: MODIFY note ..., RENAME COLUMN note TO memo in either order,
+    // and RENAME COLUMN note TO memo, MODIFY memo ...: error 1054.
+    for statement in [
+        "ALTER TABLE orders MODIFY note VARCHAR(100) NULL, RENAME COLUMN note TO memo",
+        "ALTER TABLE orders RENAME COLUMN note TO memo, MODIFY note VARCHAR(100) NULL",
+        "ALTER TABLE orders RENAME COLUMN note TO memo, MODIFY memo VARCHAR(100) NULL",
+    ] {
+        let run = run_on_dump(
+            USERS_AND_ORDERS_DUMP,
+            &format!(
+                "{statement};
+                 ALTER TABLE orders ADD COLUMN memo INT NULL;
+                 ALTER TABLE orders MODIFY note VARCHAR(50) NULL;"
+            ),
+        );
+        assert_eq!(run.answers()[0], "unknown", "{statement}");
+        assert!(
+            run.reason(0).contains("1054"),
+            "{statement}: {}",
+            run.reason(0)
+        );
+        // memo was not created by the refused statement, note is as it was.
+        assert_eq!(run.answers()[1], INSTANT, "{statement}");
+        assert_eq!(run.answers()[2], INSTANT, "{statement}");
+    }
+}
+
+#[test]
+fn dropping_a_foreign_key_beside_adding_one_of_the_same_name_is_refused_with_1826() {
+    // By hand: DROP FOREIGN KEY k, ADD CONSTRAINT k FOREIGN KEY ... in either
+    // order is error 1826 and the key stays: dropping its column still
+    // fails with 1828.
+    for statement in [
+        "ALTER TABLE orders DROP FOREIGN KEY orders_user_id_foreign, ADD CONSTRAINT orders_user_id_foreign FOREIGN KEY (user_id) REFERENCES users (id)",
+        "ALTER TABLE orders ADD CONSTRAINT orders_user_id_foreign FOREIGN KEY (user_id) REFERENCES users (id), DROP FOREIGN KEY orders_user_id_foreign",
+    ] {
+        let run = run_on_dump(
+            USERS_AND_ORDERS_WITH_FK_DUMP,
+            &format!("{statement};\nALTER TABLE orders DROP COLUMN user_id;"),
+        );
+        assert_eq!(run.answers()[0], "unknown", "{statement}");
+        assert!(
+            run.reason(0).contains("1826"),
+            "{statement}: {}",
+            run.reason(0)
+        );
+        assert_eq!(run.last_answer(), FAILS_1828, "{statement}");
+    }
+}
+
+#[test]
+fn dropping_a_foreign_key_column_beside_other_clauses_is_refused_with_1828_and_the_table_stays() {
+    // By hand: DROP COLUMN user_id with ADD COLUMN or MODIFY, in either
+    // order, is error 1828 and nothing changes.
+    for statement in [
+        "ALTER TABLE orders DROP COLUMN user_id, ADD COLUMN extra INT NULL",
+        "ALTER TABLE orders DROP COLUMN user_id, MODIFY amount BIGINT NOT NULL",
+        "ALTER TABLE orders ADD COLUMN extra INT NULL, DROP COLUMN user_id",
+    ] {
+        let run = run_on_dump(
+            USERS_AND_ORDERS_WITH_FK_DUMP,
+            &format!(
+                "{statement};
+                 ALTER TABLE orders DROP COLUMN user_id;
+                 ALTER TABLE orders ADD COLUMN extra INT NULL;
+                 ALTER TABLE orders MODIFY amount INT NOT NULL;"
+            ),
+        );
+        assert_eq!(run.answers()[0], "unknown", "{statement}");
+        assert!(
+            run.reason(0).contains("1828"),
+            "{statement}: {}",
+            run.reason(0)
+        );
+        assert_eq!(run.answers()[1], FAILS_1828, "{statement}");
+        assert_eq!(run.answers()[2], INSTANT, "{statement}");
+        assert_eq!(run.answers()[3], INSTANT, "{statement}");
+    }
+}
+
+#[test]
+fn dropping_a_foreign_key_and_its_column_in_one_alter_is_followed() {
+    // By hand: DROP FOREIGN KEY k, DROP COLUMN user_id in either order is
+    // accepted: the column and the key are gone.
+    for statement in [
+        "ALTER TABLE orders DROP FOREIGN KEY orders_user_id_foreign, DROP COLUMN user_id",
+        "ALTER TABLE orders DROP COLUMN user_id, DROP FOREIGN KEY orders_user_id_foreign",
+    ] {
+        let run = run_on_dump(
+            USERS_AND_ORDERS_WITH_FK_DUMP,
+            &format!("{statement};\nALTER TABLE orders ADD COLUMN user_id BIGINT UNSIGNED NULL;"),
+        );
+        assert_eq!(run.last_answer(), INSTANT, "{statement}");
+    }
+}
+
+#[test]
+fn other_shapes_that_name_one_column_in_two_clauses_lose_the_table() {
+    // Not hand-tested shapes: kilit cannot tell what MySQL does, so it loses
+    // the table, whatever the final state is.
+    for statement in [
+        "ALTER TABLE orders MODIFY note VARCHAR(60) NULL, ALTER COLUMN note SET DEFAULT 'x'",
+        "ALTER TABLE orders MODIFY note VARCHAR(60) NULL, MODIFY note VARCHAR(70) NULL",
+    ] {
+        let run = run_on_dump(
+            USERS_AND_ORDERS_DUMP,
+            &format!("{statement};\n{}", add_probe_column("orders")),
+        );
+        assert_eq!(run.last_answer(), "unknown", "{statement}");
+        assert_eq!(run.last_impact(), Impact::Unknown, "{statement}");
+    }
+}
+
+// An inline PRIMARY KEY in MODIFY or CHANGE, and SERIAL. By hand
+// on MySQL 8.0.46 and 8.4.13 (the same on both).
+
+const SERIAL_TABLES_DUMP: &str = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `np` (
+  `c` int DEFAULT NULL,
+  `d` int DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `sn` (
+  `id` bigint unsigned NOT NULL,
+  `uid` bigint unsigned DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `sn_uid_foreign` (`uid`),
+  CONSTRAINT `sn_uid_foreign` FOREIGN KEY (`uid`) REFERENCES `users` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `sc` (
+  `id` bigint unsigned NOT NULL,
+  `uid` bigint unsigned DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `sc_uid_foreign` (`uid`),
+  CONSTRAINT `sc_uid_foreign` FOREIGN KEY (`uid`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `pl` (
+  `id` bigint unsigned NOT NULL,
+  `uid` bigint unsigned DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+
+#[test]
+fn an_inline_primary_key_on_a_table_without_one_is_followed() {
+    // MODIFY c INT PRIMARY KEY, CHANGE c c INT PRIMARY KEY and CHANGE c k INT
+    // PRIMARY KEY make the column the primary key (and NOT NULL).
+    for (statement, column) in [
+        ("ALTER TABLE np MODIFY c INT PRIMARY KEY", "c"),
+        ("ALTER TABLE np CHANGE c c INT PRIMARY KEY", "c"),
+        ("ALTER TABLE np CHANGE c k INT PRIMARY KEY", "k"),
+    ] {
+        let run = run_on_dump(
+            SERIAL_TABLES_DUMP,
+            &format!(
+                "{statement};
+                 ALTER TABLE np ADD PRIMARY KEY (d);
+                 ALTER TABLE np ADD COLUMN {column} INT NULL;
+                 {}",
+                add_probe_column("np")
+            ),
+        );
+        // The table has a primary key now: a second one is error 1068.
+        assert_eq!(run.answers()[1], "unknown", "{statement}");
+        assert!(
+            run.reason(1).contains("1068"),
+            "{statement}: {}",
+            run.reason(1)
+        );
+        // The column is there under its new name.
+        assert_eq!(run.answers()[2], "unknown", "{statement}");
+        assert!(
+            run.reason(2).contains("1060"),
+            "{statement}: {}",
+            run.reason(2)
+        );
+        assert_eq!(run.last_answer(), INSTANT, "{statement}");
+    }
+    // After the rename the old name is free.
+    let run = run_on_dump(
+        SERIAL_TABLES_DUMP,
+        "ALTER TABLE np CHANGE c k INT PRIMARY KEY;\nALTER TABLE np ADD COLUMN c INT NULL;",
+    );
+    assert_eq!(run.last_answer(), INSTANT);
+}
+
+#[test]
+fn an_inline_primary_key_on_a_table_that_has_one_is_refused_with_1068_and_the_table_stays() {
+    // MODIFY amount INT PRIMARY KEY on orders, which has a primary key.
+    for statement in [
+        "ALTER TABLE orders MODIFY amount INT PRIMARY KEY",
+        "ALTER TABLE orders CHANGE amount amount INT PRIMARY KEY",
+        "ALTER TABLE orders MODIFY amount INT NOT NULL PRIMARY KEY",
+        "ALTER TABLE orders MODIFY id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY",
+    ] {
+        let run = run_on_dump(
+            SERIAL_TABLES_DUMP,
+            &format!(
+                "{statement};
+                 ALTER TABLE orders MODIFY amount INT NOT NULL;
+                 {}",
+                add_probe_column("orders")
+            ),
+        );
+        assert_refused_by_hand(&run, 0, "1068", statement).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(run.answers()[1], INSTANT, "{statement}");
+        assert_eq!(run.answers()[2], INSTANT, "{statement}");
+    }
+}
+
+#[test]
+fn serial_on_the_column_of_a_foreign_key_is_refused_and_the_key_stays() {
+    // SET NULL key: error 1830; CASCADE key: error 1832. The key still stops
+    // DROP COLUMN uid with 1828.
+    for (table, code) in [("sn", "1830"), ("sc", "1832")] {
+        let run = run_on_dump(
+            SERIAL_TABLES_DUMP,
+            &format!(
+                "ALTER TABLE {table} MODIFY uid SERIAL;
+                 ALTER TABLE {table} DROP COLUMN uid;
+                 {}",
+                add_probe_column(table)
+            ),
+        );
+        assert_refused_by_hand(&run, 0, code, table).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(run.answers()[1], FAILS_1828, "{table}");
+        assert_eq!(run.answers()[2], INSTANT, "{table}");
+    }
+}
+
+#[test]
+fn serial_beside_another_auto_increment_column_is_refused_with_1075() {
+    let run = run_on_dump(
+        SERIAL_TABLES_DUMP,
+        &format!(
+            "ALTER TABLE orders MODIFY user_id SERIAL;\n{}",
+            add_probe_column("orders")
+        ),
+    );
+    assert_refused_by_hand(&run, 0, "1075", "serial beside auto_increment")
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(run.answers()[1], INSTANT);
+}
+
+#[test]
+fn serial_on_a_plain_column_is_not_null_auto_increment_with_a_unique_key_named_after_it() {
+    // MODIFY uid SERIAL: BIGINT UNSIGNED NOT NULL AUTO_INCREMENT and UNIQUE
+    // KEY uid (uid).
+    let run = run_on_dump(
+        SERIAL_TABLES_DUMP,
+        "ALTER TABLE pl MODIFY uid SERIAL;
+         ALTER TABLE pl ADD INDEX uid (id);
+         ALTER TABLE pl ADD COLUMN uid INT NULL;
+         ALTER TABLE pl ADD COLUMN probe_col INT NULL;",
+    );
+    assert_ne!(run.answers()[0], "fails with error 1830");
+    // The key named uid is there: a second index of that name is 1061.
+    assert_eq!(run.answers()[1], "unknown");
+    assert!(run.reason(1).contains("1061"), "{}", run.reason(1));
+    assert_eq!(run.answers()[2], "unknown");
+    assert!(run.reason(2).contains("1060"), "{}", run.reason(2));
+    assert_eq!(run.answers()[3], INSTANT);
+    // On a table without a primary key the unique key is named after the
+    // column too.
+    let run = run_on_dump(
+        SERIAL_TABLES_DUMP,
+        "ALTER TABLE np MODIFY c SERIAL;\nALTER TABLE np ADD INDEX c (d);",
+    );
+    assert_eq!(run.answers()[1], "unknown");
+    assert!(run.reason(1).contains("1061"), "{}", run.reason(1));
+}
+
+// CREATE TABLE ... LIKE. By hand on MySQL 8.0.46 and 8.4.13 (the
+// same on both): the copy has the columns, the indexes under their names
+// (also the automatic index of a foreign key), the CHECK constraints under
+// the names <copy>_chk_<n>, numbered in the order of the source's names, no
+// foreign key, and the engine, row format, key block size, character set,
+// collation and comment of the source; its AUTO_INCREMENT counter starts
+// again.
+
+const LIKE_SOURCES_DUMP: &str = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `a` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `uid` bigint unsigned NOT NULL,
+  `title` varchar(100) CHARACTER SET latin1 COLLATE latin1_bin NOT NULL,
+  `body` text COLLATE utf8mb4_unicode_ci,
+  `amount` int NOT NULL DEFAULT '0',
+  PRIMARY KEY (`id`),
+  KEY `ix_amount` (`amount`),
+  KEY `title` (`title`),
+  KEY `a_uid_foreign` (`uid`),
+  FULLTEXT KEY `ft_body` (`body`),
+  CONSTRAINT `a_uid_foreign` FOREIGN KEY (`uid`) REFERENCES `users` (`id`),
+  CONSTRAINT `a_chk_1` CHECK ((`amount` < 1000000)),
+  CONSTRAINT `a_pos` CHECK ((`amount` >= 0))
+) ENGINE=InnoDB AUTO_INCREMENT=100 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='table a';
+CREATE TABLE `ck` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  CONSTRAINT `a_second` CHECK ((`b` < 100)),
+  CONSTRAINT `ck_chk_1` CHECK ((`c` <> 50)),
+  CONSTRAINT `z_first` CHECK ((`a` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `am` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `uid` bigint unsigned NOT NULL,
+  `body` text,
+  PRIMARY KEY (`id`),
+  KEY `ix_uid` (`uid`),
+  FULLTEXT KEY `ft` (`body`),
+  CONSTRAINT `am_chk` CHECK ((`uid` > 0))
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `my` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `uid` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ix_uid` (`uid`)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `cz` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `uid` bigint unsigned NOT NULL,
+  `body` text COLLATE utf8mb4_unicode_ci,
+  `amount` int NOT NULL DEFAULT '0',
+  PRIMARY KEY (`id`),
+  KEY `ix_amount` (`amount`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8;
+CREATE TABLE `ac` (
+  `id` int NOT NULL,
+  `uid` bigint unsigned DEFAULT NULL,
+  `note` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `uid` (`uid`)
+) ENGINE=InnoDB DEFAULT CHARSET=latin1 ROW_FORMAT=COMPACT;
+CREATE TABLE `fd` (
+  `id` int NOT NULL,
+  `body` text,
+  PRIMARY KEY (`id`),
+  FULLTEXT KEY `ft` (`body`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+
+/// Every way to write the plain copy of `a` as `b`.
+const PLAIN_LIKE_FORMS: [&str; 5] = [
+    "CREATE TABLE b LIKE a;",
+    "CREATE TABLE b (LIKE a);",
+    "CREATE TABLE IF NOT EXISTS b LIKE a;",
+    "CREATE TABLE IF NOT EXISTS b (LIKE a);",
+    "create table `b` like `a`;",
+];
+
+#[test]
+fn a_table_copied_with_like_has_what_the_source_has_and_no_foreign_key() {
+    for form in PLAIN_LIKE_FORMS {
+        let probe = |statement: &str| -> FilesRun {
+            run_on_dump(LIKE_SOURCES_DUMP, &format!("{form}\n{statement};"))
+        };
+        // The copy is a table made here whose FULLTEXT index (copied) makes
+        // ADD COLUMN a copy: the same as the source.
+        let add = probe("ALTER TABLE b ADD COLUMN probe_col INT NULL");
+        let source = run_on_dump(
+            LIKE_SOURCES_DUMP,
+            "ALTER TABLE a ADD COLUMN probe_col INT NULL;",
+        );
+        if form.contains("IF NOT EXISTS") {
+            // CREATE TABLE IF NOT EXISTS never counts as a new table.
+            assert_ne!(add.last_impact(), Impact::NewTable, "{form}");
+            continue;
+        }
+        assert_eq!(add.last_answer(), COPY, "{form}");
+        assert_eq!(add.last_answer(), source.last_answer(), "{form}");
+        assert_eq!(add.last_impact(), Impact::NewTable, "{form}");
+        // The columns of a, also the character set of a column.
+        let same = probe(
+            "ALTER TABLE b MODIFY title VARCHAR(100) CHARACTER SET latin1 COLLATE latin1_bin NOT NULL",
+        );
+        let same_on_a = run_on_dump(
+            LIKE_SOURCES_DUMP,
+            "ALTER TABLE a MODIFY title VARCHAR(100) CHARACTER SET latin1 COLLATE latin1_bin NOT NULL;",
+        );
+        assert_eq!(same.last_answer(), same_on_a.last_answer(), "{form}");
+        assert_eq!(
+            probe("ALTER TABLE b ADD COLUMN amount INT NULL").last_answer(),
+            "unknown",
+            "{form}"
+        );
+        // The indexes keep their names, the automatic index of the key too.
+        for index in ["ix_amount", "title", "a_uid_foreign", "ft_body"] {
+            let taken = probe(&format!("ALTER TABLE b ADD INDEX {index} (id)"));
+            assert_eq!(taken.last_answer(), "unknown", "{form}: {index}");
+            assert!(
+                taken.reason(1).contains("1061"),
+                "{form}: {index}: {}",
+                taken.reason(1)
+            );
+        }
+        // Dropping an index of the copy is measured, as on a.
+        let dropped = probe("ALTER TABLE b DROP INDEX ix_amount");
+        let dropped_on_a = run_on_dump(LIKE_SOURCES_DUMP, "ALTER TABLE a DROP INDEX ix_amount;");
+        assert_ne!(dropped.last_answer(), "unknown", "{form}");
+        assert_eq!(dropped.last_answer(), dropped_on_a.last_answer(), "{form}");
+        // The copy has no foreign key: a has one (measured), b does not
+        // (error 1091, unknown).
+        let key_of_a = run_on_dump(
+            LIKE_SOURCES_DUMP,
+            "ALTER TABLE a DROP FOREIGN KEY a_uid_foreign;",
+        );
+        assert_ne!(key_of_a.last_answer(), "unknown");
+        assert_eq!(
+            probe("ALTER TABLE b DROP FOREIGN KEY a_uid_foreign").last_answer(),
+            "unknown",
+            "{form}"
+        );
+        assert_ne!(
+            probe("ALTER TABLE b DROP COLUMN uid").last_answer(),
+            FAILS_1828,
+            "{form}"
+        );
+        // The CHECK constraints are renamed <copy>_chk_<n>, numbered in the
+        // order of the source's names (a_chk_1, a_pos).
+        for name in ["b_chk_1", "b_chk_2"] {
+            let dropped = probe(&format!("ALTER TABLE b DROP CHECK {name}"));
+            assert_eq!(dropped.last_answer(), INSTANT, "{form}: {name}");
+        }
+        for name in ["a_chk_1", "a_pos", "b_chk_3"] {
+            let missing = probe(&format!("ALTER TABLE b DROP CHECK {name}"));
+            assert_eq!(missing.last_answer(), "unknown", "{form}: {name}");
+        }
+    }
+}
+
+#[test]
+fn the_checks_of_a_copy_are_numbered_in_the_order_of_the_source_s_names() {
+    // ck has z_first (a), a_second (b) and the automatic ck_chk_1 (c). By
+    // hand the copy has b_chk_1 for b, b_chk_2 for c, b_chk_3 for a. Renaming
+    // a column that a CHECK uses is error 3959 until the CHECK is dropped.
+    for (check, column) in [("b_chk_1", "b"), ("b_chk_2", "c"), ("b_chk_3", "a")] {
+        let before = run_on_dump(
+            LIKE_SOURCES_DUMP,
+            &format!("CREATE TABLE b LIKE ck;\nALTER TABLE b RENAME COLUMN {column} TO renamed;"),
+        );
+        assert_eq!(before.last_answer(), "fails with error 3959", "{column}");
+        let after = run_on_dump(
+            LIKE_SOURCES_DUMP,
+            &format!(
+                "CREATE TABLE b LIKE ck;
+                 ALTER TABLE b DROP CHECK {check};
+                 ALTER TABLE b RENAME COLUMN {column} TO renamed;"
+            ),
+        );
+        assert_eq!(after.answers()[1], INSTANT, "{check}");
+        assert_eq!(after.last_answer(), INSTANT, "{check} frees {column}");
+    }
+}
+
+#[test]
+fn a_copy_of_a_myisam_compressed_or_compact_table_answers_as_its_source_does() {
+    // The engine, the row format and the key block size are copied.
+    for (source, copy_answer) in [("my", Some(COPY)), ("am", None), ("cz", None), ("ac", None)] {
+        for probe in [
+            "ADD COLUMN probe_col INT NULL",
+            "ADD INDEX ix_p (id)",
+            "DROP COLUMN id",
+        ] {
+            let on_source =
+                run_on_dump(LIKE_SOURCES_DUMP, &format!("ALTER TABLE {source} {probe};"));
+            let on_copy = run_on_dump(
+                LIKE_SOURCES_DUMP,
+                &format!("CREATE TABLE b LIKE {source};\nALTER TABLE b {probe};"),
+            );
+            assert_eq!(
+                on_copy.last_answer(),
+                on_source.last_answer(),
+                "{source}: {probe}"
+            );
+            if probe == "ADD COLUMN probe_col INT NULL" && source != "am" {
+                assert_ne!(on_copy.last_answer(), "unknown", "{source}");
+                if let Some(answer) = copy_answer {
+                    assert_eq!(on_copy.last_answer(), answer, "{source}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_copy_has_the_columns_the_source_has_at_that_point_of_the_input() {
+    let run = run_on_dump(
+        LIKE_SOURCES_DUMP,
+        "ALTER TABLE a ADD COLUMN extra INT NULL;
+         CREATE TABLE b LIKE a;
+         ALTER TABLE b ADD COLUMN extra INT NULL;",
+    );
+    assert_eq!(run.last_answer(), "unknown");
+    assert!(run.reason(2).contains("1060"), "{}", run.reason(2));
+}
+
+#[test]
+fn like_of_a_temporary_table_copies_the_temporary_table_that_hides_the_base_table() {
+    // By hand: the copy has the columns of the temporary table that hides
+    // orders, not those of the base orders.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "CREATE TEMPORARY TABLE orders (id INT PRIMARY KEY, tmp_col INT NULL);
+         CREATE TABLE b LIKE orders;
+         ALTER TABLE b ADD COLUMN user_id INT NULL;
+         ALTER TABLE b ADD COLUMN tmp_col INT NULL;",
+    );
+    assert_eq!(run.answers()[2], INSTANT);
+    assert_eq!(run.answers()[3], "unknown");
+    assert!(run.reason(3).contains("1060"), "{}", run.reason(3));
+}
+
+#[test]
+fn like_of_a_table_kilit_does_not_know_loses_the_copy() {
+    // No schema: the source is unseen. The dump lacks nosuch (error 1146 on
+    // the server). A source kilit lost. In each case b is lost.
+    let probe = "ALTER TABLE b ADD COLUMN probe_col INT NULL;";
+    assert_eq!(
+        run_without_dump(&format!("CREATE TABLE b LIKE a;\n{probe}")).last_answer(),
+        "unknown"
+    );
+    assert_eq!(
+        run_on_dump(
+            LIKE_SOURCES_DUMP,
+            &format!("CREATE TABLE b LIKE nosuch;\n{probe}")
+        )
+        .last_answer(),
+        "unknown"
+    );
+    let run = run_on_dump(
+        LIKE_SOURCES_DUMP,
+        &format!("ALTER TABLE a FROBNICATE x;\nCREATE TABLE b LIKE a;\n{probe}"),
+    );
+    assert_eq!(run.last_answer(), "unknown");
+    assert_eq!(run.last_impact(), Impact::Unknown);
+}
+
+#[test]
+fn create_table_if_not_exists_like_over_a_table_made_in_the_input_changes_nothing() {
+    // By hand: accepted with Note 1050, the first b stays.
+    let run = run_on_dump(
+        LIKE_SOURCES_DUMP,
+        "CREATE TABLE b (id INT PRIMARY KEY, x INT NULL);
+         CREATE TABLE IF NOT EXISTS b LIKE a;
+         ALTER TABLE b ADD COLUMN x INT NULL;
+         ALTER TABLE b ADD COLUMN amount INT NULL;",
+    );
+    assert_eq!(run.answers()[2], "unknown");
+    assert!(run.reason(2).contains("1060"), "{}", run.reason(2));
+    assert_eq!(run.answers()[3], INSTANT);
+}
+
+#[test]
+fn a_temporary_copy_of_a_compressed_table_or_of_a_fulltext_innodb_table_is_refused() {
+    // By hand: CREATE TEMPORARY TABLE b LIKE <ROW_FORMAT=COMPRESSED table> is
+    // error 3500; LIKE an InnoDB table with a FULLTEXT index is 1796. No
+    // table b exists afterwards.
+    for (source, code) in [("cz", "3500"), ("fd", "1796")] {
+        let run = run_on_dump(
+            LIKE_SOURCES_DUMP,
+            &format!(
+                "CREATE TEMPORARY TABLE b LIKE {source};\n{}",
+                add_probe_column("b")
+            ),
+        );
+        assert_eq!(run.answers()[0], "unknown", "{source}");
+        assert!(run.reason(0).contains(code), "{source}: {}", run.reason(0));
+        assert_eq!(run.answers()[1], "unknown", "{source}");
+        assert_eq!(run.last_impact(), Impact::Unknown, "{source}");
+    }
+    // The same copy as a base table is accepted, as are temporary copies of
+    // a MyISAM table with a FULLTEXT index and of a COMPACT table.
+    for statement in [
+        "CREATE TABLE b LIKE cz;",
+        "CREATE TABLE b LIKE fd;",
+        "CREATE TEMPORARY TABLE b LIKE am;",
+        "CREATE TEMPORARY TABLE b LIKE ac;",
+    ] {
+        let run = run_on_dump(LIKE_SOURCES_DUMP, statement);
+        assert_eq!(run.answers(), ["not checked"], "{statement}");
+    }
+}
+
+#[test]
+fn like_with_more_after_it_or_a_table_option_is_refused_by_the_servers_and_creates_nothing() {
+    // By hand: CREATE TABLE b (LIKE ac, extra INT) and CREATE TABLE b LIKE ac
+    // ENGINE=MyISAM are error 1064 on both servers: unknown, with the reason
+    // that names the servers, and no table b.
+    let mut problems = Vec::new();
+    for statement in [
+        "CREATE TABLE b (LIKE ac, extra INT);",
+        "CREATE TABLE b LIKE ac ENGINE=MyISAM;",
+    ] {
+        let run = run_on_dump(
+            LIKE_SOURCES_DUMP,
+            &format!("{statement}\n{}", add_probe_column("b")),
+        );
+        if run.answers()[0] != "unknown" {
+            problems.push(format!("{statement}: answered {}", run.answers()[0]));
+        } else if !run.reason(0).contains("8.0.46 and 8.4.13") {
+            problems.push(format!(
+                "{statement}: the reason does not name the servers: {}",
+                run.reason(0)
+            ));
+        }
+        if run.answers()[1] != "unknown" {
+            problems.push(format!(
+                "{statement}: b should not exist, but ADD COLUMN is {}",
+                run.answers()[1]
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+// The three table states and forced variants for the refusals of names.
+
+/// Every statement of the two tables above and of the sweep.
+fn every_name_refusal_statement() -> Vec<String> {
+    let mut statements: Vec<String> = REFUSALS_THAT_KEEP_THE_TABLE
+        .iter()
+        .map(|(_, statement, _)| (*statement).to_owned())
+        .chain(
+            REFUSALS_THAT_LOSE_THE_TABLE
+                .iter()
+                .map(|(_, statement, _)| (*statement).to_owned()),
+        )
+        .collect();
+    statements.extend(
+        missing_and_taken_names()
+            .into_iter()
+            .map(|(statement, _, _)| statement),
+    );
+    statements
+}
+
+#[test]
+fn a_name_the_table_lacks_or_has_is_never_a_failure_on_a_table_kilit_does_not_know() {
+    // Missing (no --schema) and Lost (a statement kilit cannot read changed
+    // it): kilit does not know the names, so it cannot say 1060, 1054, 1061
+    // or 1050. The answer may be unknown or what every table shares, never
+    // a failure.
+    let lose = "ALTER TABLE orders FROBNICATE x;\n";
+    let mut problems = Vec::new();
+    for statement in every_name_refusal_statement() {
+        for (state, dump, prefix) in [
+            ("missing", None, ""),
+            ("lost", Some(TABLES_WITH_NAMES_DUMP), lose),
+        ] {
+            let run = run_files_on_both_servers(dump, &[&format!("{prefix}{statement};")]);
+            let answer = run.last_answer();
+            if answer.starts_with("fails") || run.last_impact() == Impact::Fails {
+                problems.push(format!("{state}: {statement}: {answer}"));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn a_forced_algorithm_or_lock_does_not_make_a_refused_name_a_runs_answer() {
+    // Forced variants are answered from the lab's run of exactly that
+    // variant, but only for a statement MySQL accepts; a refused name stays
+    // unknown whatever is forced.
+    let mut problems = Vec::new();
+    let alters = REFUSALS_THAT_KEEP_THE_TABLE
+        .iter()
+        .map(|(_, statement, _)| *statement)
+        .chain(
+            REFUSALS_THAT_LOSE_THE_TABLE
+                .iter()
+                .map(|(_, statement, _)| *statement),
+        )
+        .filter(|statement| statement.starts_with("ALTER TABLE"));
+    for statement in alters {
+        for forced in [
+            ", ALGORITHM=INSTANT",
+            ", ALGORITHM=INPLACE",
+            ", ALGORITHM=COPY",
+            ", ALGORITHM=INPLACE, LOCK=NONE",
+            ", LOCK=NONE",
+        ] {
+            let run = run_on_dump(TABLES_WITH_NAMES_DUMP, &format!("{statement}{forced};"));
+            if run.answers()[0] != "unknown" || run.impacts()[0] != Impact::Unknown {
+                problems.push(format!(
+                    "{statement}{forced}: {} / {:?}",
+                    run.answers()[0],
+                    run.impacts()[0]
+                ));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// A table as mysqldump writes it: an automatic foreign key name
+/// (`ac_ibfk_1`), a CHECK on a string written `_utf8mb4''`, a capital
+/// letter in a column's type, and a version comment on a NOT ENFORCED CHECK.
+const MYSQLDUMP_STYLE_DUMP: &str = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `ac` (
+  `id` int NOT NULL,
+  `uid` bigint unsigned DEFAULT NULL,
+  `note` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `uid` (`uid`),
+  CONSTRAINT `ac_ibfk_1` FOREIGN KEY (`uid`) REFERENCES `users` (`id`),
+  CONSTRAINT `ac_chk_1` CHECK ((`id` > 0)),
+  CONSTRAINT `ac_note` CHECK ((`note` <> _utf8mb4'')) /*!80016 NOT ENFORCED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+
+#[test]
+fn a_table_copied_with_like_from_a_mysqldump_table_has_no_foreign_key_and_renamed_checks() {
+    // By hand: the copy of ac has KEY uid, no foreign key (ac_ibfk_1 is not
+    // there), and CHECKs b_chk_1 (id > 0) and b_chk_2 (note <> '').
+    let run = run_on_dump(
+        MYSQLDUMP_STYLE_DUMP,
+        "CREATE TABLE `b` LIKE `ac`;
+         ALTER TABLE `b` DROP FOREIGN KEY `ac_ibfk_1`;
+         ALTER TABLE `b` ADD INDEX `uid` (`id`);
+         ALTER TABLE `b` DROP CHECK `ac_note`;
+         ALTER TABLE `b` DROP CHECK `b_chk_2`;",
+    );
+    assert_eq!(run.answers()[1], "unknown");
+    assert!(run.reason(1).contains("1091"), "{}", run.reason(1));
+    assert_eq!(run.answers()[2], "unknown");
+    assert!(run.reason(2).contains("1061"), "{}", run.reason(2));
+    assert_eq!(run.answers()[3], "unknown");
+    assert_eq!(run.answers()[4], INSTANT);
+    // The source still has its foreign key under the automatic name.
+    let source = run_on_dump(
+        MYSQLDUMP_STYLE_DUMP,
+        "ALTER TABLE `ac` DROP FOREIGN KEY `ac_ibfk_1`;",
+    );
+    assert_ne!(source.last_answer(), "unknown");
+}
+
+#[test]
+fn a_mysqldump_statement_in_capitals_with_quoted_names_gets_the_same_refusals() {
+    // The statements as a tool writes them: capital letters, backticks.
+    for (statement, code) in [
+        (
+            "ALTER TABLE `orders` ADD COLUMN `note` VARCHAR(50) NULL;",
+            "1060",
+        ),
+        ("ALTER TABLE `orders` MODIFY COLUMN `zzz` INT NULL;", "1054"),
+        (
+            "ALTER TABLE `orders` ADD INDEX `ix_amount` (`note`);",
+            "1061",
+        ),
+        (
+            "ALTER TABLE `orders` ADD CONSTRAINT `orders_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`);",
+            "1826",
+        ),
+        ("ALTER TABLE `orders` ADD PRIMARY KEY (`amount`);", "1068"),
+    ] {
+        let run = run_on_dump(TABLES_WITH_NAMES_DUMP, statement);
+        assert_eq!(run.answers()[0], "unknown", "{statement}");
+        assert!(
+            run.reason(0).contains(code),
+            "{statement}: {}",
+            run.reason(0)
+        );
+    }
+}
+
+// Inputs kilit once followed wrongly. Facts: by hand on MySQL 8.0.46 and
+// 8.4.13 (the same on both).
+
+/// The statement at `at` is not a measured answer that lets writes continue
+/// or wait, not a table created here and not a measured failure.
+fn assert_not_a_measured_answer(run: &FilesRun, at: usize, what: &str) {
+    assert!(
+        !matches!(
+            run.impacts()[at],
+            Impact::WritesContinue | Impact::WritesWait | Impact::NewTable | Impact::Fails
+        ),
+        "{what}: {} / {:?}",
+        run.answers()[at],
+        run.impacts()[at]
+    );
+}
+
+/// No unknown statement of `run` names error `code` in its reason.
+fn assert_no_reason_names(run: &FilesRun, code: &str, what: &str) {
+    for (at, finding) in run.findings.iter().enumerate() {
+        if let Prediction::Unknown { reason, .. } = &finding.prediction {
+            assert!(
+                !reason.contains(code),
+                "{what}: statement {at} names {code}: {reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_temporary_table_with_the_name_a_rename_goes_to_is_no_clash_and_the_old_name_is_gone() {
+    // CREATE TEMPORARY TABLE x; RENAME TABLE users TO x is accepted (RENAME
+    // TABLE does not see the temporary x), and a later ALTER TABLE users is
+    // error 1146: never a measured answer.
+    for rename in ["RENAME TABLE users TO x;", "ALTER TABLE users RENAME TO x;"] {
+        let run = run_on_dump(
+            USERS_AND_ORDERS_DUMP,
+            &format!(
+                "CREATE TEMPORARY TABLE x (id INT PRIMARY KEY);
+                 {rename}
+                 ALTER TABLE users ADD COLUMN c INT NULL;"
+            ),
+        );
+        assert_no_reason_names(&run, "1050", rename);
+        assert_eq!(run.last_answer(), "unknown", "{rename}");
+        assert_not_a_measured_answer(&run, 2, rename);
+    }
+}
+
+#[test]
+fn a_temporary_table_moved_onto_a_base_name_or_a_copy_beside_a_temporary_name_is_no_clash() {
+    // ALTER TABLE t3 RENAME TO users with a temporary t3 and a base users is
+    // accepted; CREATE TABLE b LIKE orders with only a temporary b is
+    // accepted. Neither is error 1050.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "CREATE TEMPORARY TABLE t3 (id INT PRIMARY KEY);
+         ALTER TABLE t3 RENAME TO users;",
+    );
+    assert_no_reason_names(&run, "1050", "t3 to users");
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "CREATE TEMPORARY TABLE b (id INT PRIMARY KEY);
+         CREATE TABLE b LIKE orders;",
+    );
+    assert_no_reason_names(&run, "1050", "LIKE beside a temporary b");
+    assert_eq!(run.answers()[1], "not checked");
+}
+
+#[test]
+fn a_foreign_key_and_its_column_dropped_in_one_alter_leave_no_column_for_an_index() {
+    // By hand: DROP CONSTRAINT orders_user_id_foreign, DROP COLUMN user_id is
+    // accepted, so ADD INDEX ix_u (user_id) is error 1072. Not writes
+    // continue, and not the 1828 of a key that is gone.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_WITH_FK_DUMP,
+        "ALTER TABLE orders DROP CONSTRAINT orders_user_id_foreign, DROP COLUMN user_id;
+         ALTER TABLE orders ADD INDEX ix_u (user_id);",
+    );
+    assert_no_reason_names(&run, "1828", "named key");
+    assert_not_a_measured_answer(&run, 1, "ADD INDEX on the dropped column");
+    assert_ne!(run.answers()[1], FAILS_1828);
+}
+
+#[test]
+fn an_unnamed_key_dropped_by_its_automatic_name_with_its_column_gives_no_measured_index() {
+    // By hand: DROP FOREIGN KEY o2_ibfk_1, DROP COLUMN user_id is accepted;
+    // the later ADD INDEX ix_u (user_id) is error 1072. kilit may lose the
+    // table; it never gives a measured runs answer.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "CREATE TABLE o2 (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, \
+         amount INT NOT NULL, FOREIGN KEY (user_id) REFERENCES users (id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+         ALTER TABLE o2 DROP FOREIGN KEY o2_ibfk_1, DROP COLUMN user_id;
+         ALTER TABLE o2 ADD INDEX ix_u (user_id);",
+    );
+    assert_not_a_measured_answer(&run, 2, "ADD INDEX on the dropped column");
+    assert_ne!(run.answers()[2], FAILS_1828);
+}
+
+#[test]
+fn a_swap_of_a_column_a_check_uses_is_refused_with_3959_and_the_table_is_unchanged() {
+    // By hand: with CHECK (amount > 0), both swaps fail with 3959 and change
+    // nothing, so RENAME COLUMN amount TO total still fails with 3959.
+    let dump = "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `amount` int NOT NULL,
+  `note` varchar(50) DEFAULT NULL,
+  `extra` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ix_amount` (`amount`),
+  CONSTRAINT `orders_amount_check` CHECK ((`amount` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+    for swap in [
+        "ALTER TABLE orders CHANGE amount note INT NOT NULL, CHANGE note amount VARCHAR(50) NULL;",
+        "ALTER TABLE orders RENAME COLUMN amount TO note, RENAME COLUMN note TO amount;",
+    ] {
+        let run = run_on_dump(
+            dump,
+            &format!("{swap}\nALTER TABLE orders RENAME COLUMN amount TO total;"),
+        );
+        assert_not_a_measured_answer(&run, 0, swap);
+        assert_eq!(run.last_answer(), "fails with error 3959", "{swap}");
+    }
+}
+
+#[test]
+fn a_swap_of_a_column_a_generated_column_uses_is_never_followed() {
+    // By hand: RENAME COLUMN a TO c, RENAME COLUMN b TO a with g AS (a + 1)
+    // is error 3108. The table is as it was: renaming a is still refused (or
+    // unknown), never a measured INSTANT as if a were a free column.
+    let dump = "CREATE TABLE `o` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  `g` int GENERATED ALWAYS AS ((`a` + 1)) VIRTUAL,
+  PRIMARY KEY (`id`),
+  KEY `ix_a` (`a`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+    let run = run_on_dump(
+        dump,
+        "ALTER TABLE o RENAME COLUMN a TO c, RENAME COLUMN b TO a;
+         ALTER TABLE o DROP COLUMN a;
+         ALTER TABLE o RENAME COLUMN a TO c;",
+    );
+    assert_not_a_measured_answer(&run, 0, "the swap");
+    assert_ne!(run.answers()[2], INSTANT);
+    assert_not_a_measured_answer(&run, 2, "rename of the generated column's source");
+    assert_not_a_measured_answer(&run, 1, "drop of the generated column's source");
+}
+
+#[test]
+fn clauses_are_resolved_against_the_names_the_statement_leaves_so_these_are_unknown_and_not_followed()
+ {
+    // By hand: each is refused (1072, 1072, 1054, 1054), so the table is
+    // unchanged and ADD COLUMN of the column that the "followed" reading
+    // would have removed or renamed is not a free name.
+    for (statement, column) in [
+        (
+            "ALTER TABLE orders ADD INDEX ix (note), DROP COLUMN note",
+            "note",
+        ),
+        (
+            "ALTER TABLE orders CHANGE user_id uid BIGINT UNSIGNED NOT NULL, \
+             ADD CONSTRAINT fk_u FOREIGN KEY (user_id) REFERENCES users (id)",
+            "user_id",
+        ),
+        (
+            "ALTER TABLE orders DROP COLUMN note, ADD CONSTRAINT ck CHECK (note <> '')",
+            "note",
+        ),
+        (
+            "ALTER TABLE orders ADD COLUMN x INT AFTER note, DROP COLUMN note",
+            "note",
+        ),
+    ] {
+        let run = run_on_dump(
+            USERS_AND_ORDERS_WITH_FK_DUMP,
+            &format!("{statement};\nALTER TABLE orders ADD COLUMN {column} INT NULL;"),
+        );
+        assert_eq!(run.answers()[0], "unknown", "{statement}");
+        assert_ne!(run.answers()[1], INSTANT, "{statement}");
+        assert_not_a_measured_answer(&run, 1, statement);
+    }
+}
+
+#[test]
+fn a_rename_beside_a_column_placed_after_the_new_name_is_accepted_and_not_refused_with_1054() {
+    // By hand: RENAME COLUMN note TO memo, ADD COLUMN y INT AFTER memo is
+    // accepted on both servers.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_WITH_FK_DUMP,
+        "ALTER TABLE orders RENAME COLUMN note TO memo, ADD COLUMN y INT AFTER memo;",
+    );
+    assert_no_reason_names(&run, "1054", "rename and AFTER the new name");
+}
+
+#[test]
+fn a_create_table_after_a_rename_away_and_back_is_unknown_naming_1050_and_the_alter_is_on_the_live_table()
+ {
+    // The dump has orders. It is renamed away and back, so the name is the
+    // dump's table again; CREATE TABLE orders is error 1050; the ALTER is the
+    // measured copy of the live table.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "RENAME TABLE orders TO orders_tmp;
+         RENAME TABLE orders_tmp TO orders;
+         CREATE TABLE orders (id BIGINT UNSIGNED NOT NULL PRIMARY KEY, amount INT NOT NULL) DEFAULT CHARSET=utf8mb4;
+         ALTER TABLE orders MODIFY amount BIGINT NOT NULL;",
+    );
+    assert_eq!(run.answers()[2], "unknown");
+    assert!(run.reason(2).contains("1050"), "{}", run.reason(2));
+    assert_eq!(run.last_answer(), COPY);
+    assert_eq!(run.last_impact(), Impact::WritesWait);
+}
+
+#[test]
+fn a_create_table_if_not_exists_like_of_a_name_the_dump_lacks_is_not_a_new_table() {
+    // Like the plain CREATE TABLE IF NOT EXISTS: MySQL does nothing if the
+    // table is there, so the ALTER may be on a live table.
+    let plain = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "CREATE TABLE IF NOT EXISTS x1 (id BIGINT UNSIGNED NOT NULL PRIMARY KEY, amount INT NOT NULL) DEFAULT CHARSET=utf8mb4;
+         ALTER TABLE x1 MODIFY amount BIGINT NOT NULL;",
+    );
+    let like = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "CREATE TABLE IF NOT EXISTS x2 LIKE orders;
+         ALTER TABLE x2 MODIFY amount BIGINT NOT NULL;",
+    );
+    assert_eq!(like.last_answer(), plain.last_answer());
+    assert_eq!(like.last_impact(), plain.last_impact());
+    assert_ne!(like.last_impact(), Impact::NewTable);
+}
+
+#[test]
+fn dropping_a_temporary_table_made_with_like_of_an_unknown_source_does_not_say_1051() {
+    // CREATE TEMPORARY TABLE scratch LIKE missing_src may fail or not, but a
+    // DROP TEMPORARY TABLE scratch after it is not error 1051 on kilit's say.
+    for dump in [Some(USERS_AND_ORDERS_DUMP), None] {
+        let run = run_files_on_both_servers(
+            dump,
+            &["CREATE TEMPORARY TABLE scratch LIKE missing_src;\nDROP TEMPORARY TABLE scratch;"],
+        );
+        assert_no_reason_names(&run, "1051", "drop of a temporary copy");
+    }
+}
+
+#[test]
+fn an_index_named_primary_is_unknown_naming_1280_and_the_table_stays() {
+    // By hand: ADD INDEX `PRIMARY` (amount) is error 1280 on both servers.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "ALTER TABLE orders ADD INDEX `PRIMARY` (amount);
+         ALTER TABLE orders ADD COLUMN probe_col INT NULL;",
+    );
+    assert_eq!(run.answers()[0], "unknown");
+    assert!(run.reason(0).contains("1280"), "{}", run.reason(0));
+    assert_eq!(run.answers()[1], INSTANT);
+}
+
+#[test]
+fn serial_in_a_new_column_is_not_followed_and_the_table_is_lost() {
+    // No hand test shows what ADD COLUMN s SERIAL adds, so a later statement
+    // on the table is unknown, never measured.
+    let run = run_on_dump(
+        USERS_AND_ORDERS_DUMP,
+        "ALTER TABLE orders ADD COLUMN s SERIAL;
+         ALTER TABLE orders ADD COLUMN probe_col INT NULL;",
+    );
+    assert_not_a_measured_answer(&run, 0, "ADD COLUMN s SERIAL");
+    assert_eq!(run.last_answer(), "unknown");
+    assert_eq!(run.last_impact(), Impact::Unknown);
+}
+
+/// `orders` with CHECK ck2 on amount and note, CHECK orders_amount_check on
+/// amount and a generated column g that uses extra.
+const CHECKS_AND_GENERATED_DUMP: &str = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  `amount` int NOT NULL,
+  `note` varchar(50) DEFAULT NULL,
+  `extra` int DEFAULT NULL,
+  `g` int GENERATED ALWAYS AS ((`extra` + 1)) VIRTUAL,
+  PRIMARY KEY (`id`),
+  KEY `ix_amount` (`amount`),
+  KEY `orders_user_id_foreign` (`user_id`),
+  CONSTRAINT `orders_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`),
+  CONSTRAINT `ck2` CHECK ((`amount` < `note`)),
+  CONSTRAINT `orders_amount_check` CHECK ((`amount` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+
+#[test]
+fn dropping_or_renaming_a_column_a_check_uses_beside_another_clause_is_refused_and_the_table_stays()
+{
+    // By hand on MySQL 8.0.46 and 8.4.13: each statement is error 3959 (a
+    // CHECK uses the column) and changes nothing, so adding the same name
+    // afterwards is error 1060, never a measured answer.
+    for (statement, column) in [
+        (
+            "ALTER TABLE orders DROP COLUMN note, ADD COLUMN y INT NULL",
+            "note",
+        ),
+        (
+            "ALTER TABLE orders RENAME COLUMN amount TO total, ADD COLUMN y3 INT NULL",
+            "amount",
+        ),
+        (
+            "ALTER TABLE orders CHANGE amount total INT NOT NULL, ADD COLUMN y INT NULL",
+            "amount",
+        ),
+    ] {
+        let run = run_on_dump(
+            CHECKS_AND_GENERATED_DUMP,
+            &format!("{statement};\nALTER TABLE orders ADD COLUMN {column} INT NULL;"),
+        );
+        assert_not_a_measured_answer(&run, 0, statement);
+        assert_eq!(run.answers()[1], "unknown", "{statement}");
+        assert!(
+            run.reason(1).contains("1060"),
+            "{statement}: {}",
+            run.reason(1)
+        );
+    }
+}
+
+#[test]
+fn dropping_or_renaming_the_source_of_a_generated_column_beside_another_clause_is_never_followed() {
+    // By hand: error 3108 and nothing changes. The later ADD COLUMN extra is
+    // never a measured runs answer.
+    for statement in [
+        "ALTER TABLE orders DROP COLUMN extra, ADD COLUMN y2 INT NULL",
+        "ALTER TABLE orders RENAME COLUMN extra TO e2, ADD COLUMN y INT NULL",
+    ] {
+        let run = run_on_dump(
+            CHECKS_AND_GENERATED_DUMP,
+            &format!("{statement};\nALTER TABLE orders ADD COLUMN extra INT NULL;"),
+        );
+        assert_not_a_measured_answer(&run, 0, statement);
+        assert_not_a_measured_answer(&run, 1, statement);
+        assert_ne!(run.answers()[1], INSTANT, "{statement}");
+    }
+}
+
+#[test]
+fn dropping_and_adding_back_a_column_a_check_uses_is_never_followed() {
+    // By hand: DROP COLUMN amount, ADD COLUMN amount INT NULL with a CHECK
+    // on amount is refused (3959); the table is as it was.
+    let run = run_on_dump(
+        CHECKS_AND_GENERATED_DUMP,
+        "ALTER TABLE orders DROP COLUMN amount, ADD COLUMN amount INT NULL;
+         ALTER TABLE orders ADD COLUMN amount INT NULL;",
+    );
+    assert_not_a_measured_answer(&run, 0, "drop and add of amount");
+    assert_not_a_measured_answer(&run, 1, "a later ADD COLUMN amount");
+}
+
+const TWO_COLUMN_CHECK_DUMP: &str = "CREATE TABLE `orders` (
+  `id` int NOT NULL,
+  `amount` int NOT NULL,
+  `note` varchar(10) DEFAULT NULL,
+  `extra` int DEFAULT NULL,
+  `g` int GENERATED ALWAYS AS ((`extra` + 1)) VIRTUAL,
+  PRIMARY KEY (`id`),
+  CONSTRAINT `ck2` CHECK (((`amount` > 0) or (`note` is null)))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+
+#[test]
+fn a_check_the_same_alter_drops_does_not_refuse_the_drop_or_rename_of_its_columns() {
+    // By hand on MySQL 8.0.46 and 8.4.13: DROP CONSTRAINT ck2, DROP COLUMN
+    // note and DROP CONSTRAINT ck2, RENAME COLUMN amount TO total are
+    // accepted. Afterwards the other column is free: DROP COLUMN runs, so it
+    // is not the 3959 of a CHECK that is gone, and nothing fails or waits.
+    for (first, later) in [
+        (
+            "ALTER TABLE orders DROP CONSTRAINT ck2, DROP COLUMN note;",
+            "ALTER TABLE orders DROP COLUMN amount;",
+        ),
+        (
+            "ALTER TABLE orders DROP CONSTRAINT ck2, RENAME COLUMN amount TO total;",
+            "ALTER TABLE orders DROP COLUMN note;",
+        ),
+        // DROP CHECK stays unreadable beside another clause: only never a
+        // measured failure.
+        (
+            "ALTER TABLE orders DROP CHECK ck2, RENAME COLUMN amount TO total;",
+            "ALTER TABLE orders DROP COLUMN note;",
+        ),
+    ] {
+        let run = run_on_dump(TWO_COLUMN_CHECK_DUMP, &format!("{first}\n{later}"));
+        for at in 0..2 {
+            assert_ne!(run.impacts()[at], Impact::Fails, "{first}: {at}");
+            assert_ne!(run.answers()[at], "fails with error 3959", "{first}: {at}");
+        }
+        if first.contains("DROP CONSTRAINT") {
+            assert_ne!(run.impacts()[1], Impact::WritesWait, "{first}");
+            assert_ne!(run.impacts()[0], Impact::WritesWait, "{first}");
+        }
+    }
+}
+
+#[test]
+fn a_check_on_one_column_goes_with_its_column_beside_other_drops_and_the_table_stays_known() {
+    // By hand: ALTER TABLE bots DROP info, DROP seedbonus, DROP invites with
+    // CHECK (seedbonus >= 0) is accepted. The next statement is measured.
+    let dump = "CREATE TABLE `bots` (
+  `id` int NOT NULL,
+  `info` varchar(10) DEFAULT NULL,
+  `seedbonus` decimal(12,2) NOT NULL DEFAULT '0.00',
+  `invites` int NOT NULL DEFAULT '0',
+  PRIMARY KEY (`id`),
+  CONSTRAINT `check_bots_seedbonus` CHECK ((`seedbonus` >= 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+    let run = run_on_dump(
+        dump,
+        "ALTER TABLE bots DROP info, DROP seedbonus, DROP invites;
+         ALTER TABLE bots ADD COLUMN probe_col INT NULL;
+         ALTER TABLE bots ADD COLUMN seedbonus INT NULL;",
+    );
+    assert_ne!(run.answers()[0], "fails with error 3959");
+    assert_ne!(run.impacts()[0], Impact::Fails);
+    assert_eq!(run.answers()[1], INSTANT);
+    // The column is gone, so its name is free.
+    assert_eq!(run.answers()[2], INSTANT);
+}
+
+#[test]
+fn dropping_every_column_of_a_two_column_check_in_one_alter_is_refused_with_3959() {
+    // By hand: CHECK (a < b) with DROP a, DROP b in one ALTER is error 3959
+    // on both servers and the table is unchanged.
+    let dump = "CREATE TABLE `b2` (
+  `id` int NOT NULL,
+  `a` int DEFAULT NULL,
+  `b` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  CONSTRAINT `ckab` CHECK ((`a` < `b`))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+    let run = run_on_dump(
+        dump,
+        "ALTER TABLE b2 DROP a, DROP b;\nALTER TABLE b2 ADD COLUMN a INT NULL;",
+    );
+    assert_not_a_measured_answer(&run, 0, "drop a and b");
+    assert_eq!(run.answers()[1], "unknown");
+    assert!(run.reason(1).contains("1060"), "{}", run.reason(1));
 }

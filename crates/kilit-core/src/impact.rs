@@ -92,19 +92,16 @@ pub fn impacts(statements: &[Statement], findings: &[Finding]) -> Vec<Impact> {
 /// `DROP TABLE` or an `INSERT`, gives `false`.
 /// `findings` are what [`check`](crate::check) gave for `statements`.
 pub fn on_new_tables(statements: &[Statement], findings: &[Finding]) -> Vec<bool> {
-    let mut new_tables: Vec<String> = Vec::new();
     statements
         .iter()
         .zip(findings)
         .map(|(statement, finding)| {
             let changed = changed_tables(statement);
-            let on_new_table = finding.letter_case.is_none()
+            finding.letter_case.is_none()
                 && !changed.is_empty()
-                && changed.iter().all(|table| new_tables.contains(&key(table)));
-            if let Some(followed) = as_followed(statement, finding) {
-                follow(&followed, &mut new_tables);
-            }
-            on_new_table
+                && changed
+                    .iter()
+                    .all(|table| finding.created_here.iter().any(|new| new == table))
         })
         .collect()
 }
@@ -126,9 +123,11 @@ pub fn on_empty_tables(statements: &[Statement], findings: &[Finding]) -> Vec<bo
         .iter()
         .zip(findings)
         .map(|(statement, finding)| {
+            // Only a table nothing else can be using yet is empty.
             let on_empty_table = match &statement.kind {
                 StatementKind::Alter(alter) if finding.letter_case.is_none() => {
                     empty_tables.contains(&key(&alter.table))
+                        && finding.created_here.contains(&key(&alter.table))
                 }
                 _ => false,
             };
@@ -161,6 +160,7 @@ pub fn on_empty_tables(statements: &[Statement], findings: &[Finding]) -> Vec<bo
 fn may_add_rows(statement: &Statement) -> bool {
     match &statement.kind {
         StatementKind::CreateTable { .. }
+        | StatementKind::CreateTableLike { .. }
         | StatementKind::DropTable { .. }
         | StatementKind::RenameTable { .. } => false,
         StatementKind::Alter(alter) => alter
@@ -182,7 +182,7 @@ fn words(sql: &str) -> impl Iterator<Item = &str> {
 }
 
 /// The tables a statement changes, as they are named before it runs.
-fn changed_tables(statement: &Statement) -> Vec<&str> {
+pub(crate) fn changed_tables(statement: &Statement) -> Vec<&str> {
     match &statement.kind {
         StatementKind::Alter(alter) => vec![alter.table.as_str()],
         StatementKind::RenameTable { renames } => {
@@ -224,6 +224,11 @@ pub(crate) fn follow(statement: &Statement, new_tables: &mut Vec<String>) {
             table,
             if_not_exists: false,
         } => new_tables.push(key(&table.name)),
+        StatementKind::CreateTableLike {
+            name,
+            if_not_exists: false,
+            ..
+        } => new_tables.push(key(name)),
         StatementKind::DropTable { tables } => {
             new_tables.retain(|table| !tables.iter().any(|dropped| key(dropped) == *table));
         }
@@ -631,6 +636,100 @@ mod tests {
                  ALTER TABLE events_old ADD INDEX events_old_n (n);"
             ),
             [false, false, true, true, true]
+        );
+    }
+
+    // Which tables are new follows the tables kilit holds.
+
+    fn impacts_in_files(schema: &Schema, files: &[&str]) -> Vec<Vec<Impact>> {
+        let results = Knowledge::built_in().server("mysql-8.4.13").unwrap();
+        let parsed: Vec<Vec<Statement>> = files.iter().map(|sql| parse(sql)).collect();
+        let sessions: Vec<&[Statement]> = parsed.iter().map(Vec::as_slice).collect();
+        let statements: Vec<Statement> = parsed.iter().flatten().cloned().collect();
+        let findings = crate::check_sessions(&sessions, schema, results);
+        let mut all = impacts(&statements, &findings).into_iter();
+        parsed
+            .iter()
+            .map(|file| all.by_ref().take(file.len()).collect())
+            .collect()
+    }
+
+    fn laravel_tables() -> Schema {
+        Schema::from_sql(include_str!("../examples/mysql-schema.sql"))
+    }
+
+    #[test]
+    fn a_table_swapped_onto_a_name_from_before_the_input_is_not_new() {
+        // The copy-and-swap pattern: after the RENAME, orders is the live
+        // table.
+        assert_eq!(
+            impacts_of(
+                "create table `orders_new` (`id` bigint unsigned not null primary key, \
+                 `coupon` varchar(255) null) default charset=utf8mb4;
+                 rename table `orders` to `orders_old`, `orders_new` to `orders`;
+                 alter table `orders` add `extra` int null;"
+            ),
+            [Impact::NotChecked, Impact::Unknown, Impact::WritesContinue]
+        );
+        // Onto a fresh name, it stays new.
+        assert_eq!(
+            impacts_of(
+                "create table `drafts` (`id` int primary key) default charset=utf8mb4;
+                 rename table `drafts` to `notes`;
+                 alter table `notes` add `extra` int null;"
+            )[2],
+            Impact::NewTable
+        );
+    }
+
+    #[test]
+    fn a_temporary_table_is_new_only_in_its_own_input_file() {
+        let files = [
+            "create temporary table `orders` (`id` int primary key) default charset=utf8mb4;
+             alter table `orders` add `extra` int null;",
+            "alter table `orders` add `coupon` varchar(255) null;",
+        ];
+        assert_eq!(
+            impacts_in_files(&laravel_tables(), &files),
+            [
+                vec![Impact::NotChecked, Impact::NewTable],
+                vec![Impact::WritesContinue]
+            ]
+        );
+        // The metadata lock warning names it in the next file.
+        let results = Knowledge::built_in().server("mysql-8.4.13").unwrap();
+        let parsed: Vec<Vec<Statement>> = files.iter().map(|sql| parse(sql)).collect();
+        let sessions: Vec<&[Statement]> = parsed.iter().map(Vec::as_slice).collect();
+        let statements: Vec<Statement> = parsed.iter().flatten().cloned().collect();
+        let findings = crate::check_sessions(&sessions, &laravel_tables(), results);
+        let locked = crate::locked_tables(&statements, &findings);
+        assert!(locked[1].is_empty());
+        assert_eq!(locked[2], ["orders"]);
+    }
+
+    #[test]
+    fn a_create_table_of_a_dump_table_makes_no_new_table() {
+        let dump = Schema::from_dump(include_str!("../examples/mysql-schema.sql"));
+        assert_eq!(
+            impacts_in_files(
+                &dump,
+                &[
+                    "create table `orders` (`id` int primary key) default charset=utf8mb4;
+                   alter table `orders` add `extra` int null;"
+                ]
+            ),
+            [vec![Impact::Unknown, Impact::WritesContinue]]
+        );
+    }
+
+    #[test]
+    fn a_table_created_like_another_is_new() {
+        assert_eq!(
+            impacts_of(
+                "create table `orders_copy` like `orders`;
+                 alter table `orders_copy` add `extra` int null;"
+            ),
+            [Impact::NotChecked, Impact::NewTable]
         );
     }
 }

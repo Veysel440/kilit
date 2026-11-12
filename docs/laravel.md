@@ -33,12 +33,13 @@ does so only when no migration has run yet, and never under `--pretend`.
 Run both commands against a database that already has production's migrations
 applied. The `migrations` table decides which migrations are pending: on a
 fresh database `migrate --pretend` prints every migration, `CREATE TABLE`
-statements included, and kilit takes the later `ALTER`s for changes to new
-tables and exits 0. Load production's schema dump into the database with the
-`mysql` client first; Laravel's dump holds the `migrations` rows, so
-`--pretend` then prints only the pending migrations. `migrate --pretend`
-creates the `migrations` table when the database has none, so do not point it
-at a database you do not want to touch.
+statements included. With `--schema`, kilit answers `UNKNOWN` for a `CREATE
+TABLE` of a table the dump has (MySQL refuses it with error 1050), keeps the
+dump's table, and counts such statements in the header. Load production's
+schema dump into the database with the `mysql` client first; Laravel's dump
+holds the `migrations` rows, so `--pretend` then prints only the pending
+migrations. `migrate --pretend` creates the `migrations` table when the
+database has none, so do not point it at a database you do not want to touch.
 
 Run `php artisan schema:dump` first and pass the file. Without `--schema`,
 kilit does not know the tables the migration does not create. A change that
@@ -161,6 +162,12 @@ note to the first read of each migration: `select`, `show`, `describe`, `desc`,
 `explain`, `with`, `table` or `values`. Answers and the exit status do not
 change. In JSON the note is in that statement's `notes`. A later read in the
 same migration gets a one-line `read (not checked)` entry.
+
+A migration guarded with `Schema::hasColumn()` or `Schema::hasTable()` prints
+the guarded `ALTER` or `CREATE TABLE`, because the read returns nothing, while
+the real run skips it when the column or table is there. When the printed
+statement adds a column the table has, or creates a table the dump has, kilit
+answers `UNKNOWN` and names error 1060 or 1050. It keeps the table as it was.
 
 ## Foreign key actions and `fullText()`
 

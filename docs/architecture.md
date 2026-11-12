@@ -169,6 +169,21 @@ the notes list the candidates. A foreign key of a table kilit does not know may
 point at a Known table; kilit remembers such keys, so that dropping an index
 or changing a column of the parent is `UNKNOWN` too.
 
+Each session also keeps its own temporary tables. `DROP TEMPORARY TABLE` and
+`DROP TABLE` see them first, `RENAME TABLE` does not, and a new input file
+starts with the base tables back. A table counts as created in the input only
+when a `CREATE TABLE` of the input made it: a table of the dump, or one a
+`RENAME` put on a name from before the input, does not. `CREATE TABLE` of a
+dump table is refused and the dump's table stays. `CREATE TABLE ... LIKE`
+copies the source table's definition except its foreign keys. When a `RENAME
+TABLE` renames a parent, the foreign keys that point at it follow.
+
+One `ALTER TABLE` is resolved in a step of its own. Every clause is read
+against the names the table had before the statement, so a swap of two column
+names or `DROP x` with `ADD x` is followed; keys, `CHECK` constraints and
+`AFTER` are then resolved against the names the statement leaves. A shape the
+step cannot follow loses the table.
+
 A statement that fails as measured does not change the schema. Any other
 answer applies the statement. An `UNKNOWN` statement is followed as if it ran,
 or loses its table when kilit cannot read it.

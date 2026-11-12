@@ -21,8 +21,8 @@ use crate::parse::REJECTED_BY;
 use crate::results::{Server, Variant, Verdict, Writes};
 use crate::row;
 use crate::schema::{
-    CheckTarget, ConstraintKind, Gone, GoneHow, InAnotherCase, Role, Schema, TableState,
-    creates_temporary, has_descending, names_foreign_key_index, same_in_any_case,
+    CheckTarget, ConstraintKind, Gone, GoneHow, InAnotherCase, Like, Resolution, Role, Schema,
+    TableState, creates_temporary, has_descending, names_foreign_key_index, same_in_any_case,
     with_table_renamed,
 };
 use crate::statement::{
@@ -51,6 +51,17 @@ pub struct Finding {
     /// What kilit knew of the table the statement is on (see [`table_of`])
     /// right before the statement.
     pub table_state: Option<TableSeen>,
+    /// The tables the statement changes or names (as the metadata lock
+    /// warning counts them) that an earlier statement of the input created,
+    /// as written: nothing else can be using them yet. See
+    /// [`Schema::created`].
+    pub created_here: Vec<String>,
+    /// The input file (session, counting from 0) whose statement created
+    /// the table the statement is on, when it is one of `created_here`.
+    pub created_in: Option<usize>,
+    /// The statement is a CREATE TABLE of a table the `--schema` dump has,
+    /// which MySQL refuses: see [`Schema::creates_a_dump_table`].
+    pub creates_a_dump_table: bool,
 }
 
 /// What kilit knows of a table at a statement.
@@ -70,6 +81,7 @@ pub fn table_of(statement: &Statement) -> Option<&str> {
     match &statement.kind {
         StatementKind::Alter(alter) => Some(&alter.table),
         StatementKind::CreateTable { table, .. } => Some(&table.name),
+        StatementKind::CreateTableLike { name, .. } => Some(name),
         StatementKind::DropTable { tables } => match tables.as_slice() {
             [table] => Some(table),
             _ => None,
@@ -1818,6 +1830,25 @@ pub fn check_files(
                 TableState::Missing => TableSeen::Unseen,
             });
             let in_another_case = schema.in_another_case(statement);
+            let creates_a_dump_table = schema.creates_a_dump_table(statement);
+            let mut created_here: Vec<String> = Vec::new();
+            if schema.has_created() {
+                for name in crate::impact::changed_tables(statement)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .chain(crate::metadata_lock::named_tables(
+                        &statement.kind,
+                        &statement.sql,
+                    ))
+                {
+                    if schema.created(&name).is_some() && !created_here.contains(&name) {
+                        created_here.push(name);
+                    }
+                }
+            }
+            let created_in = table_of(statement)
+                .and_then(|name| schema.created(name))
+                .map(|created| created.session);
             let (prediction, letter_case) = check_one(
                 statement,
                 in_another_case,
@@ -1833,6 +1864,9 @@ pub fn check_files(
                 server_dependent: agreements.server_dependent,
                 letter_case,
                 table_state,
+                created_here,
+                created_in,
+                creates_a_dump_table,
             });
         }
     }
@@ -2132,11 +2166,54 @@ fn created_fulltext_index(statement: &Statement, prediction: Prediction) -> Pred
     }
 }
 
+/// Whether foreign_key_checks is on, as set or as the server starts.
+fn keys_checked(session: &Session) -> bool {
+    matches!(
+        session.foreign_key_checks,
+        Setting::On | Setting::ServerDefault
+    )
+}
+
+/// An ALTER that drops a foreign key's column beside other clauses, which
+/// MySQL refuses with 1828 with the checks on: with them off or unclear,
+/// kilit does not know what it does.
+fn drops_key_column_unchecked(
+    statement: &Statement,
+    schema: &Schema,
+    session: &Session,
+) -> Option<(String, String, Option<Engine>)> {
+    let StatementKind::Alter(alter) = &statement.kind else {
+        return None;
+    };
+    if keys_checked(session) {
+        return None;
+    }
+    let TableState::Known(table) = schema.table(&alter.table) else {
+        return None;
+    };
+    match schema.resolve(table, alter) {
+        Resolution::Refused { code: 1828, why } => Some((
+            alter.table.clone(),
+            format!(
+                "line {}: {}, with foreign_key_checks off or unclear",
+                statement.line,
+                why.split(", and MySQL refuses").next().unwrap_or(&why)
+            ),
+            table.engine.clone(),
+        )),
+        _ => None,
+    }
+}
+
 /// Moves the tables past `statement`, which kilit answered `prediction`,
 /// unless MySQL may refuse it for the table's keys.
 fn go_on(schema: &mut Schema, statement: &Statement, prediction: &Prediction, session: &Session) {
     if let Some((table, reason, engine, unclear)) = options_kilit_cannot_follow(statement, schema) {
         schema.lose_table(&table, reason, engine, unclear);
+    } else if let Some((table, reason, engine)) =
+        drops_key_column_unchecked(statement, schema, session)
+    {
+        schema.lose_table(&table, reason, engine, false);
     } else if let Some(rewritten) = rewritten(statement, schema, session) {
         match rewritten {
             // MySQL refuses the statement: the tables stay as they were.
@@ -2473,13 +2550,54 @@ fn predict_kind<'r>(
                     .join(", ")
             ))
         }
+        StatementKind::CreateTable { table, .. } if schema.creates_a_dump_table(statement) => {
+            let there = if schema.dump_has(&table.name) {
+                format!("the --schema dump has {} already", table.name)
+            } else {
+                format!(
+                    "a statement before this one puts a table {} there",
+                    table.name
+                )
+            };
+            unknown(format!(
+                "{there}, and MySQL refuses CREATE TABLE of a table that is there (error 1050, \
+                 by hand on MySQL 8.0.46 and 8.4.13), so kilit keeps that table; run migrate \
+                 --pretend on a database that has production's migrations, or the dump is of \
+                 another database; a migration that checks Schema::hasTable() prints the CREATE \
+                 where it would skip it"
+            ))
+        }
         StatementKind::CreateTable { .. } => {
             not_checked("creates a new table; no existing rows are touched")
+        }
+        StatementKind::CreateTableLike { source, .. } => match schema.like(statement) {
+            Like::Creates(_) | Like::Nothing => not_checked(format!(
+                "creates a new table like {source}; no existing rows are touched"
+            )),
+            Like::Refused(why) | Like::Lost(why) => unknown(why),
+        },
+        StatementKind::DropTable { tables }
+            if crate::parse::drops_temporary_table(&statement.sql)
+                && !crate::schema::drops_if_exists(&statement.sql)
+                && tables.iter().any(|name| !schema.has_temporary(name)) =>
+        {
+            let name = tables
+                .iter()
+                .find(|name| !schema.has_temporary(name))
+                .map_or("", String::as_str);
+            unknown(format!(
+                "no statement of this input file creates a temporary table {name}, and without \
+                 one MySQL refuses DROP TEMPORARY TABLE (error 1051, by hand on MySQL 8.0.46 and \
+                 8.4.13) and drops nothing; each input file runs in a session of its own"
+            ))
         }
         StatementKind::DropTable { .. } => not_checked(
             "drops tables with all their rows; kilit checks locks and copies, not lost data",
         ),
-        StatementKind::RenameTable { .. } => unknown("renaming tables has not been measured yet"),
+        StatementKind::RenameTable { renames } => match schema.rename_refused(renames) {
+            Some(why) => unknown(why),
+            None => unknown("renaming tables has not been measured yet"),
+        },
         StatementKind::Other => not_checked("not a schema change"),
         StatementKind::Unparsed { error, .. } => unknown(error.as_str()),
     }
@@ -3537,6 +3655,20 @@ fn predict<'r>(
     results: &'r ServerResults,
     agreements: &mut Agreements<'r>,
 ) -> Prediction {
+    // A name the known table lacks or has already, and clauses that name
+    // one column: what MySQL makes of the names.
+    if let TableState::Known(table) = schema.table(&alter.table) {
+        match schema.resolve(table, alter) {
+            Resolution::Refused { code: 1828, why } if !keys_checked(session) => {
+                return unknown(format!(
+                    "{}, with foreign_key_checks off or unclear, which kilit has not measured",
+                    why.split(", and MySQL refuses").next().unwrap_or(&why)
+                ));
+            }
+            Resolution::Refused { why, .. } | Resolution::Lost(why) => return unknown(why),
+            Resolution::Runs(_) => {}
+        }
+    }
     let operation = match alter.operations.as_slice() {
         [operation] => operation,
         [] => return unknown("the statement has no change kilit understands"),
@@ -4975,7 +5107,8 @@ fn fulltext_shape(table: &Table, index: &Index) -> Result<(), String> {
 /// MySQL refuses that MODIFY or CHANGE (error 1830, by hand on MySQL 8.0.46
 /// and 8.4.13), and the table stays as it was.
 fn sets_to_null<'t>(table: &'t Table, old_name: &str, column: &Column) -> Option<&'t ForeignKey> {
-    if column.nullable != Some(false) {
+    // An inline PRIMARY KEY makes it NOT NULL too.
+    if column.nullable != Some(false) && !crate::schema::inline_primary_key(column) {
         return None;
     }
     table.foreign_keys.iter().find(|key| {
@@ -5027,7 +5160,7 @@ fn refused_by_mysql(statement: &Statement, schema: &Schema) -> Option<Rewritten>
             let (after, added) = match alter.operations.as_slice() {
                 [Operation::AddIndex(_)] => (Cow::Borrowed(table), None),
                 [Operation::AddForeignKey(key)] => (Cow::Borrowed(table), Some(key)),
-                _ => match crate::schema::table_after(table, alter) {
+                _ => match crate::schema::table_after(schema, table, alter) {
                     Ok(after) => (Cow::Owned(after), None),
                     // MySQL may refuse it, and kilit cannot tell how the
                     // clauses leave the table: it stops trusting the table.
@@ -10823,7 +10956,9 @@ mod tests {
             SHOP,
             &format!(
                 "{uuid} SET sql_log_bin = 0; {uuid} {now} ALTER TABLE orders ADD coupon INT NULL;
-             SET sql_log_bin = 1; {uuid} {now}"
+             SET sql_log_bin = 1; {} {}",
+                uuid.replace("token", "token2"),
+                now.replace("placed_at", "placed_at2")
             ),
         )
         .iter()
@@ -11271,7 +11406,9 @@ mod tests {
         // The table never got the column, in MySQL either.
         assert_eq!(
             reason(findings[2].prediction.clone()),
-            "tokens has no column token, as far as kilit can tell"
+            "tokens has no column token that kilit knows, and MySQL refuses the statement \
+             (error 1054, by hand on MySQL 8.0.46 and 8.4.13); kilit does not answer that from \
+             its tables alone, which may be out of date"
         );
     }
 
@@ -13429,25 +13566,31 @@ mod tests {
              been measured yet"
         );
         // A name is taken across the database, in any case.
+        // By hand on MySQL 8.0.46 and 8.4.13: error 3822.
         let taken = "CREATE TABLE others (a INT, CONSTRAINT CHK CHECK (a > 0));";
         assert_eq!(
             reason(on_shop(taken, &add("amount > 0"))),
-            "others already has a CHECK constraint chk, and adding one with a name the database \
-             already has has not been measured yet"
+            "a CHECK constraint named chk is there already, and MySQL refuses the statement \
+             (error 3822, by hand on MySQL 8.0.46 and 8.4.13); kilit does not answer that from \
+             its tables alone, which may be out of date"
         );
     }
 
     #[test]
-    fn a_check_with_a_name_the_table_has_loses_the_table() {
-        // MySQL refuses it (error 3822, run by hand). kilit has no fact for
-        // that, so it gives no answer, as for a column the table already has.
+    fn a_check_with_a_name_the_table_has_is_refused_and_keeps_the_table() {
+        // By hand on MySQL 8.0.46 and 8.4.13: error 3822, and the table stays
+        // as it was. kilit gives no answer, and keeps the table.
         let predictions = predictions_with(
             &format!("{SHOP}\n{CHECK_ALONE}"),
             "ALTER TABLE orders ADD CONSTRAINT CHK_AMOUNT CHECK (amount > 1);
              ALTER TABLE orders MODIFY note VARCHAR(60) NULL;",
         );
-        assert!(reason(predictions[0].clone()).contains("already has a CHECK constraint"));
-        assert!(reason(predictions[1].clone()).starts_with("kilit lost track of this table"));
+        assert!(reason(predictions[0].clone()).contains("(error 3822, by hand"));
+        assert!(
+            matches!(predictions[1], Prediction::Measured { .. }),
+            "{:?}",
+            predictions[1]
+        );
     }
 
     #[test]
@@ -13575,32 +13718,39 @@ mod tests {
                 predictions[1]
             );
         }
-        for (setup, name, wanted) in [
-            (
-                "ALTER TABLE orders ADD CONSTRAINT same FOREIGN KEY (user_id) REFERENCES users (id);
-                 ALTER TABLE orders ADD CONSTRAINT same CHECK (amount > 0);",
-                "same",
-                "orders has several constraints named same, and MySQL 8.0.46 and 8.4.13 do not \
-                 accept DROP CONSTRAINT then",
+        // A foreign key and a CHECK of one name.
+        let setup = "ALTER TABLE orders ADD CONSTRAINT same FOREIGN KEY (user_id) REFERENCES \
+                     users (id);
+                     ALTER TABLE orders ADD CONSTRAINT same CHECK (amount > 0);";
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{setup}"),
+            &format!("ALTER TABLE orders DROP CONSTRAINT same;\n{next};"),
+        );
+        assert_eq!(
+            reason(predictions[0].clone()),
+            "orders has several constraints named same, and MySQL 8.0.46 and 8.4.13 do not \
+             accept DROP CONSTRAINT then"
+        );
+        assert!(reason(predictions[1].clone()).starts_with("kilit lost track of this table"));
+    }
+
+    #[test]
+    fn drop_constraint_of_a_check_and_a_unique_index_of_one_name_is_refused_and_keeps_the_table() {
+        // By hand on MySQL 8.0.46 and 8.4.13: error 3939, the table stays.
+        let predictions = predictions_with(
+            &format!(
+                "{SHOP}\nALTER TABLE orders ADD UNIQUE INDEX same (email);
+                 ALTER TABLE orders ADD CONSTRAINT same CHECK (amount > 0);"
             ),
-            (
-                "ALTER TABLE orders ADD UNIQUE INDEX same (email);
-                 ALTER TABLE orders ADD CONSTRAINT same CHECK (amount > 0);",
-                "same",
-                "orders has several constraints named same, and MySQL 8.0.46 and 8.4.13 do not \
-                 accept DROP CONSTRAINT then",
-            ),
-        ] {
-            let predictions = predictions_with(
-                &format!("{SHOP}\n{setup}"),
-                &format!("ALTER TABLE orders DROP CONSTRAINT {name};\n{next};"),
-            );
-            assert_eq!(reason(predictions[0].clone()), wanted, "{setup}");
-            assert!(
-                reason(predictions[1].clone()).starts_with("kilit lost track of this table"),
-                "{setup}"
-            );
-        }
+            "ALTER TABLE orders DROP CONSTRAINT same;
+             ALTER TABLE orders MODIFY note VARCHAR(60) NULL;",
+        );
+        assert!(reason(predictions[0].clone()).contains("(error 3939, by hand"));
+        assert!(
+            matches!(predictions[1], Prediction::Measured { .. }),
+            "{:?}",
+            predictions[1]
+        );
     }
 
     #[test]
@@ -13921,21 +14071,15 @@ mod tests {
         assert!(reason(predictions[0].clone()).contains("with CHANGE"));
         assert_eq!(fails_with(&predictions[1]), Ok(3959));
         assert_eq!(fails_with(&predictions[2]), Ok(3959));
-        // Dropping both columns in one statement has no answer. The constraint
-        // stays, and names columns the table no longer has.
+        // Dropping both columns in one statement: by hand on MySQL 8.0.46
+        // and 8.4.13, 3959, and the table stays as it was.
         let predictions = predictions_with(
             &format!("{SHOP}\n{CHECK_TWO}"),
             "ALTER TABLE orders DROP COLUMN amount, DROP COLUMN user_id;
-             ALTER TABLE orders ADD COLUMN amount INT NOT NULL;
-             ALTER TABLE orders DROP COLUMN amount;",
+             ALTER TABLE orders ADD COLUMN amount INT NOT NULL;",
         );
-        assert!(reason(predictions[0].clone()).starts_with("2 changes in one statement"));
-        assert_eq!(said(&predictions[1]), INSTANT_ANSWER);
-        assert_eq!(
-            reason(predictions[2].clone()),
-            "the CHECK constraint chk_amount uses user_id, a column orders does not have, as far \
-             as kilit can tell"
-        );
+        assert!(reason(predictions[0].clone()).contains("(error 3959, by hand"));
+        assert!(reason(predictions[1].clone()).contains("(error 1060, by hand"));
     }
 
     #[test]

@@ -5519,3 +5519,224 @@ fn laravel_s_full_text_index_keeps_the_lab_answer_on_a_table_the_schema_has() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Guards that Laravel prints but the real run skips, and a table
+// dropped and created again. The SQL and the reads are what Laravel 12 and
+// 13 print for `php artisan migrate --pretend` (the same on MySQL 8.0.46 and
+// 8.4.13); the real run on the same database skips the statements of a true
+// Schema::hasColumn() / Schema::hasTable() guard, and a plain
+// Schema::create() of a table that is there stops with error 1050.
+
+use kilit_core::{Impact, impacts};
+
+/// The `orders` table that `php artisan schema:dump` writes for a database
+/// whose orders has a note column.
+const ORDERS_WITH_NOTE_DUMP: &str = "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `note` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT NULL,
+  `updated_at` timestamp NULL DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+";
+
+/// The same without the note column.
+const ORDERS_WITHOUT_NOTE_DUMP: &str = "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `created_at` timestamp NULL DEFAULT NULL,
+  `updated_at` timestamp NULL DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+";
+
+// if (! Schema::hasColumn('orders', 'note')) { Schema::table('orders',
+// fn ($t) => $t->string('note')->nullable()); }
+const HAS_COLUMN_READ: &str = "select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as `collation`, is_nullable as `nullable`, column_default as `default`, column_comment as `comment`, generation_expression as `expression`, extra as `extra` from information_schema.columns where table_schema = schema() and table_name = 'orders' order by ordinal_position asc";
+const ADD_NOTE_TO_ORDERS: &str = "alter table `orders` add `note` varchar(255) null";
+
+// if (! Schema::hasTable('orders')) { Schema::create('orders', ...) }
+const HAS_TABLE_READ: &str = "select exists (select 1 from information_schema.tables where table_schema = schema() and table_name = 'orders' and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')) as `exists`";
+const CREATE_ORDERS_WITH_NOTE: &str = "create table `orders` (`id` bigint unsigned not null auto_increment primary key, `note` varchar(255) null, `created_at` timestamp null, `updated_at` timestamp null) default character set utf8mb4 collate 'utf8mb4_unicode_ci'";
+
+// Schema::dropIfExists('orders');
+const DROP_ORDERS_IF_EXISTS: &str = "drop table if exists `orders`";
+
+// A later migration: $table->integer('qty')->nullable();
+const ADD_QTY_TO_ORDERS: &str = "alter table `orders` add `qty` int null";
+
+/// What kilit says about every statement of `output` (Laravel's long form or
+/// its short form) against the dump `dump`, on both servers (the same on
+/// both, or the test fails): the answers, and the impacts.
+fn pretend_on_dump(dump: &str, output: &str) -> (Vec<String>, Vec<Impact>) {
+    let pretend = read_pretend(output).expect("the output of migrate --pretend");
+    assert!(pretend.unreadable.is_empty(), "{:?}", pretend.unreadable);
+    let statements: Vec<_> = pretend
+        .migrations
+        .into_iter()
+        .flat_map(|migration| migration.statements)
+        .collect();
+    let mut seen: Option<(Vec<String>, Vec<Impact>, Vec<String>)> = None;
+    for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+        let results = Knowledge::built_in().server(server).unwrap();
+        let findings = check(&statements, &Schema::from_dump(dump), results);
+        let impacts = impacts(&statements, &findings);
+        let answers: Vec<String> = findings
+            .iter()
+            .map(|finding| match &finding.prediction {
+                Prediction::Measured {
+                    verdict: Verdict::Fails { code, .. },
+                    ..
+                } => format!("fails with error {code}"),
+                Prediction::Measured { verdict, .. } => verdict.to_string(),
+                Prediction::Unknown { .. } => "unknown".to_owned(),
+                Prediction::NotChecked { .. } => NOT_CHECKED.to_owned(),
+                Prediction::DependsOnTable { shared, .. } => match shared {
+                    Shared::WritesWait => "depends on the table: writes wait".to_owned(),
+                    Shared::Fails => "depends on the table: fails".to_owned(),
+                },
+            })
+            .collect();
+        let reasons: Vec<String> = findings
+            .iter()
+            .map(|finding| match &finding.prediction {
+                Prediction::Unknown { reason, .. } => reason.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        match &seen {
+            None => seen = Some((answers, impacts, reasons)),
+            Some((first, first_impacts, _)) => {
+                assert_eq!(first, &answers, "{output}");
+                assert_eq!(first_impacts, &impacts, "{output}");
+            }
+        }
+    }
+    let (answers, impacts, _) = seen.unwrap();
+    (answers, impacts)
+}
+
+/// The reason of statement `at` on MySQL 8.4.13.
+fn reason_on_dump(dump: &str, output: &str, at: usize) -> String {
+    let pretend = read_pretend(output).expect("the output of migrate --pretend");
+    let statements: Vec<_> = pretend
+        .migrations
+        .into_iter()
+        .flat_map(|migration| migration.statements)
+        .collect();
+    let results = Knowledge::built_in().server("mysql-8.4.13").unwrap();
+    match &check(&statements, &Schema::from_dump(dump), results)[at].prediction {
+        Prediction::Unknown { reason, .. } => reason.clone(),
+        other => panic!("statement {at}: expected unknown, got {other:?}"),
+    }
+}
+
+/// The output of two migrations, in both forms Laravel prints.
+fn guarded_then_add_qty_migrations(first: &[&str], second: &[&str]) -> [(&'static str, String); 2] {
+    const ONE: &str = "2026_11_12_000001_guarded_orders_table";
+    const TWO: &str = "2026_11_12_000002_add_qty_to_orders_table";
+    [
+        ("long", long_form(&[(ONE, first), (TWO, second)])),
+        ("short", short_form(&[(ONE, first), (TWO, second)])),
+    ]
+}
+
+#[test]
+fn a_has_column_guarded_add_of_a_column_the_dump_has_is_unknown_naming_1060_and_the_table_is_kept()
+{
+    // The real run skips the ADD (the column is there), --pretend prints it.
+    // MySQL would refuse it with error 1060; the table is the same either
+    // way, so the next migration's ALTER is measured on the dump's table.
+    for (form, output) in guarded_then_add_qty_migrations(
+        &[HAS_COLUMN_READ, ADD_NOTE_TO_ORDERS],
+        &[ADD_QTY_TO_ORDERS],
+    ) {
+        let (answers, impacts) = pretend_on_dump(ORDERS_WITH_NOTE_DUMP, &output);
+        assert_eq!(answers, [NOT_CHECKED, "unknown", INSTANT], "{form}");
+        assert_eq!(
+            impacts,
+            [Impact::NotChecked, Impact::Unknown, Impact::WritesContinue],
+            "{form}"
+        );
+        let reason = reason_on_dump(ORDERS_WITH_NOTE_DUMP, &output, 1);
+        assert!(reason.contains("1060"), "{form}: {reason}");
+        assert!(reason.contains("hasColumn"), "{form}: {reason}");
+    }
+}
+
+#[test]
+fn a_has_column_guarded_add_of_a_column_the_dump_lacks_is_measured() {
+    // Control: the guard is true, the real run adds the column.
+    for (form, output) in guarded_then_add_qty_migrations(
+        &[HAS_COLUMN_READ, ADD_NOTE_TO_ORDERS],
+        &[ADD_QTY_TO_ORDERS],
+    ) {
+        let (answers, impacts) = pretend_on_dump(ORDERS_WITHOUT_NOTE_DUMP, &output);
+        assert_eq!(answers, [NOT_CHECKED, INSTANT, INSTANT], "{form}");
+        assert_eq!(
+            impacts,
+            [
+                Impact::NotChecked,
+                Impact::WritesContinue,
+                Impact::WritesContinue
+            ],
+            "{form}"
+        );
+    }
+}
+
+#[test]
+fn a_has_table_guarded_create_of_a_dump_table_is_unknown_naming_1050_and_the_dump_s_table_stays() {
+    // The real run skips the CREATE (the table is there), --pretend prints
+    // it. MySQL would refuse it with error 1050. The next migration alters
+    // the dump's orders, not a table created here.
+    for (form, output) in guarded_then_add_qty_migrations(
+        &[HAS_TABLE_READ, CREATE_ORDERS_WITH_NOTE],
+        &[ADD_QTY_TO_ORDERS],
+    ) {
+        let (answers, impacts) = pretend_on_dump(ORDERS_WITH_NOTE_DUMP, &output);
+        assert_eq!(answers, [NOT_CHECKED, "unknown", INSTANT], "{form}");
+        assert_eq!(
+            impacts,
+            [Impact::NotChecked, Impact::Unknown, Impact::WritesContinue],
+            "{form}"
+        );
+        let reason = reason_on_dump(ORDERS_WITH_NOTE_DUMP, &output, 1);
+        assert!(reason.contains("1050"), "{form}: {reason}");
+        assert!(reason.contains("hasTable"), "{form}: {reason}");
+    }
+}
+
+#[test]
+fn a_plain_create_of_a_dump_table_is_unknown_naming_1050() {
+    // Schema::create('orders', ...) where orders is there: the real run stops
+    // with error 1050 (SQLSTATE[42S01], FAIL).
+    let create = [CREATE_ORDERS_WITH_NOTE];
+    for (form, output) in guarded_then_add_qty_migrations(&create, &[ADD_QTY_TO_ORDERS]) {
+        let (answers, impacts) = pretend_on_dump(ORDERS_WITH_NOTE_DUMP, &output);
+        assert_eq!(answers, ["unknown", INSTANT], "{form}");
+        assert_eq!(impacts, [Impact::Unknown, Impact::WritesContinue], "{form}");
+        assert!(
+            reason_on_dump(ORDERS_WITH_NOTE_DUMP, &output, 0).contains("1050"),
+            "{form}"
+        );
+    }
+}
+
+#[test]
+fn drop_if_exists_then_create_of_a_dump_table_is_a_new_table() {
+    // Schema::dropIfExists('orders'); Schema::create('orders', ...): both run
+    // for real, and the table is new.
+    for (form, output) in guarded_then_add_qty_migrations(
+        &[DROP_ORDERS_IF_EXISTS, CREATE_ORDERS_WITH_NOTE],
+        &[ADD_QTY_TO_ORDERS],
+    ) {
+        let (answers, impacts) = pretend_on_dump(ORDERS_WITH_NOTE_DUMP, &output);
+        assert_eq!(answers, [NOT_CHECKED, NOT_CHECKED, INSTANT], "{form}");
+        assert_eq!(
+            impacts,
+            [Impact::NotChecked, Impact::NotChecked, Impact::NewTable],
+            "{form}"
+        );
+    }
+}

@@ -12,8 +12,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::charset::{Charset, canonical};
 use crate::parse::{parse, truncated_table};
 use crate::statement::{
-    Alter, Check, CheckColumns, Column, Engine, ForeignKey, Index, IndexKind, Operation, Position,
-    RowFormat, Statement, StatementKind, Table,
+    Alter, Check, CheckColumns, Column, DataType, Engine, ForeignKey, ForeignKeyAction, Index,
+    IndexKind, IntegerSize, Operation, Position, RowFormat, Statement, StatementKind, Table,
 };
 
 /// The tables kilit knows at one point of the input.
@@ -64,6 +64,24 @@ pub struct Schema {
     /// A statement kilit could not read writes REFERENCES: the keys it adds
     /// may point anywhere.
     unseen_keys_anywhere: bool,
+    /// By name, the tables a `CREATE TABLE` of the input made, which no
+    /// statement since dropped, and which no RENAME moved onto a name that
+    /// held a table from before the input. A temporary one ends with its
+    /// session. Nothing else can be using them yet.
+    created: BTreeMap<String, Created>,
+    /// By name, what a temporary table of this session hides of `created`.
+    created_hidden: BTreeMap<String, Created>,
+    /// The names the input used as tables it did not create first: it
+    /// altered, renamed, dropped or read them.
+    used: BTreeSet<String>,
+}
+
+/// A table the input created: see [`Schema::created`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Created {
+    /// The session (input file) of the `CREATE TABLE`, counting from 0.
+    pub session: usize,
+    pub temporary: bool,
 }
 
 /// A statement that took a table away from kilit's schema.
@@ -143,6 +161,9 @@ impl Schema {
         for statement in parse(sql) {
             schema.apply(&statement);
         }
+        // They are there before the migration.
+        schema.created.clear();
+        schema.used.clear();
         schema
     }
 
@@ -151,6 +172,8 @@ impl Schema {
     /// database does not have, or the dump is out of date.
     pub fn from_dump(sql: &str) -> Schema {
         let mut schema = Schema::from_sql(sql);
+        schema.created.clear();
+        schema.used.clear();
         schema.from_dump = true;
         // A table the dump itself drops is simply not in it.
         schema.gone.clear();
@@ -210,6 +233,9 @@ impl Schema {
     /// hid are seen again as they were.
     pub(crate) fn session_ends(&mut self) {
         self.sessions_ended += 1;
+        // A temporary table ends with its session, and what it hid is back.
+        self.created.retain(|_, created| !created.temporary);
+        self.created.append(&mut self.created_hidden);
         for gone in self.gone.values_mut() {
             gone.earlier_file = true;
         }
@@ -464,9 +490,322 @@ impl Schema {
         })
     }
 
+    /// Whether this session has a temporary table `name`, written exactly
+    /// so.
+    pub(crate) fn has_temporary(&self, name: &str) -> bool {
+        self.hidden_by_temporary.contains_key(name)
+    }
+
+    /// Whether the input created a table that is still new: see
+    /// [`Schema::created`].
+    pub(crate) fn has_created(&self) -> bool {
+        !self.created.is_empty()
+    }
+
+    /// The table the input created under the name `name`, written exactly
+    /// so, if it still has the name and nothing else can be using it: see
+    /// [`Schema::created`].
+    pub fn created(&self, name: &str) -> Option<Created> {
+        self.created.get(name).copied()
+    }
+
+    /// Whether `CREATE TABLE name`, without IF NOT EXISTS and not
+    /// TEMPORARY, names a table that is there, with a `--schema` dump: one
+    /// of the dump, or one a RENAME put there, but not one the input
+    /// created. MySQL refuses it (error 1050, by hand on MySQL 8.0.46 and
+    /// 8.4.13), and the table stays.
+    pub fn creates_a_dump_table(&self, statement: &Statement) -> bool {
+        match &statement.kind {
+            StatementKind::CreateTable {
+                table,
+                if_not_exists: false,
+            } => {
+                self.from_dump
+                    && self.base_there(&table.name)
+                    && !self.hidden_by_temporary.contains_key(&table.name)
+                    && !self.created.contains_key(&table.name)
+                    && !creates_temporary(&statement.sql)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a base table, not a temporary one, has the name `name`,
+    /// written exactly so, as far as kilit can tell: also one hidden by a
+    /// temporary table of the name, and one kilit lost.
+    pub(crate) fn base_there(&self, name: &str) -> bool {
+        match self.hidden_by_temporary.get(name) {
+            Some(hidden) => hidden.is_some(),
+            None => self.tables.contains_key(name),
+        }
+    }
+
+    /// What `CREATE [TEMPORARY] TABLE [IF NOT EXISTS] name LIKE source`
+    /// does, as the hand tests on MySQL 8.0.46 and 8.4.13 show: the new
+    /// table has the columns, indexes (a foreign key's index as a plain
+    /// one), engine, row format, key block size, character set and
+    /// collation of `source`, no foreign key, and its CHECK constraints
+    /// named `name_chk_1`, `name_chk_2`, ... in the order of their names in
+    /// `source`.
+    pub(crate) fn like(&self, statement: &Statement) -> Like {
+        let StatementKind::CreateTableLike {
+            name,
+            source,
+            if_not_exists,
+        } = &statement.kind
+        else {
+            return Like::Nothing;
+        };
+        let temporary = creates_temporary(&statement.sql);
+        if temporary && self.hidden_by_temporary.contains_key(name) {
+            return Like::Lost(format!(
+                "a temporary table {name} is there already, which kilit does not follow"
+            ));
+        }
+        if !temporary && self.base_there(name) {
+            return if *if_not_exists {
+                Like::Nothing
+            } else {
+                Like::Refused(refusal(&format!("a table {name} is there already"), 1050))
+            };
+        }
+        if *if_not_exists && !temporary && !self.from_dump && self.gone(name).is_none() {
+            return Like::Lost(format!(
+                "CREATE TABLE IF NOT EXISTS keeps a table {name} that no --schema shows, if \
+                 there is one"
+            ));
+        }
+        let source_table = match self.tables.get(source) {
+            Some(Entry::Known(table)) => table,
+            _ => {
+                return Like::Lost(format!(
+                    "{name} takes its columns from {source}, which kilit does not know"
+                ));
+            }
+        };
+        if temporary {
+            if source_table.row_format == Some(RowFormat::Compressed)
+                || source_table.key_block_size.is_some()
+            {
+                return Like::Refused(refusal(
+                    &format!("{source} is COMPRESSED, and the new table TEMPORARY"),
+                    3500,
+                ));
+            }
+            let fulltext = source_table
+                .indexes
+                .iter()
+                .any(|index| index.kind == IndexKind::Fulltext);
+            match source_table.engine {
+                Some(Engine::MyIsam) => {}
+                None | Some(Engine::InnoDb) if fulltext => {
+                    return Like::Refused(refusal(
+                        &format!("{source} has a FULLTEXT index, and the new table is TEMPORARY"),
+                        1796,
+                    ));
+                }
+                None | Some(Engine::InnoDb) => {}
+                _ => {
+                    return Like::Lost(format!(
+                        "{source} has an engine kilit does not know, and the new table is \
+                         TEMPORARY"
+                    ));
+                }
+            }
+            if matches!(source_table.row_format, Some(RowFormat::Unknown)) {
+                return Like::Lost(format!(
+                    "kilit cannot tell the row format of {source}, and the new table is TEMPORARY"
+                ));
+            }
+        }
+        let mut table = source_table.clone();
+        name.clone_into(&mut table.name);
+        table.foreign_keys.clear();
+        let mut checks = std::mem::take(&mut table.checks);
+        if checks
+            .iter()
+            .any(|check| check.name.as_deref().is_none_or(|name| !name.is_ascii()))
+        {
+            return Like::Lost(format!(
+                "{source} has a CHECK constraint whose name kilit cannot order as MySQL does"
+            ));
+        }
+        checks.sort_by_key(|check| {
+            check
+                .name
+                .as_deref()
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+        });
+        let prefix = generated_check_prefix(name);
+        for (number, check) in (1..).zip(&mut checks) {
+            check.name = Some(format!("{prefix}{number}"));
+        }
+        // CHECK names are the database's: one another table has may be
+        // refused, which was not hand-tested.
+        let taken = checks.iter().any(|check| {
+            self.tables.values().any(|entry| match entry {
+                Entry::Known(other) => has_name(
+                    other.checks.iter().map(|check| &check.name),
+                    check.name.as_deref().unwrap_or_default(),
+                ),
+                Entry::Lost { .. } => false,
+            })
+        });
+        if taken {
+            return Like::Lost(format!(
+                "{name} gets CHECK constraint names another table has, which kilit does not follow"
+            ));
+        }
+        table.checks = checks;
+        Like::Creates(Box::new(table))
+    }
+
+    /// Keeps [`Schema::created`] and [`Schema::used`] up to date with
+    /// `statement`, before the tables follow it.
+    fn track_created(&mut self, statement: &Statement) {
+        let session = self.sessions_ended;
+        match &statement.kind {
+            StatementKind::CreateTable {
+                table,
+                if_not_exists,
+            } => {
+                // IF NOT EXISTS does nothing when the table is there, and
+                // kilit may not know whether it is.
+                if *if_not_exists {
+                    return;
+                }
+                let name = key(&table.name);
+                let temporary = creates_temporary(&statement.sql);
+                if temporary
+                    && !self.hidden_by_temporary.contains_key(&name)
+                    && let Some(base) = self.created.remove(&name)
+                {
+                    self.created_hidden.insert(name.clone(), base);
+                }
+                self.created.insert(name, Created { session, temporary });
+            }
+            StatementKind::CreateTableLike { name, source, .. } => {
+                if !self.created.contains_key(source) {
+                    self.used.insert(key(source));
+                }
+                // IF NOT EXISTS does nothing when the table is there, and
+                // kilit may not know whether it is.
+                if let StatementKind::CreateTableLike {
+                    if_not_exists: false,
+                    ..
+                } = &statement.kind
+                    && let Like::Creates(_) = self.like(statement)
+                {
+                    let name = key(name);
+                    let temporary = creates_temporary(&statement.sql);
+                    let created = Created { session, temporary };
+                    if !temporary && self.hidden_by_temporary.contains_key(&name) {
+                        // A base table under the temporary one.
+                        self.created_hidden.insert(name, created);
+                    } else {
+                        if temporary && let Some(base) = self.created.remove(&name) {
+                            self.created_hidden.insert(name.clone(), base);
+                        }
+                        self.created.insert(name, created);
+                    }
+                }
+            }
+            StatementKind::DropTable { tables } => {
+                let temporary = crate::parse::drops_temporary_table(&statement.sql);
+                for name in tables {
+                    if self.hidden_by_temporary.contains_key(name) {
+                        // The temporary table goes, and what it hid is back.
+                        self.created.remove(name);
+                        if let Some(base) = self.created_hidden.remove(name) {
+                            self.created.insert(key(name), base);
+                        }
+                    } else if !temporary && self.created.remove(name).is_none() {
+                        self.used.insert(key(name));
+                    }
+                }
+            }
+            StatementKind::RenameTable { renames } => {
+                for rename in renames {
+                    self.move_created(&rename.from, &rename.to);
+                }
+            }
+            StatementKind::Alter(alter) => {
+                if !self.created.contains_key(&alter.table) {
+                    self.used.insert(key(&alter.table));
+                }
+                for operation in &alter.operations {
+                    if let Operation::RenameTable { new_name } = operation {
+                        self.move_created(&alter.table, new_name);
+                    }
+                }
+            }
+            StatementKind::Unparsed {
+                table: Some(name), ..
+            } => {
+                if !self.created.contains_key(name) {
+                    self.used.insert(key(name));
+                }
+            }
+            StatementKind::Other => {
+                for name in read_tables(&statement.sql) {
+                    if !self.created.contains_key(&name) {
+                        self.used.insert(name);
+                    }
+                }
+            }
+            StatementKind::Unparsed { table: None, .. } | StatementKind::Set { .. } => {}
+        }
+    }
+
+    /// A RENAME moves the table `from` to `to`: a table the input created
+    /// stays one, unless `to` held a table from before the input (the dump
+    /// has it, or the input used it without creating it first).
+    fn move_created(&mut self, from: &str, to: &str) {
+        match self.created.remove(from) {
+            Some(created) => {
+                if !self.dump_tables.contains(to) && !self.used.contains(to) {
+                    self.created.insert(key(to), created);
+                }
+            }
+            None => {
+                self.used.insert(key(from));
+            }
+        }
+    }
+
     /// Follows one statement: tables are created, changed, renamed and
     /// dropped as the statement says.
     pub fn apply(&mut self, statement: &Statement) {
+        // MySQL refuses it, and the dump's table stays.
+        if self.creates_a_dump_table(statement) {
+            return;
+        }
+        // Without a temporary table of the name, DROP TEMPORARY TABLE drops
+        // nothing (by hand on MySQL 8.0.46 and 8.4.13: error 1051, or a note
+        // with IF EXISTS), and the table of the name stays.
+        if let StatementKind::DropTable { tables } = &statement.kind
+            && crate::parse::drops_temporary_table(&statement.sql)
+            && tables
+                .iter()
+                .any(|name| !self.hidden_by_temporary.contains_key(name))
+        {
+            if drops_if_exists(&statement.sql) {
+                // The temporary ones go.
+                let temporary: Vec<String> = tables
+                    .iter()
+                    .filter(|name| self.hidden_by_temporary.contains_key(*name))
+                    .cloned()
+                    .collect();
+                if !temporary.is_empty() {
+                    let mut only = statement.clone();
+                    only.kind = StatementKind::DropTable { tables: temporary };
+                    self.apply(&only);
+                }
+            }
+            return;
+        }
+        self.track_created(statement);
         if creates_temporary(&statement.sql) {
             let name = match &statement.kind {
                 StatementKind::CreateTable { table, .. } => Some(&table.name),
@@ -525,16 +864,63 @@ impl Schema {
                 name_new_checks(&mut table);
                 self.put(key(&table.name), Entry::Known(table));
             }
+            StatementKind::CreateTableLike { name, .. } => match self.like(statement) {
+                Like::Creates(table) => {
+                    let temporary = creates_temporary(&statement.sql);
+                    if !temporary && let Some(hidden) = self.hidden_by_temporary.get_mut(name) {
+                        // The new base table is under the temporary one.
+                        *hidden = Some(Entry::Known(*table));
+                        return;
+                    }
+                    if temporary && !self.hidden_by_temporary.contains_key(name) {
+                        self.hide_for_temporary(name);
+                    }
+                    self.put(key(name), Entry::Known(*table));
+                }
+                Like::Nothing | Like::Refused(_) => {}
+                // `CREATE TABLE new LIKE old` copies old's engine and row
+                // format.
+                Like::Lost(reason) => {
+                    let StatementKind::CreateTableLike { source, .. } = &statement.kind else {
+                        return;
+                    };
+                    // A temporary table it may create ends with the session.
+                    if creates_temporary(&statement.sql)
+                        && !self.hidden_by_temporary.contains_key(name)
+                    {
+                        self.hide_for_temporary(name);
+                    }
+                    let engine = self.engine_of(source).cloned();
+                    let unclear = self.row_format_unclear_of(source);
+                    self.lose(
+                        name,
+                        format!("line {}: {reason}", statement.line),
+                        engine,
+                        unclear,
+                    );
+                }
+            },
             StatementKind::DropTable { tables } => {
                 // Comments between the words count for nothing.
                 let temporary = crate::parse::drops_temporary_table(&statement.sql);
                 for name in tables {
-                    let hid = self.hidden_by_temporary.contains_key(name);
+                    // With a temporary table of the name, DROP TABLE and DROP
+                    // TEMPORARY TABLE drop that one only, and the table it
+                    // hid is back (by hand on MySQL 8.0.46 and 8.4.13).
+                    if let Some(hidden) = self.hidden_by_temporary.remove(name) {
+                        match hidden {
+                            Some(entry) => self.put(key(name), entry),
+                            None => {
+                                self.take(&key(name));
+                            }
+                        }
+                        continue;
+                    }
                     // Without a dump, a table kilit never saw is gone too:
                     // after the statement there is none of the name, with
                     // IF EXISTS or not, unless only a temporary one went.
                     if self.take(&key(name)).is_some() || !self.from_dump {
-                        let how = if temporary || hid {
+                        let how = if temporary {
                             GoneHow::MaybeDropped
                         } else {
                             GoneHow::Dropped
@@ -552,6 +938,28 @@ impl Schema {
                 }
             }
             StatementKind::RenameTable { renames } => {
+                if self.rename_refused(renames).is_some() {
+                    return;
+                }
+                // By hand on MySQL 8.0.46 and 8.4.13, RENAME TABLE does not
+                // see temporary tables: it renames the table one hides, or
+                // fails. kilit does not follow that.
+                if renames.iter().any(|rename| {
+                    self.hidden_by_temporary.contains_key(&rename.from)
+                        || self.hidden_by_temporary.contains_key(&rename.to)
+                }) {
+                    let reason = format!(
+                        "line {}: RENAME TABLE names a temporary table, which it does not see, \
+                         and kilit does not follow that",
+                        statement.line
+                    );
+                    for rename in renames {
+                        for name in [&rename.from, &rename.to] {
+                            self.lose_under_temporary(name, &reason);
+                        }
+                    }
+                    return;
+                }
                 for rename in renames {
                     self.rename(&rename.from, &rename.to, statement.line);
                 }
@@ -622,6 +1030,7 @@ impl Schema {
                 to.clone_into(&mut table.name);
             }
             self.put(key(to), entry);
+            self.keys_follow_their_parent(from, to);
             self.gone.insert(
                 key(from),
                 Gone {
@@ -647,6 +1056,60 @@ impl Schema {
                     session: self.sessions_ended,
                 },
             );
+        }
+    }
+
+    /// Why MySQL refuses a RENAME TABLE for a name kilit's tables show: a
+    /// new name that a table has already, after the renames before it in
+    /// the statement (error 1050, by hand on MySQL 8.0.46 and 8.4.13). The
+    /// statement then renames nothing.
+    pub(crate) fn rename_refused(&self, renames: &[crate::statement::Rename]) -> Option<String> {
+        let mut moved: Vec<(&str, &str)> = Vec::new();
+        for rename in renames {
+            // RENAME TABLE does not see temporary tables.
+            let there = |name: &str| {
+                let mut there = self.base_there(name);
+                for (from, to) in &moved {
+                    if *from == name {
+                        there = false;
+                    }
+                    if *to == name {
+                        there = true;
+                    }
+                }
+                there
+            };
+            if there(&rename.to) {
+                return Some(refusal(
+                    &format!("a table {} is there already", rename.to),
+                    1050,
+                ));
+            }
+            moved.push((&rename.from, &rename.to));
+        }
+        None
+    }
+
+    /// The foreign keys that point at the table `from` point at `to` after
+    /// it is renamed: MySQL keeps them on the table, whatever its name (by
+    /// hand on MySQL 8.0.46 and 8.4.13, with RENAME TABLE and ALTER TABLE
+    /// ... RENAME TO alike). The keys of tables kilit does not know follow
+    /// too.
+    fn keys_follow_their_parent(&mut self, from: &str, to: &str) {
+        for entry in self.tables.values_mut() {
+            if let Entry::Known(table) = entry {
+                for key in &mut table.foreign_keys {
+                    if key.referenced_table == from {
+                        to.clone_into(&mut key.referenced_table);
+                    }
+                }
+            }
+        }
+        if self.pointed_at.contains(&folded(from)) {
+            self.pointed_at.insert(folded(to));
+        }
+        if self.unseen_keys_point_at.contains(&folded(from)) {
+            self.unseen_keys_point_at.insert(folded(to));
         }
     }
 
@@ -805,14 +1268,34 @@ impl Schema {
         let line = statement.line;
         // A missing table stays missing, and a lost one stays lost, with
         // what kilit can tell of a new engine or row format.
+        let resolution = match self.tables.get(&key(&alter.table)) {
+            Some(Entry::Known(table)) => self.resolve(table, alter),
+            _ => {
+                self.options_of_unknown_table(line, alter);
+                return;
+            }
+        };
+        let operations = match resolution {
+            // MySQL refuses the statement: the table stays as it was.
+            Resolution::Refused { .. } => return,
+            Resolution::Lost(why) => {
+                let (engine, unclear) = match self.tables.get(&key(&alter.table)) {
+                    Some(Entry::Known(table)) => (table.engine.clone(), row_format_unclear(table)),
+                    _ => (None, false),
+                };
+                self.lose(&alter.table, format!("line {line}: {why}"), engine, unclear);
+                return;
+            }
+            Resolution::Runs(None) => Cow::Borrowed(alter.operations.as_slice()),
+            Resolution::Runs(Some(ordered)) => Cow::Owned(ordered),
+        };
         let Some(Entry::Known(table)) = self.tables.get_mut(&key(&alter.table)) else {
-            self.options_of_unknown_table(line, alter);
             return;
         };
         // The table changes in place: an operation kilit cannot follow loses
         // it, so what the operations before that one did is never seen.
         let mut new_name = None;
-        for operation in &alter.operations {
+        for operation in operations.iter() {
             let changed = match operation {
                 Operation::RenameTable { new_name: name } => {
                     new_name = Some(name);
@@ -890,8 +1373,62 @@ impl Schema {
             }
         }
         if let Some(name) = new_name {
-            self.rename(&alter.table, name, statement.line);
+            // ALTER TABLE ... RENAME TO moves a temporary table (by hand on
+            // MySQL 8.0.46 and 8.4.13): the table it hid is back, and kilit
+            // does not follow the temporary table under its new name.
+            if let Some(hidden) = self.hidden_by_temporary.remove(&alter.table) {
+                match hidden {
+                    Some(entry) => self.put(key(&alter.table), entry),
+                    None => {
+                        self.take(&key(&alter.table));
+                    }
+                }
+                // The table of the new name, if any, is back when the
+                // session ends.
+                if !self.hidden_by_temporary.contains_key(name.as_str()) {
+                    self.hide_for_temporary(name);
+                }
+                let engine = self.engine_of(name).cloned();
+                let unclear = self.row_format_unclear_of(name);
+                self.lose(
+                    name,
+                    format!(
+                        "line {line}: a temporary table takes the name, which kilit does not \
+                         follow"
+                    ),
+                    engine,
+                    unclear,
+                );
+            } else if self.hidden_by_temporary.contains_key(name.as_str()) {
+                // A base table renamed to the name of a temporary table goes
+                // under it (by hand on MySQL 8.0.46 and 8.4.13): kilit does
+                // not follow that.
+                let reason = format!(
+                    "line {line}: a table takes the name of a temporary table, which kilit does \
+                     not follow"
+                );
+                self.lose_under_temporary(&alter.table.clone(), &reason);
+                self.lose_under_temporary(name, &reason);
+            } else {
+                self.rename(&alter.table, name, statement.line);
+            }
         }
+    }
+
+    /// kilit stops trusting the table `name`, and what a temporary table of
+    /// the name hides, until the session ends.
+    fn lose_under_temporary(&mut self, name: &str, reason: &str) {
+        if let Some(hidden) = self.hidden_by_temporary.get_mut(name) {
+            *hidden = Some(Entry::Lost {
+                reason: reason.to_owned(),
+                engine: None,
+                row_format_unclear: false,
+                in_another_case: false,
+            });
+        }
+        let engine = self.engine_of(name).cloned();
+        let unclear = self.row_format_unclear_of(name);
+        self.lose(name, reason.to_owned(), engine, unclear);
     }
 }
 
@@ -964,6 +1501,10 @@ pub(crate) fn with_table_renamed(statement: &Statement, written: &str, known: &s
                 rename(&mut key.referenced_table);
             }
         }
+        StatementKind::CreateTableLike { name, source, .. } => {
+            rename(name);
+            rename(source);
+        }
         StatementKind::DropTable { tables } => tables.iter_mut().for_each(rename),
         StatementKind::RenameTable { renames } => {
             for one in renames {
@@ -1032,6 +1573,7 @@ fn named_tables(statement: &Statement) -> Vec<(Cow<'_, str>, Role)> {
         StatementKind::Unparsed {
             table: Some(name), ..
         } => vec![named(name, Role::Unread)],
+        StatementKind::CreateTableLike { name, .. } => vec![named(name, Role::Names)],
         StatementKind::Unparsed { table: None, .. } => truncated_table(&statement.sql)
             .map(|name| (Cow::Owned(name), Role::Empties))
             .into_iter()
@@ -1041,7 +1583,7 @@ fn named_tables(statement: &Statement) -> Vec<(Cow<'_, str>, Role)> {
 }
 
 /// Whether a DROP TABLE has `IF EXISTS`, outside quotes.
-fn drops_if_exists(sql: &str) -> bool {
+pub(crate) fn drops_if_exists(sql: &str) -> bool {
     let masked = outside_quotes(sql);
     word_starts(sql, "IF").any(|start| masked[start + 2..].trim_start().starts_with("EXISTS"))
 }
@@ -1091,42 +1633,957 @@ fn merged(a: Option<Engine>, b: Option<Engine>) -> Option<Engine> {
     }
 }
 
+/// What a `CREATE TABLE ... LIKE` does: see [`Schema::like`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Like {
+    /// It creates this table.
+    Creates(Box<Table>),
+    /// It does nothing: IF NOT EXISTS, and the table is there.
+    Nothing,
+    /// MySQL refuses it, and the tables stay as they were: why, naming the
+    /// error.
+    Refused(String),
+    /// kilit cannot tell what it creates, if anything: why.
+    Lost(String),
+}
+
+/// How MySQL takes an `ALTER TABLE` on a table kilit knows, as far as the
+/// names it writes tell: every clause is taken against the table as it was
+/// before the statement (by hand on MySQL 8.0.46 and 8.4.13).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Resolution {
+    /// MySQL runs it: the changes to follow, in this order; `None` when the
+    /// order written is the one to follow.
+    Runs(Option<Vec<Operation>>),
+    /// MySQL refuses it for a name kilit's tables show, and the table stays
+    /// as it was: the error, and why.
+    Refused { code: u16, why: String },
+    /// The statement names a column kilit does not know, or names one
+    /// column in a way kilit does not follow: kilit stops trusting the
+    /// table, and says why.
+    Lost(String),
+}
+
+const BY_HAND: &str = "by hand on MySQL 8.0.46 and 8.4.13";
+
+/// A refusal for a name: what the statement asks, the error, and that
+/// kilit's tables may be out of date.
+fn refusal(what: &str, code: u16) -> String {
+    format!(
+        "{what}, and MySQL refuses the statement (error {code}, {BY_HAND}); kilit does not \
+         answer that from its tables alone, which may be out of date"
+    )
+}
+
+/// The columns a clause writes or names as columns of the table: a new
+/// name, a dropped, changed or renamed one. Index and key clauses name
+/// columns too, but only read them.
+fn named_columns(operation: &Operation) -> Vec<&str> {
+    match operation {
+        Operation::AddColumn { column, .. } | Operation::ModifyColumn { column, .. } => {
+            vec![column.name.as_str()]
+        }
+        Operation::ChangeColumn {
+            old_name, column, ..
+        } if same(old_name, &column.name) => vec![old_name.as_str()],
+        Operation::ChangeColumn {
+            old_name, column, ..
+        } => vec![old_name.as_str(), column.name.as_str()],
+        Operation::DropColumn { name } => vec![name.as_str()],
+        Operation::RenameColumn { from, to } => vec![from.as_str(), to.as_str()],
+        Operation::SetColumnDefault { column, .. } | Operation::DropColumnDefault { column } => {
+            vec![column.as_str()]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// A rename of a column: its old name, its new name.
+fn renamed(operation: &Operation) -> Option<(&str, &str)> {
+    match operation {
+        Operation::ChangeColumn {
+            old_name, column, ..
+        } if !same(old_name, &column.name) => Some((old_name, &column.name)),
+        Operation::RenameColumn { from, to } if !same(from, to) => Some((from, to)),
+        _ => None,
+    }
+}
+
+fn is_serial(column: &Column) -> bool {
+    column.data_type.to_string().eq_ignore_ascii_case("SERIAL")
+}
+
+/// A SERIAL column with nothing else written.
+fn bare_serial(column: &Column) -> bool {
+    column.nullable.is_none()
+        && column.default.is_none()
+        && !column.auto_increment
+        && column.charset.is_none()
+        && column.collation.is_none()
+        && column.comment.is_none()
+        && column.on_update.is_none()
+        && column.generated.is_none()
+        && column.other_options.is_empty()
+}
+
+/// What MySQL makes of a SERIAL column (by hand on MySQL 8.0.46 and
+/// 8.4.13): BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, with a UNIQUE index of
+/// its name.
+fn as_serial(column: &Column) -> Column {
+    Column {
+        data_type: DataType::Integer {
+            size: IntegerSize::Big,
+            unsigned: true,
+        },
+        nullable: Some(false),
+        auto_increment: true,
+        ..column.clone()
+    }
+}
+
+fn serial_index(name: &str) -> Operation {
+    Operation::AddIndex(Index {
+        name: Some(name.to_owned()),
+        kind: IndexKind::Unique,
+        columns: vec![name.to_owned()],
+    })
+}
+
+/// Whether the column definition writes PRIMARY KEY.
+pub(crate) fn inline_primary_key(column: &Column) -> bool {
+    column
+        .other_options
+        .iter()
+        .any(|option| option.eq_ignore_ascii_case("PRIMARY KEY"))
+}
+
+impl Schema {
+    /// How MySQL takes `alter` on `table`, which kilit knows: see
+    /// [`Resolution`].
+    pub(crate) fn resolve(&self, table: &Table, alter: &Alter) -> Resolution {
+        let name = &table.name;
+        let operations = &alter.operations;
+        let mut refused: Option<(u16, String)> = None;
+        let mut refuse = |code: u16, what: String| {
+            refused.get_or_insert_with(|| (code, refusal(&what, code)));
+        };
+        // Columns two clauses write (MySQL takes both against the table
+        // before the statement).
+        let mut seen: Vec<&str> = Vec::new();
+        let mut overlapping: Vec<&str> = Vec::new();
+        for operation in operations.iter().filter(|_| operations.len() > 1) {
+            let mut own: Vec<&str> = Vec::new();
+            for column in named_columns(operation) {
+                if seen.iter().any(|other| same(other, column)) {
+                    overlapping.push(column);
+                }
+                own.push(column);
+            }
+            seen.extend(own);
+        }
+        let overlaps = |column: &str| overlapping.iter().any(|other| same(other, column));
+        let has = |column: &str| table.position_of(column).is_some();
+        // A primary key the statement does not drop first.
+        let keeps_primary_key = !table.primary_key.is_empty()
+            && !operations
+                .iter()
+                .any(|operation| matches!(operation, Operation::DropPrimaryKey));
+
+        // A primary key written twice, or written inline beside a DROP
+        // PRIMARY KEY: no hand test.
+        let inline_keys = operations
+            .iter()
+            .filter(|operation| match operation {
+                Operation::ModifyColumn { column, .. } | Operation::ChangeColumn { column, .. } => {
+                    inline_primary_key(column)
+                }
+                _ => false,
+            })
+            .count();
+        let added_keys = operations
+            .iter()
+            .filter(|operation| matches!(operation, Operation::AddPrimaryKey { .. }))
+            .count();
+        let drops_key = operations
+            .iter()
+            .any(|operation| matches!(operation, Operation::DropPrimaryKey));
+        if inline_keys + added_keys > 1 || (inline_keys > 0 && drops_key) {
+            return Resolution::Lost(
+                "writes PRIMARY KEY in a column beside another primary key clause, which kilit \
+                 does not follow"
+                    .to_owned(),
+            );
+        }
+        let mut serial = false;
+        // Clause by clause, against the table before the statement.
+        for operation in operations {
+            match operation {
+                Operation::AddColumn { column, .. } if !overlaps(&column.name) => {
+                    if has(&column.name) {
+                        refuse(
+                            1060,
+                            format!(
+                                "{name} has a column {} already; under --pretend, a migration \
+                                 that checks Schema::hasColumn() prints such an ADD where the \
+                                 real run skips it, and the table is the same either way",
+                                column.name
+                            ),
+                        );
+                    } else if is_serial(column) {
+                        return Resolution::Lost(format!(
+                            "adds {} as SERIAL, which kilit does not follow",
+                            column.name
+                        ));
+                    }
+                }
+                Operation::ModifyColumn { column, .. } if !overlaps(&column.name) => {
+                    if !has(&column.name) {
+                        return Resolution::Lost(refusal(
+                            &format!("{name} has no column {} that kilit knows", column.name),
+                            1054,
+                        ));
+                    }
+                }
+                Operation::ChangeColumn {
+                    old_name, column, ..
+                } if !overlaps(old_name) && !overlaps(&column.name) => {
+                    if !has(old_name) {
+                        return Resolution::Lost(refusal(
+                            &format!("{name} has no column {old_name} that kilit knows"),
+                            1054,
+                        ));
+                    }
+                    if !same(old_name, &column.name) && has(&column.name) {
+                        return Resolution::Lost(refusal(
+                            &format!(
+                                "{name} has a column {} already, and the statement renames \
+                                 {old_name} to it",
+                                column.name
+                            ),
+                            1060,
+                        ));
+                    }
+                }
+                Operation::RenameColumn { from, to } if !overlaps(from) && !overlaps(to) => {
+                    if !has(from) {
+                        return Resolution::Lost(refusal(
+                            &format!("{name} has no column {from} that kilit knows"),
+                            1054,
+                        ));
+                    }
+                    if !same(from, to) && has(to) {
+                        return Resolution::Lost(refusal(
+                            &format!(
+                                "{name} has a column {to} already, and the statement renames \
+                                 {from} to it"
+                            ),
+                            1060,
+                        ));
+                    }
+                }
+                Operation::SetColumnDefault { column, .. } if !overlaps(column) && !has(column) => {
+                    return Resolution::Lost(refusal(
+                        &format!("{name} has no column {column} that kilit knows"),
+                        1054,
+                    ));
+                }
+                // A MyISAM table keeps no foreign key.
+                Operation::AddForeignKey(key) if table.engine != Some(Engine::MyIsam) => {
+                    if let Some(key_name) = &key.name {
+                        let taken = self.tables.values().any(|entry| match entry {
+                            Entry::Known(other) => {
+                                has_name(other.foreign_keys.iter().map(|key| &key.name), key_name)
+                            }
+                            Entry::Lost { .. } => false,
+                        });
+                        let dropped = operations.iter().any(|operation| {
+                            matches!(operation, Operation::DropForeignKey { name }
+                                if same(name, key_name))
+                        });
+                        if taken || dropped {
+                            refuse(
+                                1826,
+                                format!("a foreign key named {key_name} is there already"),
+                            );
+                        } else if table.indexes.iter().any(|index| {
+                            has_name([&index.name], key_name) && !serves(index, &key.columns)
+                        }) {
+                            // By hand only with an index that does not
+                            // serve the key.
+                            refuse(
+                                1061,
+                                format!("{name} has an index named {key_name} already"),
+                            );
+                        }
+                    }
+                }
+                // By hand: an index named PRIMARY is refused (1280).
+                Operation::AddIndex(index)
+                    if index
+                        .name
+                        .as_deref()
+                        .is_some_and(|index| index.eq_ignore_ascii_case("PRIMARY")) =>
+                {
+                    refuse(1280, "the new index is named PRIMARY".to_owned());
+                }
+                // By hand: 1091 on a table with no primary key and no
+                // UNIQUE index MySQL could take as one.
+                Operation::DropPrimaryKey
+                    if table.primary_key.is_empty()
+                        && !table
+                            .indexes
+                            .iter()
+                            .any(|index| index.kind == IndexKind::Unique) =>
+                {
+                    refuse(1091, format!("{name} has no primary key"));
+                }
+                Operation::AddPrimaryKey { .. } if keeps_primary_key => {
+                    refuse(1068, format!("{name} has a primary key already"));
+                }
+                Operation::AddCheck(check) => {
+                    if let Some(check_name) = &check.name {
+                        let taken = self.tables.values().any(|entry| match entry {
+                            Entry::Known(other) => {
+                                has_name(other.checks.iter().map(|check| &check.name), check_name)
+                            }
+                            Entry::Lost { .. } => false,
+                        });
+                        if taken {
+                            refuse(
+                                3822,
+                                format!("a CHECK constraint named {check_name} is there already"),
+                            );
+                        }
+                    }
+                }
+                Operation::DropConstraint { name: dropped }
+                    if table.constraints_named(dropped)
+                        == [ConstraintKind::Check, ConstraintKind::UniqueIndex] =>
+                {
+                    refuse(
+                        3939,
+                        format!("{dropped} names a CHECK constraint and a UNIQUE index of {name}"),
+                    );
+                }
+                // A temporary table takes the name of another temporary
+                // one only; a base table that of another base table only (by
+                // hand on MySQL 8.0.46 and 8.4.13).
+                Operation::RenameTable { new_name }
+                    if !same(new_name, name)
+                        && if self.hidden_by_temporary.contains_key(name.as_str()) {
+                            self.hidden_by_temporary.contains_key(new_name.as_str())
+                        } else {
+                            self.base_there(new_name)
+                        } =>
+                {
+                    refuse(1050, format!("a table {new_name} is there already"));
+                }
+                Operation::DropColumn { name: column } if operations.len() > 1 => {
+                    let drops_a_key = |key: &ForeignKey| {
+                        operations.iter().any(|operation| match operation {
+                            Operation::DropForeignKey { name }
+                            | Operation::DropConstraint { name } => {
+                                key.name.as_deref().is_some_and(|key| same(key, name))
+                            }
+                            _ => false,
+                        })
+                    };
+                    let drops_some_key = operations.iter().any(|operation| {
+                        matches!(
+                            operation,
+                            Operation::DropForeignKey { .. } | Operation::DropConstraint { .. }
+                        )
+                    });
+                    for key in &table.foreign_keys {
+                        if !key.columns.iter().any(|c| same(c, column)) || drops_a_key(key) {
+                            continue;
+                        }
+                        // kilit does not know the name MySQL gave a key
+                        // written without one.
+                        if key.name.is_none() && drops_some_key {
+                            return Resolution::Lost(format!(
+                                "drops {column}, a column of a foreign key without a name kilit \
+                                 knows, beside a DROP of a foreign key or constraint"
+                            ));
+                        }
+                        refuse(1828, format!("{column} is in a foreign key of {name}"));
+                    }
+                }
+                _ => {}
+            }
+            // An inline PRIMARY KEY, and SERIAL, in MODIFY and CHANGE.
+            if let Operation::ModifyColumn { column, .. } | Operation::ChangeColumn { column, .. } =
+                operation
+            {
+                let old = match operation {
+                    Operation::ChangeColumn { old_name, .. } => old_name.as_str(),
+                    _ => column.name.as_str(),
+                };
+                if inline_primary_key(column) {
+                    if keeps_primary_key {
+                        refuse(1068, format!("{name} has a primary key already"));
+                    } else if column.nullable == Some(true) {
+                        refuse(
+                            1171,
+                            format!("{} is written NULL and PRIMARY KEY", column.name),
+                        );
+                    }
+                }
+                if is_serial(column) {
+                    let keys: Vec<&ForeignKey> = table
+                        .foreign_keys
+                        .iter()
+                        .filter(|key| key.columns.iter().any(|c| same(c, old)))
+                        .collect();
+                    let sets_null = keys.iter().any(|key| {
+                        key.on_delete == Some(ForeignKeyAction::SetNull)
+                            || key.on_update == Some(ForeignKeyAction::SetNull)
+                    });
+                    let cascades = keys.iter().any(|key| {
+                        key.on_delete == Some(ForeignKeyAction::Cascade)
+                            || key.on_update == Some(ForeignKeyAction::Cascade)
+                    });
+                    let other_auto = table
+                        .columns
+                        .iter()
+                        .any(|other| other.auto_increment && !same(&other.name, old));
+                    if sets_null {
+                        refuse(
+                            1830,
+                            format!("{old} is in a foreign key that sets it to NULL"),
+                        );
+                    } else if cascades {
+                        refuse(1832, format!("{old} is in a foreign key"));
+                    } else if other_auto {
+                        refuse(1075, format!("{name} has an AUTO_INCREMENT column already"));
+                    } else if !bare_serial(column)
+                        || has_name(table.indexes.iter().map(|index| &index.name), &column.name)
+                    {
+                        return Resolution::Lost(format!(
+                            "gives {old} the type SERIAL with other options, or beside an index \
+                             named {}, which kilit does not follow",
+                            column.name
+                        ));
+                    } else {
+                        serial = true;
+                    }
+                }
+            }
+        }
+
+        // Beside other clauses, a column a CHECK constraint or a generated
+        // column uses: by hand on MySQL 8.0.46 and 8.4.13, a rename of it is
+        // refused (3959 or 3108), and so is a drop when the CHECK uses
+        // another column too; the table stays as it was. Clauses on one
+        // column twice are below.
+        if operations.len() > 1 {
+            let dropped: Vec<&str> = operations
+                .iter()
+                .filter_map(|operation| match operation {
+                    Operation::DropColumn { name } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let dropped_checks = dropped_checks(operations);
+            for operation in operations {
+                let (column, renames) = match operation {
+                    Operation::DropColumn { name } => (name.as_str(), false),
+                    _ => match renamed(operation) {
+                        Some((from, _)) => (from, true),
+                        None => continue,
+                    },
+                };
+                if overlaps(column) {
+                    continue;
+                }
+                // By hand: a CHECK constraint the statement drops counts for
+                // nothing, and MySQL drops one that uses no other column
+                // with the column; a CHECK of several columns refuses the
+                // drop of any of them, also when the statement drops them
+                // all (3959).
+                let checks = Uses {
+                    dropped_columns: dropped.clone(),
+                    dropped_checks: dropped_checks.clone(),
+                    drops: !renames,
+                };
+                match used_elsewhere(table, column, &checks) {
+                    Used::No => {}
+                    Used::ByPlainCheck if renames => refuse(
+                        3959,
+                        format!("a CHECK constraint uses {column}, which the statement renames"),
+                    ),
+                    Used::ByPlainCheck => refuse(
+                        3959,
+                        format!(
+                            "a CHECK constraint uses {column} and another column, and the \
+                             statement drops {column}"
+                        ),
+                    ),
+                    Used::Maybe => {
+                        return Resolution::Lost(format!(
+                            "drops or renames {column}, which a CHECK constraint or a generated \
+                             column uses, beside other clauses, which kilit does not follow"
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Clauses that write one column twice: MySQL takes each against the
+        // names before the statement.
+        let two_clauses = |column: &str, code: Option<u16>| {
+            let mut why = format!(
+                "names the column {column} in two of its clauses, which MySQL takes against \
+                 the names before the statement"
+            );
+            if let Some(code) = code {
+                why.push_str(&format!(
+                    "; MySQL refuses this one (error {code}, {BY_HAND})"
+                ));
+            }
+            Resolution::Lost(why)
+        };
+        let all_renames: Vec<(&str, &str)> = if operations.len() > 1 {
+            operations.iter().filter_map(renamed).collect()
+        } else {
+            Vec::new()
+        };
+        let mut drop_then_add = false;
+        let mut cycle = false;
+        for &column in &overlapping {
+            let writing: Vec<&Operation> = operations
+                .iter()
+                .filter(|operation| named_columns(operation).iter().any(|c| same(c, column)))
+                .collect();
+            let renames = writing.iter().filter(|o| renamed(o).is_some()).count();
+            let others: Vec<&&Operation> =
+                writing.iter().filter(|o| renamed(o).is_none()).collect();
+            if renames > 0 && !others.is_empty() {
+                // By hand: a MODIFY of the old name or of the new one, beside
+                // the rename, is refused with 1054.
+                if renames == 1
+                    && others
+                        .iter()
+                        .all(|o| matches!(o, Operation::ModifyColumn { .. }))
+                {
+                    refuse(
+                        1054,
+                        format!("the statement renames {column} and changes it in a MODIFY clause"),
+                    );
+                    continue;
+                }
+                return two_clauses(column, None);
+            }
+            if renames == 0 {
+                // By hand: DROP x and ADD x, in either order, drop the old x
+                // and add the new one; with no x to drop, 1091.
+                let drops = others
+                    .iter()
+                    .filter(|o| matches!(o, Operation::DropColumn { .. }))
+                    .count();
+                let adds = others
+                    .iter()
+                    .filter(|o| matches!(o, Operation::AddColumn { .. }))
+                    .count();
+                if others.len() == 2 && drops == 1 && adds == 1 {
+                    if !has(column) {
+                        return two_clauses(column, Some(1091));
+                    }
+                    if used_elsewhere(table, column, &Uses::renaming(operations)) != Used::No {
+                        return two_clauses(column, None);
+                    }
+                    drop_then_add = true;
+                    continue;
+                }
+                return two_clauses(column, None);
+            }
+            // Renames only. By hand: two names swapped, or each moved to
+            // the name another gives up, are taken at once; a rename of a
+            // name the table does not have yet is refused with 1054.
+            let known = all_renames.iter().all(|(from, _)| has(from));
+            let free = all_renames
+                .iter()
+                .all(|(_, to)| !has(to) || all_renames.iter().any(|(from, _)| same(from, to)));
+            let distinct = all_renames.iter().enumerate().all(|(at, (from, to))| {
+                all_renames[at + 1..]
+                    .iter()
+                    .all(|(other_from, other_to)| !same(from, other_from) && !same(to, other_to))
+            });
+            if !(known && free && distinct) {
+                return two_clauses(column, (!known).then_some(1054));
+            }
+            for (from, _) in &all_renames {
+                match used_elsewhere(table, from, &Uses::renaming(operations)) {
+                    Used::ByPlainCheck => {
+                        refuse(
+                            3959,
+                            format!("a CHECK constraint uses {from}, which the statement renames"),
+                        );
+                    }
+                    Used::Maybe => {
+                        return Resolution::Lost(format!(
+                            "renames {from}, which a CHECK constraint or a generated column may \
+                             use, beside other renames"
+                        ));
+                    }
+                    Used::No => {}
+                }
+            }
+            cycle = true;
+        }
+        // Keys, CHECK constraints and AFTER name the columns as the statement
+        // leaves them (by hand on MySQL 8.0.46 and 8.4.13): a column it drops
+        // or renames away is gone (1072 for a key, 1054 for the others), a
+        // column it adds or renames to is there.
+        if operations.len() > 1 {
+            let added = |column: &str| {
+                operations.iter().any(|operation| match operation {
+                    Operation::AddColumn { column: added, .. } => same(&added.name, column),
+                    _ => false,
+                }) || all_renames.iter().any(|(_, to)| same(to, column))
+            };
+            let gone = |column: &str| {
+                !added(column)
+                    && (all_renames.iter().any(|(from, _)| same(from, column))
+                        || operations.iter().any(|operation| {
+                            matches!(operation, Operation::DropColumn { name } if same(name, column))
+                        }))
+            };
+            let after_the_statement =
+                |column: &str| (has(column) && !gone(column)) || added(column);
+            for operation in operations {
+                let (columns, code): (Vec<&str>, u16) = match operation {
+                    Operation::AddIndex(index) => (
+                        index
+                            .columns
+                            .iter()
+                            .map(|entry| indexed_column(entry))
+                            .collect(),
+                        1072,
+                    ),
+                    Operation::AddForeignKey(key) => {
+                        (key.columns.iter().map(String::as_str).collect(), 1072)
+                    }
+                    Operation::AddPrimaryKey { columns } => (
+                        columns.iter().map(|entry| indexed_column(entry)).collect(),
+                        1072,
+                    ),
+                    Operation::AddCheck(check) => match &check.columns {
+                        CheckColumns::Plain(columns) | CheckColumns::Other(columns) => {
+                            (columns.iter().map(String::as_str).collect(), 1054)
+                        }
+                    },
+                    _ => (Vec::new(), 0),
+                };
+                if let Some(column) = columns.into_iter().find(|column| gone(column)) {
+                    return Resolution::Lost(format!(
+                        "a clause names {column}, which another clause drops or renames; MySQL \
+                         refuses that (error {code}, {BY_HAND})"
+                    ));
+                }
+                let position = match operation {
+                    Operation::AddColumn { position, .. }
+                    | Operation::ModifyColumn { position, .. }
+                    | Operation::ChangeColumn { position, .. } => position.as_ref(),
+                    _ => None,
+                };
+                if let Some(Position::After(after)) = position
+                    && !after_the_statement(after)
+                {
+                    return Resolution::Lost(refusal(
+                        &format!(
+                            "a clause puts a column after {after}, which {name} does not have \
+                             after the statement, as far as kilit can tell"
+                        ),
+                        1054,
+                    ));
+                }
+            }
+        } else if let [
+            Operation::AddColumn {
+                position: Some(Position::After(after)),
+                ..
+            },
+        ] = operations.as_slice()
+            && !has(after)
+        {
+            return Resolution::Lost(refusal(
+                &format!("{name} has no column {after} that kilit knows to put the new one after"),
+                1054,
+            ));
+        }
+        if let Some((code, why)) = refused {
+            return Resolution::Refused { code, why };
+        }
+
+        // The order to follow.
+        let inline = operations.iter().any(|operation| match operation {
+            Operation::ModifyColumn { column, .. } | Operation::ChangeColumn { column, .. } => {
+                inline_primary_key(column)
+            }
+            _ => false,
+        });
+        let adds_columns = operations.iter().any(|operation| {
+            matches!(
+                operation,
+                Operation::AddColumn { .. }
+                    | Operation::ChangeColumn { .. }
+                    | Operation::RenameColumn { .. }
+            )
+        });
+        let indexes = operations.iter().any(|operation| {
+            matches!(
+                operation,
+                Operation::AddIndex(_) | Operation::AddForeignKey(_)
+            )
+        });
+        if !drop_then_add && !cycle && !inline && !serial && !(adds_columns && indexes) {
+            return Resolution::Runs(None);
+        }
+        let mut ordered: Vec<Operation> = Vec::new();
+        // Drops first, renames at once through names no table has, then
+        // the other column clauses, then indexes and keys.
+        for operation in operations {
+            if matches!(operation, Operation::DropColumn { .. }) {
+                ordered.push(operation.clone());
+            }
+        }
+        let mut finish: Vec<Operation> = Vec::new();
+        for (at, operation) in operations.iter().enumerate() {
+            if cycle && let Some((from, _)) = renamed(operation) {
+                let through = format!("\0renaming {at}");
+                ordered.push(Operation::RenameColumn {
+                    from: from.to_owned(),
+                    to: through.clone(),
+                });
+                finish.push(match operation {
+                    Operation::ChangeColumn {
+                        column, position, ..
+                    } => Operation::ChangeColumn {
+                        old_name: through,
+                        column: column.clone(),
+                        position: position.clone(),
+                    },
+                    Operation::RenameColumn { to, .. } => Operation::RenameColumn {
+                        from: through,
+                        to: to.clone(),
+                    },
+                    _ => unreachable!("renamed() reads only these"),
+                });
+            }
+        }
+        ordered.extend(finish);
+        for operation in operations {
+            let moved = matches!(operation, Operation::DropColumn { .. })
+                || (cycle && renamed(operation).is_some())
+                || matches!(
+                    operation,
+                    Operation::AddIndex(_) | Operation::AddForeignKey(_)
+                );
+            if moved {
+                continue;
+            }
+            match operation {
+                Operation::ModifyColumn { column, position } if inline_primary_key(column) => {
+                    let mut column = column.clone();
+                    column
+                        .other_options
+                        .retain(|option| !option.eq_ignore_ascii_case("PRIMARY KEY"));
+                    column.nullable = Some(false);
+                    let name = column.name.clone();
+                    ordered.push(Operation::ModifyColumn {
+                        column,
+                        position: position.clone(),
+                    });
+                    ordered.push(Operation::AddPrimaryKey {
+                        columns: vec![name],
+                    });
+                }
+                Operation::ChangeColumn {
+                    old_name,
+                    column,
+                    position,
+                } if inline_primary_key(column) => {
+                    let mut column = column.clone();
+                    column
+                        .other_options
+                        .retain(|option| !option.eq_ignore_ascii_case("PRIMARY KEY"));
+                    column.nullable = Some(false);
+                    let name = column.name.clone();
+                    ordered.push(Operation::ChangeColumn {
+                        old_name: old_name.clone(),
+                        column,
+                        position: position.clone(),
+                    });
+                    ordered.push(Operation::AddPrimaryKey {
+                        columns: vec![name],
+                    });
+                }
+                Operation::ModifyColumn { column, position } if is_serial(column) => {
+                    ordered.push(Operation::ModifyColumn {
+                        column: as_serial(column),
+                        position: position.clone(),
+                    });
+                    ordered.push(serial_index(&column.name));
+                }
+                Operation::ChangeColumn {
+                    old_name,
+                    column,
+                    position,
+                } if is_serial(column) => {
+                    ordered.push(Operation::ChangeColumn {
+                        old_name: old_name.clone(),
+                        column: as_serial(column),
+                        position: position.clone(),
+                    });
+                    ordered.push(serial_index(&column.name));
+                }
+                other => ordered.push(other.clone()),
+            }
+        }
+        for operation in operations {
+            if matches!(
+                operation,
+                Operation::AddIndex(_) | Operation::AddForeignKey(_)
+            ) {
+                ordered.push(operation.clone());
+            }
+        }
+        Resolution::Runs(Some(ordered))
+    }
+}
+
+/// Whether `index` starts with `columns`, so that a foreign key on them can
+/// use it.
+fn serves(index: &Index, columns: &[String]) -> bool {
+    index.columns.len() >= columns.len()
+        && index
+            .columns
+            .iter()
+            .zip(columns)
+            .all(|(entry, column)| same(indexed_column(entry), column))
+}
+
+/// The tables a statement kilit does not model reads, as far as its text
+/// shows: each name after FROM or JOIN, without backticks. A name of
+/// another database counts as written.
+fn read_tables(sql: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut words = sql
+        .split(|c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')' || c == ';')
+        .filter(|word| !word.is_empty());
+    while let Some(word) = words.next() {
+        if (word.eq_ignore_ascii_case("from") || word.eq_ignore_ascii_case("join"))
+            && let Some(name) = words.next()
+        {
+            let name = name.replace('`', "");
+            if !name.is_empty() {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+/// Whether something else in the table uses a column, so that MySQL may
+/// refuse to rename or drop it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Used {
+    No,
+    /// A CHECK constraint of plain columns names it: 3959 on a rename.
+    ByPlainCheck,
+    /// A CHECK constraint or a generated column may name it.
+    Maybe,
+}
+
+/// What of the table the statement takes away with a column, when kilit
+/// asks whether something else uses it.
+struct Uses<'a> {
+    /// The columns the statement drops: their own uses count for nothing.
+    dropped_columns: Vec<&'a str>,
+    /// The CHECK constraints the statement drops (DROP CHECK or DROP
+    /// CONSTRAINT): they count for nothing.
+    dropped_checks: Vec<&'a str>,
+    /// The column is dropped: a CHECK constraint that uses it alone goes
+    /// with it.
+    drops: bool,
+}
+
+impl Uses<'_> {
+    /// For a rename, or a DROP and ADD of one name.
+    fn renaming(operations: &[Operation]) -> Uses<'_> {
+        Uses {
+            dropped_columns: Vec::new(),
+            dropped_checks: dropped_checks(operations),
+            drops: false,
+        }
+    }
+}
+
+/// The names of the CHECK constraints, or constraints of any kind, that
+/// the statement drops.
+fn dropped_checks(operations: &[Operation]) -> Vec<&str> {
+    operations
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::DropCheck { name } | Operation::DropConstraint { name } => {
+                Some(name.as_str())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn used_elsewhere(table: &Table, column: &str, uses: &Uses<'_>) -> Used {
+    let dropped = &uses.dropped_columns;
+    let mut used = Used::No;
+    for check in &table.checks {
+        let name = check.name.as_deref().unwrap_or_default();
+        if uses
+            .dropped_checks
+            .iter()
+            .any(|dropped| same(dropped, name))
+            || (uses.drops && uses_only(check, column))
+        {
+            continue;
+        }
+        match &check.columns {
+            CheckColumns::Plain(columns) if columns.iter().any(|c| same(c, column)) => {
+                used = Used::ByPlainCheck;
+            }
+            CheckColumns::Other(names) if names.iter().any(|c| same(c, column)) => {
+                return Used::Maybe;
+            }
+            _ => {}
+        }
+    }
+    let lower = column.to_ascii_lowercase();
+    if table.columns.iter().any(|other| {
+        !dropped.iter().any(|name| same(name, &other.name))
+            && other
+                .generated
+                .as_ref()
+                .is_some_and(|generated| generated.expression.to_ascii_lowercase().contains(&lower))
+    }) {
+        return Used::Maybe;
+    }
+    used
+}
+
 /// `table` as `alter` leaves it, when kilit can follow every one of its
 /// changes; else why it cannot tell. A new table name changes nothing
 /// here; MySQL takes a RENAME INDEX beside other changes against the names
 /// before the statement, which kilit does not follow.
-pub(crate) fn table_after(table: &Table, alter: &Alter) -> Result<Table, String> {
-    // MySQL takes every clause against the column names before the
-    // statement (by hand on MySQL 8.0.46 and 8.4.13: two CHANGE clauses can
-    // swap two names); kilit applies them one after another, which is the
-    // same only when no column name is in two clauses.
-    let mut named: Vec<&str> = Vec::new();
-    for operation in &alter.operations {
-        let names: Vec<&str> = match operation {
-            Operation::AddColumn { column, .. } | Operation::ModifyColumn { column, .. } => {
-                vec![&column.name]
-            }
-            Operation::ChangeColumn {
-                old_name, column, ..
-            } => vec![old_name, &column.name],
-            Operation::DropColumn { name } => vec![name],
-            Operation::RenameColumn { from, to } => vec![from, to],
-            _ => Vec::new(),
-        };
-        let mut own: Vec<&str> = Vec::new();
-        for name in names {
-            if named.iter().any(|other| same(other, name)) {
-                return Err(format!(
-                    "names the column {name} in two of its clauses, which MySQL takes against \
-                     the names before the statement"
-                ));
-            }
-            own.push(name);
-        }
-        named.extend(own);
-    }
+pub(crate) fn table_after(schema: &Schema, table: &Table, alter: &Alter) -> Result<Table, String> {
+    let operations = match schema.resolve(table, alter) {
+        // MySQL refuses it for a name: the table stays as it was.
+        Resolution::Refused { .. } => return Ok(table.clone()),
+        Resolution::Lost(why) => return Err(why),
+        Resolution::Runs(None) => Cow::Borrowed(alter.operations.as_slice()),
+        Resolution::Runs(Some(ordered)) => Cow::Owned(ordered),
+    };
     let mut after = table.clone();
-    for operation in &alter.operations {
+    for operation in operations.iter() {
         match operation {
             Operation::RenameTable { .. } => {}
             Operation::RenameIndex { .. } if alter.operations.len() > 1 => {
@@ -2319,7 +3776,9 @@ mod tests {
                 ),
                 (
                     "shops",
-                    "line 3: names the column nope, which kilit does not know"
+                    "line 3: shops has no column nope that kilit knows, and MySQL refuses the \
+                     statement (error 1054, by hand on MySQL 8.0.46 and 8.4.13); kilit does not \
+                     answer that from its tables alone, which may be out of date"
                 ),
                 ("users", "line 2: kilit could not read a statement on it"),
             ]
@@ -2739,18 +4198,15 @@ ALTER TABLE orders DROP CONSTRAINT fk_user",
     }
 
     #[test]
-    fn adding_a_check_the_table_already_has_loses_the_table() {
-        let schema = from_sql(
-            "CREATE TABLE t (a INT, CONSTRAINT c CHECK (a > 0));
-ALTER TABLE t ADD CONSTRAINT C CHECK (a > 1);",
-        );
-        assert_eq!(
-            schema.lost().collect::<Vec<_>>(),
-            [(
-                "t",
-                "line 2: adds the CHECK constraint C, which the table already has"
-            )]
-        );
+    fn adding_a_check_the_table_already_has_is_refused_and_keeps_the_table() {
+        // By hand on MySQL 8.0.46 and 8.4.13: error 3822, the table stays.
+        let created = "CREATE TABLE t (a INT, CONSTRAINT c CHECK (a > 0));";
+        let before = from_sql(created);
+        let schema = from_sql(&format!(
+            "{created}\nALTER TABLE t ADD CONSTRAINT C CHECK (a > 1);"
+        ));
+        assert_eq!(schema.lost().count(), 0);
+        assert_eq!(known(&schema, "t"), known(&before, "t"));
     }
 
     #[test]
@@ -3288,9 +4744,67 @@ ALTER TABLE t ADD CONSTRAINT C CHECK (a > 1);",
              CREATE TABLE b LIKE `m`;
              CREATE TABLE c LIKE i;",
         );
-        assert_eq!(engine_of_lost(&schema, "a"), Some(Engine::MyIsam));
-        assert_eq!(engine_of_lost(&schema, "b"), Some(Engine::MyIsam));
-        assert_eq!(engine_of_lost(&schema, "c"), None);
+        assert_eq!(known(&schema, "a").engine, Some(Engine::MyIsam));
+        assert_eq!(known(&schema, "b").engine, Some(Engine::MyIsam));
+        assert_eq!(known(&schema, "c").engine, None);
+        // Of a table kilit does not know, the copy is lost.
+        let schema = from_sql("CREATE TABLE d LIKE nosuch;");
+        assert!(schema.lost().any(|(name, _)| name == "d"));
+    }
+
+    #[test]
+    fn a_table_created_like_another_has_what_mysql_copies() {
+        // By hand on MySQL 8.0.46 and 8.4.13: the columns, keys (a foreign
+        // key's index as a plain one), engine, row format and character set
+        // are copied; the foreign keys are not; CHECK constraints are named
+        // b_chk_1, b_chk_2, ... in the order of their names in the source.
+        let schema = from_sql(
+            "CREATE TABLE users (id BIGINT UNSIGNED PRIMARY KEY);
+             CREATE TABLE a (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+               uid BIGINT UNSIGNED NOT NULL, amount INT NOT NULL,
+               KEY ix_amount (amount),
+               CONSTRAINT a_uid_foreign FOREIGN KEY (uid) REFERENCES users (id),
+               CHECK (amount < 1000000), CONSTRAINT a_pos CHECK (amount >= 0))
+               ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8 DEFAULT CHARSET=latin1;
+             CREATE TABLE b LIKE a;",
+        );
+        let a = known(&schema, "a");
+        let b = known(&schema, "b");
+        assert_eq!(b.columns, a.columns);
+        assert_eq!(b.primary_key, a.primary_key);
+        assert_eq!(b.indexes, a.indexes);
+        assert!(
+            b.indexes
+                .iter()
+                .any(|index| index.name.as_deref() == Some("a_uid_foreign"))
+        );
+        assert!(b.foreign_keys.is_empty());
+        assert_eq!(
+            (b.row_format.clone(), b.key_block_size.clone()),
+            (a.row_format.clone(), a.key_block_size.clone())
+        );
+        assert_eq!(b.charset, a.charset);
+        let names: Vec<_> = b
+            .checks
+            .iter()
+            .map(|check| check.name.clone().unwrap())
+            .collect();
+        assert_eq!(names, ["b_chk_1", "b_chk_2"]);
+        assert_eq!(b.checks[0].expression, a.checks[0].expression);
+    }
+
+    #[test]
+    fn a_temporary_copy_mysql_refuses_creates_nothing() {
+        // By hand on MySQL 8.0.46 and 8.4.13: 3500 for a COMPRESSED source,
+        // 1796 for an InnoDB source with a FULLTEXT index.
+        let schema = from_sql(
+            "CREATE TABLE c (id INT PRIMARY KEY) ROW_FORMAT=COMPRESSED;
+             CREATE TABLE f (id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ft (body));
+             CREATE TEMPORARY TABLE tc LIKE c;
+             CREATE TEMPORARY TABLE tf LIKE f;",
+        );
+        assert_eq!(schema.table("tc"), TableState::Missing);
+        assert_eq!(schema.table("tf"), TableState::Missing);
     }
 
     #[test]
@@ -3410,5 +4924,478 @@ ALTER TABLE t ADD CONSTRAINT C CHECK (a > 1);",
         // A schema dump is read without it.
         let dump = Schema::from_sql("CREATE TABLE a (id INT);");
         assert_eq!(known(&dump, "a").row_format, None);
+    }
+
+    // kilit's picture of the tables follows what MySQL does with
+    // valid input (by hand on MySQL 8.0.46 and 8.4.13, the same on both).
+
+    fn dump_after(sql: &str) -> Schema {
+        let mut schema = Schema::from_dump(DUMP);
+        for statement in parse(sql) {
+            schema.apply(&statement);
+        }
+        schema
+    }
+
+    #[test]
+    fn a_rename_of_a_parent_renames_the_parent_of_its_keys() {
+        let schema = after("RENAME TABLE users TO people");
+        let orders = known(&schema, "orders");
+        assert_eq!(orders.foreign_keys[0].referenced_table, "people");
+        let schema = after("ALTER TABLE users RENAME TO people");
+        assert_eq!(
+            known(&schema, "orders").foreign_keys[0].referenced_table,
+            "people"
+        );
+        // So do the keys of a table kilit lost.
+        let schema = after(
+            "ALTER TABLE orders CONVERT TO CHARACTER SET latin1;
+             RENAME TABLE users TO people",
+        );
+        assert!(schema.unseen_keys_point_at.contains("people"));
+    }
+
+    #[test]
+    fn a_create_table_of_a_dump_table_is_not_followed() {
+        let before = Schema::from_dump(DUMP);
+        let schema = dump_after("CREATE TABLE orders (id INT PRIMARY KEY)");
+        assert_eq!(known(&schema, "orders"), known(&before, "orders"));
+        assert!(schema.created("orders").is_none());
+        // After a DROP, it is a new table.
+        let schema = dump_after("DROP TABLE orders; CREATE TABLE orders (id INT PRIMARY KEY)");
+        assert_eq!(column_names(&known(&schema, "orders")), ["id"]);
+        assert!(schema.created("orders").is_some());
+        // IF NOT EXISTS keeps the dump's table, as before.
+        let schema = dump_after("CREATE TABLE IF NOT EXISTS orders (id INT PRIMARY KEY)");
+        assert_eq!(known(&schema, "orders"), known(&before, "orders"));
+    }
+
+    #[test]
+    fn a_table_moved_onto_a_name_from_before_the_input_is_not_new() {
+        // The dump has orders.
+        let schema = dump_after(
+            "CREATE TABLE orders_new (id INT PRIMARY KEY);
+             RENAME TABLE orders TO orders_old, orders_new TO orders",
+        );
+        assert!(schema.created("orders").is_none());
+        assert_eq!(column_names(&known(&schema, "orders")), ["id"]);
+        // Without a dump: the input used the name first.
+        let schema = from_sql_input(
+            "ALTER TABLE t ADD COLUMN c INT;
+             CREATE TABLE t_new (id INT PRIMARY KEY);
+             RENAME TABLE t TO t_old, t_new TO t",
+        );
+        assert!(schema.created("t").is_none());
+        // Read it.
+        let schema = from_sql_input(
+            "CREATE TABLE t_new (id INT PRIMARY KEY);
+             INSERT INTO t_new SELECT * FROM `t`;
+             RENAME TABLE t_new TO t",
+        );
+        assert!(schema.created("t").is_none());
+        // A fresh name keeps it new.
+        let schema = from_sql_input(
+            "CREATE TABLE t_new (id INT PRIMARY KEY);
+             RENAME TABLE t_new TO t;
+             ALTER TABLE t RENAME TO u",
+        );
+        assert!(schema.created("u").is_some());
+    }
+
+    /// The schema after `sql`, with no tables before it.
+    fn from_sql_input(sql: &str) -> Schema {
+        let mut schema = Schema::new();
+        for statement in parse(sql) {
+            schema.apply(&statement);
+        }
+        schema
+    }
+
+    #[test]
+    fn drop_temporary_table_leaves_the_base_table() {
+        let before = Schema::from_dump(DUMP);
+        for sql in [
+            "DROP TEMPORARY TABLE IF EXISTS orders",
+            "DROP TEMPORARY TABLE orders",
+            "DROP /* x */ TEMPORARY TABLE orders",
+            "DROP TEMPORARY TABLE orders, users",
+        ] {
+            let schema = dump_after(sql);
+            assert_eq!(known(&schema, "orders"), known(&before, "orders"), "{sql}");
+            assert!(schema.gone("orders").is_none(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn dropping_a_temporary_table_shows_the_base_table_again() {
+        let before = Schema::from_dump(DUMP);
+        for drop in ["DROP TEMPORARY TABLE orders", "DROP TABLE orders"] {
+            let schema = dump_after(&format!(
+                "CREATE TEMPORARY TABLE orders (id INT PRIMARY KEY); {drop}"
+            ));
+            assert_eq!(known(&schema, "orders"), known(&before, "orders"), "{drop}");
+        }
+        // IF EXISTS drops the temporary ones it names.
+        let schema = dump_after(
+            "CREATE TEMPORARY TABLE orders (id INT PRIMARY KEY);
+             DROP TEMPORARY TABLE IF EXISTS orders, nosuch",
+        );
+        assert_eq!(known(&schema, "orders"), known(&before, "orders"));
+    }
+
+    #[test]
+    fn a_temporary_table_ends_with_its_session() {
+        let mut schema = Schema::from_dump(DUMP);
+        for statement in parse(
+            "CREATE TEMPORARY TABLE orders (id INT PRIMARY KEY);
+             CREATE TEMPORARY TABLE scratch (id INT PRIMARY KEY);",
+        ) {
+            schema.apply(&statement);
+        }
+        assert!(
+            schema
+                .created("orders")
+                .is_some_and(|created| created.temporary)
+        );
+        schema.session_ends();
+        assert!(schema.created("orders").is_none());
+        assert!(schema.created("scratch").is_none());
+        assert_eq!(
+            known(&schema, "orders"),
+            known(&Schema::from_dump(DUMP), "orders")
+        );
+    }
+
+    #[test]
+    fn rename_table_does_not_see_a_temporary_table_and_kilit_loses_the_names() {
+        let schema = dump_after(
+            "CREATE TEMPORARY TABLE orders (id INT PRIMARY KEY);
+             RENAME TABLE orders TO orders_old",
+        );
+        assert!(matches!(schema.table("orders"), TableState::Lost { .. }));
+        assert!(matches!(
+            schema.table("orders_old"),
+            TableState::Lost { .. }
+        ));
+        // ALTER TABLE ... RENAME TO moves the temporary table: the base table
+        // is back.
+        let schema = dump_after(
+            "CREATE TEMPORARY TABLE orders (id INT PRIMARY KEY);
+             ALTER TABLE orders RENAME TO orders_tmp",
+        );
+        assert_eq!(
+            known(&schema, "orders"),
+            known(&Schema::from_dump(DUMP), "orders")
+        );
+        assert!(matches!(
+            schema.table("orders_tmp"),
+            TableState::Lost { .. }
+        ));
+    }
+
+    #[test]
+    fn a_rename_table_onto_a_taken_name_changes_nothing() {
+        let before = Schema::from_dump(DUMP);
+        let schema = dump_after("RENAME TABLE orders TO users");
+        assert_eq!(known(&schema, "orders"), known(&before, "orders"));
+        assert_eq!(known(&schema, "users"), known(&before, "users"));
+        // The names before it in the statement count.
+        let schema = dump_after("RENAME TABLE users TO people, orders TO users");
+        assert_eq!(known(&schema, "users"), {
+            let mut orders = known(&before, "orders");
+            orders.name = "users".to_owned();
+            orders.foreign_keys[0].referenced_table = "people".to_owned();
+            orders
+        });
+    }
+
+    fn resolved(table_sql: &str, sql: &str) -> Resolution {
+        let schema = Schema::from_sql(table_sql);
+        let statement = parse(sql).remove(0);
+        let StatementKind::Alter(alter) = &statement.kind else {
+            panic!("{sql}");
+        };
+        let TableState::Known(table) = schema.table(&alter.table) else {
+            panic!("{sql}");
+        };
+        schema.resolve(table, alter)
+    }
+
+    const ORDERS: &str = "CREATE TABLE users (id BIGINT UNSIGNED PRIMARY KEY);
+        CREATE TABLE orders (id BIGINT UNSIGNED PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL,
+        amount INT NOT NULL, note VARCHAR(50) NULL, email VARCHAR(255) NULL,
+        UNIQUE KEY orders_email_unique (email), KEY ix_amount (amount),
+        CONSTRAINT orders_user_id_foreign FOREIGN KEY (user_id) REFERENCES users (id),
+        CONSTRAINT orders_amount_check CHECK (amount > 0));";
+
+    fn refused_with(resolution: Resolution) -> Option<u16> {
+        match resolution {
+            Resolution::Refused { code, .. } => Some(code),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn names_the_table_already_has_or_lacks_are_refused_or_lose_the_table() {
+        for (alter, code) in [
+            ("ALTER TABLE orders ADD COLUMN note INT NULL", 1060),
+            (
+                "ALTER TABLE orders ADD CONSTRAINT orders_user_id_foreign FOREIGN KEY (user_id) \
+                 REFERENCES users (id)",
+                1826,
+            ),
+            (
+                "ALTER TABLE orders ADD CONSTRAINT ix_amount FOREIGN KEY (user_id) REFERENCES \
+                 users (id)",
+                1061,
+            ),
+            ("ALTER TABLE orders ADD PRIMARY KEY (amount)", 1068),
+            (
+                "ALTER TABLE orders MODIFY amount INT NOT NULL PRIMARY KEY",
+                1068,
+            ),
+            (
+                "ALTER TABLE orders ADD CONSTRAINT orders_amount_check CHECK (amount > 1)",
+                3822,
+            ),
+            ("ALTER TABLE orders RENAME TO users", 1050),
+            (
+                "ALTER TABLE orders DROP FOREIGN KEY orders_user_id_foreign, ADD CONSTRAINT \
+                 orders_user_id_foreign FOREIGN KEY (user_id) REFERENCES users (id)",
+                1826,
+            ),
+            (
+                "ALTER TABLE orders DROP COLUMN user_id, ADD COLUMN c INT",
+                1828,
+            ),
+            (
+                "ALTER TABLE orders MODIFY note VARCHAR(100) NULL, RENAME COLUMN note TO memo",
+                1054,
+            ),
+            (
+                "ALTER TABLE orders RENAME COLUMN note TO memo, MODIFY memo VARCHAR(100) NULL",
+                1054,
+            ),
+        ] {
+            assert_eq!(refused_with(resolved(ORDERS, alter)), Some(code), "{alter}");
+        }
+        for alter in [
+            "ALTER TABLE orders MODIFY zzz INT",
+            "ALTER TABLE orders CHANGE zzz yyy INT",
+            "ALTER TABLE orders RENAME COLUMN zzz TO yyy",
+            "ALTER TABLE orders ALTER COLUMN zzz SET DEFAULT 1",
+            "ALTER TABLE orders CHANGE note email VARCHAR(50) NULL",
+            "ALTER TABLE orders RENAME COLUMN note TO email",
+            "ALTER TABLE orders ADD COLUMN c INT AFTER zzz",
+            // A chain into a name the table does not have yet: 1054 by hand.
+            "ALTER TABLE orders RENAME COLUMN amount TO total, RENAME COLUMN total TO sum",
+            // An old name in a new index: 1072 by hand.
+            "ALTER TABLE orders CHANGE amount c INT NOT NULL, ADD INDEX (amount)",
+            // A column dropped and added that the table does not have: 1091.
+            "ALTER TABLE orders ADD COLUMN extra INT, DROP COLUMN extra",
+            // A shape no hand test covers.
+            "ALTER TABLE orders DROP COLUMN note, RENAME COLUMN email TO note",
+        ] {
+            assert!(
+                matches!(resolved(ORDERS, alter), Resolution::Lost(_)),
+                "{alter}"
+            );
+        }
+        // A foreign key dropped with its column runs.
+        assert!(matches!(
+            resolved(
+                ORDERS,
+                "ALTER TABLE orders DROP FOREIGN KEY orders_user_id_foreign, DROP COLUMN user_id"
+            ),
+            Resolution::Runs(_)
+        ));
+    }
+
+    #[test]
+    fn two_clauses_of_one_alter_are_taken_against_the_names_before_it() {
+        // A swap.
+        let schema = Schema::from_sql(&format!(
+            "{ORDERS}
+             ALTER TABLE orders CHANGE note email VARCHAR(50) NULL,
+               CHANGE email note VARCHAR(255) NULL;"
+        ));
+        let orders = known(&schema, "orders");
+        let note = orders.column("note").unwrap();
+        assert_eq!(note.data_type.to_string(), "VARCHAR(255)");
+        assert_eq!(
+            orders.index_on("note").as_deref(),
+            Some("orders_email_unique")
+        );
+        // A swap of a column a CHECK constraint uses: 3959 by hand.
+        assert_eq!(
+            refused_with(resolved(
+                ORDERS,
+                "ALTER TABLE orders CHANGE amount note INT NOT NULL, CHANGE note amount \
+                 VARCHAR(50) NULL"
+            )),
+            Some(3959)
+        );
+        // Each name moved to the one another gives up.
+        let schema = Schema::from_sql(&format!(
+            "{ORDERS}
+             ALTER TABLE orders RENAME COLUMN note TO memo, RENAME COLUMN email TO note;"
+        ));
+        let orders = known(&schema, "orders");
+        assert_eq!(
+            orders.index_on("note").as_deref(),
+            Some("orders_email_unique")
+        );
+        assert!(orders.column("memo").is_some());
+        // DROP and ADD of one name, in either order.
+        for alter in [
+            "ALTER TABLE orders DROP COLUMN note, ADD COLUMN note INT NULL",
+            "ALTER TABLE orders ADD COLUMN note INT NULL, DROP COLUMN note",
+        ] {
+            let schema = Schema::from_sql(&format!("{ORDERS}\n{alter};"));
+            let note = known(&schema, "orders").column("note").unwrap().clone();
+            assert_eq!(note.data_type.to_string(), "INT", "{alter}");
+        }
+        // A new column in a new index.
+        let schema = Schema::from_sql(&format!(
+            "{ORDERS}
+             ALTER TABLE orders ADD INDEX ix_c (c), ADD COLUMN c INT NULL;"
+        ));
+        assert_eq!(
+            known(&schema, "orders").index_on("c").as_deref(),
+            Some("ix_c")
+        );
+    }
+
+    #[test]
+    fn an_inline_primary_key_makes_the_column_the_primary_key() {
+        let schema = Schema::from_sql(
+            "CREATE TABLE np (c INT NULL, d INT NULL);
+             ALTER TABLE np MODIFY c INT PRIMARY KEY;",
+        );
+        let np = known(&schema, "np");
+        assert_eq!(np.primary_key, ["c"]);
+        assert_eq!(np.column("c").unwrap().nullable, Some(false));
+        assert!(np.column("c").unwrap().other_options.is_empty());
+        // Written NULL: 1171 by hand.
+        assert_eq!(
+            refused_with(resolved(
+                "CREATE TABLE np (c INT NULL);",
+                "ALTER TABLE np MODIFY c INT NULL PRIMARY KEY"
+            )),
+            Some(1171)
+        );
+    }
+
+    #[test]
+    fn serial_is_followed_as_mysql_makes_it() {
+        let schema = Schema::from_sql(
+            "CREATE TABLE pl (id BIGINT UNSIGNED PRIMARY KEY, uid BIGINT UNSIGNED NULL);
+             ALTER TABLE pl MODIFY uid SERIAL;",
+        );
+        let pl = known(&schema, "pl");
+        let uid = pl.column("uid").unwrap();
+        assert_eq!(uid.data_type.to_string(), "BIGINT UNSIGNED");
+        assert_eq!(uid.nullable, Some(false));
+        assert!(uid.auto_increment);
+        assert_eq!(pl.index_on("uid").as_deref(), Some("uid"));
+        for (table, code) in [
+            (
+                "CREATE TABLE users (id BIGINT UNSIGNED PRIMARY KEY);
+                 CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, uid BIGINT UNSIGNED NULL,
+                 CONSTRAINT f FOREIGN KEY (uid) REFERENCES users (id) ON DELETE SET NULL);",
+                1830,
+            ),
+            (
+                "CREATE TABLE users (id BIGINT UNSIGNED PRIMARY KEY);
+                 CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, uid BIGINT UNSIGNED NULL,
+                 CONSTRAINT f FOREIGN KEY (uid) REFERENCES users (id) ON DELETE CASCADE);",
+                1832,
+            ),
+            (
+                "CREATE TABLE t (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                 uid BIGINT UNSIGNED NULL);",
+                1075,
+            ),
+        ] {
+            assert_eq!(
+                refused_with(resolved(table, "ALTER TABLE t MODIFY uid SERIAL")),
+                Some(code),
+                "{table}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_column_a_check_or_a_generated_column_uses_beside_other_clauses_is_not_followed() {
+        // By hand on MySQL 8.0.46 and 8.4.13: 3959 for a rename of a column a
+        // CHECK constraint uses, and for a drop of one it uses with another
+        // column; 3108 for a generated column's. The table stays as it was.
+        let table = "CREATE TABLE orders (id INT PRIMARY KEY, amount INT NOT NULL,
+            note VARCHAR(10) NULL, extra INT NULL, g INT AS (extra + 1),
+            CONSTRAINT ck2 CHECK (amount > 0 OR note IS NULL));";
+        for (alter, code) in [
+            (
+                "ALTER TABLE orders DROP COLUMN note, ADD COLUMN y INT NULL",
+                3959,
+            ),
+            (
+                "ALTER TABLE orders RENAME COLUMN amount TO total, ADD COLUMN y INT NULL",
+                3959,
+            ),
+            (
+                "ALTER TABLE orders CHANGE amount total INT NOT NULL, ADD COLUMN y INT NULL",
+                3959,
+            ),
+        ] {
+            assert_eq!(refused_with(resolved(table, alter)), Some(code), "{alter}");
+        }
+        for alter in [
+            "ALTER TABLE orders DROP COLUMN extra, ADD COLUMN y INT NULL",
+            "ALTER TABLE orders RENAME COLUMN extra TO e2, ADD COLUMN y INT NULL",
+            // DROP x and ADD x of a column a CHECK constraint uses: 3959 by hand.
+            "ALTER TABLE orders DROP COLUMN amount, ADD COLUMN amount INT NULL",
+        ] {
+            assert!(
+                matches!(resolved(table, alter), Resolution::Lost(_)),
+                "{alter}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_check_the_statement_drops_or_one_on_the_dropped_column_alone_does_not_refuse_it() {
+        // By hand on MySQL 8.0.46 and 8.4.13: accepted, and the CHECK goes.
+        let table = "CREATE TABLE orders (id INT PRIMARY KEY, amount INT NOT NULL,
+            note VARCHAR(10) NULL, seedbonus INT NULL, info INT NULL,
+            CONSTRAINT ck2 CHECK (amount > 0 OR note IS NULL),
+            CONSTRAINT ck_bonus CHECK (seedbonus >= 0));";
+        for alter in [
+            "ALTER TABLE orders DROP CONSTRAINT ck2, DROP COLUMN note",
+            "ALTER TABLE orders DROP CONSTRAINT ck2, RENAME COLUMN amount TO total",
+            "ALTER TABLE orders DROP COLUMN info, DROP COLUMN seedbonus",
+        ] {
+            assert!(
+                matches!(resolved(table, alter), Resolution::Runs(_)),
+                "{alter}"
+            );
+        }
+        let schema = Schema::from_sql(&format!(
+            "{table}\nALTER TABLE orders DROP COLUMN info, DROP COLUMN seedbonus;"
+        ));
+        let orders = known(&schema, "orders");
+        assert!(
+            orders
+                .checks
+                .iter()
+                .all(|check| check.name.as_deref() != Some("ck_bonus"))
+        );
+        // Every column of a CHECK of several columns, in one statement: 3959.
+        assert_eq!(
+            refused_with(resolved(
+                table,
+                "ALTER TABLE orders DROP COLUMN amount, DROP COLUMN note"
+            )),
+            Some(3959)
+        );
     }
 }

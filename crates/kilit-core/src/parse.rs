@@ -2049,9 +2049,72 @@ fn prefix(function: &Function) -> Option<(&Ident, &str)> {
     whole_number(length).map(|length| (column, length))
 }
 
+/// The table a `CREATE TABLE name LIKE source` copies, also written
+/// `CREATE TABLE name (LIKE source)`, which the parser reads as a column
+/// named LIKE of the type `source`. `None` when the statement writes
+/// anything else MySQL does not take beside LIKE.
+fn like_source(create: &ast::CreateTable) -> Option<String> {
+    let alone = create.query.is_none()
+        && create.clone.is_none()
+        && create.comment.is_none()
+        && create.partition_by.is_none()
+        && matches!(create.table_options, CreateTableOptions::None)
+        && create.constraints.is_empty();
+    if !alone {
+        return None;
+    }
+    match (&create.like, create.columns.as_slice()) {
+        (
+            Some(
+                ast::CreateTableLikeKind::Plain(like)
+                | ast::CreateTableLikeKind::Parenthesized(like),
+            ),
+            [],
+        ) if like.defaults.is_none() => Some(object_name(&like.name)),
+        (None, [column])
+            if column.name.quote_style.is_none()
+                && column.name.value.eq_ignore_ascii_case("LIKE")
+                && column.options.is_empty() =>
+        {
+            match &column.data_type {
+                ast::DataType::Custom(source, arguments) if arguments.is_empty() => {
+                    Some(object_name(source))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether a column of the statement is `LIKE source` written in its
+/// parentheses, as the parser reads `CREATE TABLE b (LIKE a, ...)`.
+fn writes_like_column(create: &ast::CreateTable) -> bool {
+    create.columns.iter().any(|column| {
+        column.name.quote_style.is_none()
+            && column.name.value.eq_ignore_ascii_case("LIKE")
+            && matches!(column.data_type, ast::DataType::Custom(_, _))
+    })
+}
+
 /// `CREATE TABLE` with its columns, keys and default character set.
 fn create_table(create: ast::CreateTable) -> StatementKind {
     let name = object_name(&create.name);
+    if let Some(source) = like_source(&create) {
+        return StatementKind::CreateTableLike {
+            name,
+            source,
+            if_not_exists: create.if_not_exists,
+        };
+    }
+    // By hand on MySQL 8.0.46 and 8.4.13, LIKE takes nothing beside it
+    // (1064): no column, key or table option.
+    if create.like.is_some() || writes_like_column(&create) {
+        return StatementKind::Unparsed {
+            error: format!("{REJECTED_BY} anything beside LIKE in CREATE TABLE"),
+            table: Some(name),
+        };
+    }
     if create.like.is_some() || create.query.is_some() || create.clone.is_some() {
         return StatementKind::Unparsed {
             error: unreadable(
@@ -5246,19 +5309,43 @@ SET FOREIGN_KEY_CHECKS=1;
     }
 
     #[test]
-    fn a_table_copied_from_elsewhere_is_unparsed() {
+    fn a_table_created_like_another_is_read_in_both_forms() {
         for sql in [
             "CREATE TABLE new_orders LIKE orders",
-            "CREATE TABLE new_orders AS SELECT * FROM orders",
+            "CREATE TABLE new_orders (LIKE orders)",
+            "CREATE TABLE `new_orders` LIKE `orders`",
+            "CREATE TEMPORARY TABLE new_orders LIKE orders",
         ] {
-            assert!(
-                matches!(
-                    kind(sql),
-                    StatementKind::Unparsed { table: Some(ref table), .. } if table == "new_orders"
-                ),
+            assert_eq!(
+                kind(sql),
+                StatementKind::CreateTableLike {
+                    name: "new_orders".to_owned(),
+                    source: "orders".to_owned(),
+                    if_not_exists: false,
+                },
                 "{sql}"
             );
         }
+        assert!(matches!(
+            kind("CREATE TABLE IF NOT EXISTS new_orders (LIKE orders)"),
+            StatementKind::CreateTableLike {
+                if_not_exists: true,
+                ..
+            }
+        ));
+        // A column named `like` is a column.
+        assert!(matches!(
+            kind("CREATE TABLE t (`like` INT)"),
+            StatementKind::CreateTable { .. }
+        ));
+    }
+
+    #[test]
+    fn a_table_copied_from_a_query_is_unparsed() {
+        assert!(matches!(
+            kind("CREATE TABLE new_orders AS SELECT * FROM orders"),
+            StatementKind::Unparsed { table: Some(ref table), .. } if table == "new_orders"
+        ));
     }
 
     #[test]

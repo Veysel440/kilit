@@ -296,7 +296,8 @@ kilit gives no answer that the table could change.
   holds is `COPY` in kilit and error 1283 in MySQL. A backticked
   `` USING `HASH` `` is refused by MySQL (1064) and answered by kilit.
 - `DROP CONSTRAINT` of a name that is both a `CHECK` and a `UNIQUE` index is
-  `UNKNOWN`, and the table is lost; MySQL refuses it. Two `VARCHAR(16000)`
+  `UNKNOWN`, naming error 3939 (by hand on MySQL 8.0.46 and 8.4.13), and the
+  table stays as it was. Two `VARCHAR(16000)`
   columns of `utf8mb4` with a `VIRTUAL` generated column fail in a `CREATE
   TABLE` with error 1118: kilit does not count generated virtual columns in
   the row.
@@ -305,6 +306,57 @@ kilit gives no answer that the table could change.
   that names a column twice (error 1060) runs too. Adding a `UNIQUE` index of
   `NOT NULL` columns to a table without a primary key makes it the clustered
   key, and kilit says no rebuild.
+
+- One `ALTER TABLE` takes every clause against the names the table had before
+  the statement. kilit follows swaps and moves of names, `DROP x` with `ADD x`,
+  and a new or renamed column in a new index. It refuses, by hand on MySQL
+  8.0.46 and 8.4.13: `MODIFY` of a column beside its `RENAME` (1054); `DROP
+  FOREIGN KEY k` with `ADD FOREIGN KEY k` (1826); `DROP COLUMN` of a foreign
+  key column beside other clauses, with the checks on (1828; the same
+  statement may drop that key, and an unnamed key loses the table); renaming
+  or dropping a column that a `CHECK` uses, beside other clauses (3959; a
+  `CHECK` the statement drops counts for nothing). Dropping or renaming the
+  source of a generated column is `UNKNOWN` and loses the table (MySQL
+  refuses it with 3108). Every other shape of several clauses loses the table.
+- Names a known table lacks or has are `UNKNOWN`, naming the error by hand on
+  MySQL 8.0.46 and 8.4.13: a column added twice (1060, the table is kept), a
+  column that is not there (1054, the table is lost), a foreign key named like
+  a non-serving index of its table (1061), a second primary key (1068),
+  `DROP PRIMARY KEY` without one (1091), a `CHECK` name taken (3822), a
+  `RENAME` onto a taken name, `t TO t` included (1050), and an index named
+  `PRIMARY` (1280). `ALTER COLUMN ... DROP DEFAULT` of a missing column keeps
+  the table, as before (1054).
+- A migration guarded with `Schema::hasColumn()` gets these answers for the
+  statement it would skip; see [Laravel](laravel.md#reads-under---pretend).
+- An inline `PRIMARY KEY` in `MODIFY` or `CHANGE` is followed on a table
+  without a primary key. With one it is `UNKNOWN` (1068); written `NULL`, 1171;
+  on a column of a `SET NULL` key, 1830. `MODIFY` or `CHANGE ... SERIAL` is
+  followed as `BIGINT UNSIGNED NOT NULL AUTO_INCREMENT` with a `UNIQUE` key
+  named after the column; `ADD COLUMN ... SERIAL` is not followed.
+- `CREATE TABLE b LIKE a` and `CREATE TABLE b (LIKE a)` are read and
+  followed: the copy has the columns, indexes (a foreign key's index as a
+  plain one), engine, row format, key block size, character set and collation,
+  but no foreign keys, and its `CHECK` constraints are named `b_chk_1`, ...
+  by the order of their names. `TEMPORARY` of a `COMPRESSED` table fails with
+  3500 and of a table with a `FULLTEXT` index with 1796. `LIKE` beside any
+  other clause is refused (1064). A copy of a table kilit does not know is
+  lost, and so is a copy when another table already holds a `b_chk_N` name.
+  `IF NOT EXISTS` never makes a table "created here".
+- A temporary table lives in its input file. `DROP TEMPORARY TABLE` with no
+  temporary table leaves the base table (`UNKNOWN`, 1051, without `IF
+  EXISTS`); `DROP TABLE` with one drops only it; `RENAME TABLE` does not see
+  temporary tables, so the names it touches are lost; `ALTER ... RENAME TO`
+  moves the temporary one. `DROP TABLE t, nosuch` with a temporary `t` gives
+  1051 in MySQL, which keeps the temporary table; kilit drops it.
+- `ADD x` with `DROP x` of a missing `x` (1091) and `CHANGE a c` with `ADD
+  INDEX (a)` (1072) lose the table rather than keep it. `ALTER COLUMN ... SET
+  VISIBLE` and `SET INVISIBLE` are unreadable. `DROP INDEX` of the only key of
+  an `AUTO_INCREMENT` column gets "writes continue" where MySQL likely gives
+  1075 (not run by hand).
+- A schema dump from a server with `sql_generate_invisible_primary_key=ON` is
+  read, and its table is known, but the lab never measured a table with an
+  invisible primary key; see [the
+  manual](https://dev.mysql.com/doc/refman/8.4/en/create-table-gipk.html).
 
 ## Defaults and row size
 
@@ -398,10 +450,6 @@ kilit gives no answer that the table could change.
   `UNKNOWN` and hides the table of the other spelling until the input file
   ends. `DROP TEMPORARY TABLE IF EXISTS` in another case loses that table for
   good.
-- A `RENAME TABLE` of a foreign key's parent does not move the key's reference
-  in kilit's model (older than this behavior): `RENAME TABLE users TO people;
-  ALTER TABLE people MODIFY id INT ...` gets a measured answer where MySQL
-  fails with 3780.
 - A trigger or a stored routine already on the server can fill a new table
   with rows that no migration shows.
 - The rows a table holds, and the history of its instant column changes, are
@@ -431,11 +479,11 @@ kilit gives no answer that the table could change.
 - A statement kilit cannot read gets the warning only in the forms above:
   `ALTER`, `CREATE INDEX` and `DROP INDEX ... ON`, `DROP TABLES` and
   `RENAME TABLES`.
-- `DROP TEMPORARY TABLE` names nothing. A temporary table created in one input
-  file still hides the warning for a `DROP`, `TRUNCATE` or `ALTER` of the same
-  name in a later file.
-- A table made by `CREATE TABLE ... LIKE` or `AS SELECT` is treated as existing,
-  so it is named. A `DROP`, `RENAME` or `TRUNCATE` of a name dropped earlier in
+- `DROP TEMPORARY TABLE` names nothing. A temporary table lives in its input
+  file; in a later file the base table of the same name is back, and the
+  warning names it.
+- A table made by `CREATE TABLE ... AS SELECT` is treated as existing, so it is
+  named. A `DROP`, `RENAME` or `TRUNCATE` of a name dropped earlier in
   the input names it too, although MySQL then gives error 1146 or 1051.
 
 ## Laravel
