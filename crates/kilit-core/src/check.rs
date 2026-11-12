@@ -26,9 +26,9 @@ use crate::schema::{
     with_table_renamed,
 };
 use crate::statement::{
-    Alter, Check, CheckColumns, Column, DataType, Engine, ForeignKey, ForeignKeyAction, Index,
-    IndexKind, IntegerSize, Lock, Operation, Position, RowFormat, Statement, StatementKind, Table,
-    TableOptions, Variable,
+    Algorithm, Alter, Check, CheckColumns, Column, DataType, DocId, Engine, ForeignKey,
+    ForeignKeyAction, Index, IndexKind, IntegerSize, Lock, Operation, Position, RowFormat,
+    Statement, StatementKind, Table, TableOptions, Variable,
 };
 
 /// What kilit says about one statement of the input.
@@ -252,6 +252,26 @@ pub enum Condition {
     /// set, the column's or the table's, which MySQL makes a BLOB (error
     /// 1283).
     BinaryText,
+    /// A foreign key of another table references the column the statement
+    /// renames. The lab measured it with foreign_key_checks on and off
+    /// alike.
+    ReferencedColumn,
+    /// The column the statement renames is in a foreign key of the table
+    /// itself. The lab measured it with foreign_key_checks on and off
+    /// alike.
+    InOwnForeignKey,
+    /// The dropped column is a VIRTUAL generated column.
+    VirtualColumn,
+    /// The new UNIQUE index becomes the key InnoDB keeps the rows in, the
+    /// clustered index: the table has no primary key and no UNIQUE index of
+    /// NOT NULL columns, and every column of the new one is NOT NULL and
+    /// taken whole.
+    ClusteredKey,
+    /// The table has InnoDB's hidden column FTS_DOC_ID and no FULLTEXT
+    /// index: one was dropped (see [`DocId`]). kilit sees it when the input
+    /// drops the index; a schema dump does not show it, so on a table the
+    /// input did not create it may hold.
+    DroppedFulltext,
     /// Something no schema shows: the rows, or the table's history.
     Hidden,
 }
@@ -332,6 +352,18 @@ const ADD_COLUMN: Case = Case {
         "on-delete-cascade-add-nullable-column",
         "on-delete-set-null-add-nullable-column",
         "cascade-parent-add-nullable-column",
+        // Laravel's boolean, text and timestamp columns, a column with a
+        // collation or a comment, and one after 63 instant column changes,
+        // one short of MySQL's 64.
+        "add-column-boolean-default",
+        "add-column-text",
+        "add-column-timestamp",
+        "add-column-collation",
+        "add-column-comment",
+        "add-column-after-63-changes",
+        // A table whose FULLTEXT index was dropped, rebuilt since: the
+        // rebuild removes the hidden column FTS_DOC_ID.
+        "add-column-after-dropping-fulltext-and-rebuilding",
     ],
     exceptions: &[
         Exception {
@@ -341,7 +373,7 @@ const ADD_COLUMN: Case = Case {
         },
         Exception {
             scenarios: &["add-column-after-64-changes"],
-            when: "if the table has had 64 instant column changes since it was last rebuilt",
+            when: SIXTY_FOUR_CHANGES,
             conditions: &[Condition::Hidden],
         },
         Exception {
@@ -349,10 +381,35 @@ const ADD_COLUMN: Case = Case {
             when: ROW_TOO_LARGE,
             conditions: &[Condition::RowTooLarge],
         },
+        Exception {
+            scenarios: &["add-column-after-dropping-fulltext"],
+            when: DROPPED_FULLTEXT,
+            conditions: &[Condition::DroppedFulltext],
+        },
     ],
 };
 
 const ROW_TOO_LARGE: &str = "if the row grows past the 65,535 bytes MySQL allows";
+
+const SIXTY_FOUR_CHANGES: &str =
+    "if the table has had 64 instant column changes since it was last rebuilt";
+
+const DROPPED_FULLTEXT: &str =
+    "if the table has had a FULLTEXT index that was dropped since it was last rebuilt";
+
+/// The two notes above in one, where their answers agree.
+const SIXTY_FOUR_CHANGES_OR_DROPPED_FULLTEXT: &str = "if the table has had 64 instant column \
+     changes since it was last rebuilt, or a FULLTEXT index that was dropped since then";
+
+/// The scenarios of the history of a table that turns an instant change
+/// into a rebuild. A note about them is given only where the answer is
+/// INSTANT: see [`history_notes`].
+const INSTANT_HISTORY: [&str; 4] = [
+    "add-column-after-64-changes",
+    "drop-column-after-64-changes",
+    "add-column-after-dropping-fulltext",
+    "drop-column-after-dropping-fulltext",
+];
 
 /// A new TEXT, BLOB, JSON or GEOMETRY column with a quoted default: MySQL
 /// refuses it (error 1101) in strict SQL mode, and refuses all but `''` on
@@ -487,6 +544,11 @@ const DROP_COLUMN: Case = Case {
         // on delete.
         "on-delete-cascade-drop-column",
         "on-delete-set-null-drop-column",
+        // An INT column, a STORED generated column, and a column after 63
+        // instant column changes, one short of MySQL's 64.
+        "drop-column-int",
+        "drop-column-stored-generated",
+        "drop-column-after-63-changes",
     ],
     exceptions: &[
         Exception {
@@ -577,6 +639,21 @@ const DROP_COLUMN: Case = Case {
             when: "if the table has no such column",
             conditions: &[Condition::NoSuchName],
         },
+        Exception {
+            scenarios: &["drop-column-virtual-generated"],
+            when: "if the column is a VIRTUAL generated column",
+            conditions: &[Condition::VirtualColumn],
+        },
+        Exception {
+            scenarios: &["drop-column-after-64-changes"],
+            when: SIXTY_FOUR_CHANGES,
+            conditions: &[Condition::Hidden],
+        },
+        Exception {
+            scenarios: &["drop-column-after-dropping-fulltext"],
+            when: DROPPED_FULLTEXT,
+            conditions: &[Condition::DroppedFulltext],
+        },
     ],
 };
 
@@ -596,6 +673,16 @@ const RENAME_COLUMN: Case = Case {
         // on delete.
         "on-delete-cascade-rename-column",
         "on-delete-set-null-rename-column",
+        // The primary key, a foreign key's column with no key on it, an INT
+        // column, a column in a FULLTEXT index, a column next to one, and a
+        // STORED or VIRTUAL generated column.
+        "rename-column-id",
+        "rename-column-user-id",
+        "rename-column-int",
+        "rename-column-indexed-fulltext",
+        "rename-column-with-fulltext",
+        "rename-column-stored-generated",
+        "rename-column-virtual-generated",
     ],
     exceptions: &[
         Exception {
@@ -617,6 +704,22 @@ const RENAME_COLUMN: Case = Case {
             ],
             when: "if a CHECK constraint uses the column",
             conditions: &[Condition::CheckUsesColumn],
+        },
+        Exception {
+            scenarios: &[
+                "parent-rename-column-id",
+                "parent-rename-column-id-checks-off",
+            ],
+            when: "if a foreign key of another table references the column",
+            conditions: &[Condition::ReferencedColumn],
+        },
+        Exception {
+            scenarios: &[
+                "rename-column-in-foreign-key",
+                "rename-column-in-foreign-key-checks-off",
+            ],
+            when: "if the column is in a foreign key of the table",
+            conditions: &[Condition::InOwnForeignKey],
         },
     ],
 };
@@ -652,6 +755,8 @@ const CHANGE_INTEGER_TYPE: Case = Case {
         // on delete.
         "on-delete-cascade-int-to-bigint",
         "on-delete-set-null-int-to-bigint",
+        // BIGINT UNSIGNED to INT UNSIGNED, a value that fits.
+        "modify-user-id-to-int-unsigned",
     ],
     exceptions: &[
         Exception {
@@ -679,6 +784,18 @@ const LENGTHEN_VARCHAR: Case = Case {
         // on delete.
         "on-delete-cascade-varchar-50-to-60",
         "on-delete-set-null-varchar-50-to-60",
+        // Past 255 bytes already, in a plain, UNIQUE or FULLTEXT index, in
+        // a foreign key, or referenced by another table's key; an indexed
+        // column to VARCHAR(768), a key of 3072 bytes; and to VARCHAR(769)
+        // in a non-strict sql_mode, where MySQL cuts the key to a prefix
+        // (see [`key_too_long`]).
+        "varchar-100-to-120",
+        "varchar-255-to-300-unique",
+        "varchar-50-to-60-indexed-fulltext",
+        "varchar-100-to-120-in-foreign-key",
+        "parent-varchar-255-to-300",
+        "varchar-255-to-768-indexed",
+        "varchar-255-to-769-indexed-sql-mode-not-strict",
     ],
     exceptions: &[Exception {
         scenarios: &["lengthen-varchar-over-row-size-limit"],
@@ -715,7 +832,12 @@ const CHANGE_COLUMN_CHARSET: Case = Case {
 
 const CHANGE_COLUMN_COLLATION: Case = Case {
     id: "change-column-collation",
-    scenarios: &["change-column-collation"],
+    // A VARCHAR, a CHAR and a TEXT column, keeping the character set.
+    scenarios: &[
+        "change-column-collation",
+        "change-column-collation-char",
+        "change-column-collation-text",
+    ],
     exceptions: &[Exception {
         scenarios: &["change-column-collation-indexed"],
         when: "if the column is in an index",
@@ -731,6 +853,20 @@ const MAKE_COLUMN_NOT_NULL: Case = Case {
         when: NULL_IN_A_ROW,
         conditions: &[Condition::Hidden],
     }],
+};
+
+/// A change to NOT NULL after the input sets a sql_mode that is not strict,
+/// `''` or `'NO_ENGINE_SUBSTITUTION'`: MySQL copies the table, and refuses
+/// every other algorithm (error 1846), whether rows hold NULL or not (it
+/// makes them the type's empty value). See [`not_null`].
+const MAKE_COLUMN_NOT_NULL_NOT_STRICT: Case = Case {
+    id: "make-column-not-null-not-strict",
+    scenarios: &[
+        "make-column-not-null-sql-mode-empty",
+        "make-column-not-null-sql-mode-not-strict",
+        "make-column-not-null-with-nulls-sql-mode-not-strict",
+    ],
+    exceptions: &[],
 };
 
 const MAKE_COLUMN_NULLABLE: Case = Case {
@@ -750,6 +886,9 @@ const MAKE_COLUMN_NULLABLE: Case = Case {
         "on-delete-restrict-make-column-nullable",
         "on-delete-no-action-make-column-nullable",
         "cascade-parent-make-column-nullable",
+        // A BIGINT UNSIGNED column, with and without a foreign key on it.
+        "make-column-nullable-user-id",
+        "make-column-nullable-in-foreign-key",
     ],
     exceptions: &[],
 };
@@ -791,6 +930,13 @@ const ADD_INDEX: Case = Case {
         "on-delete-no-action-add-index",
         "cascade-parent-add-index",
         "set-null-parent-add-index",
+        // A descending index, an index of two columns, a key of 3072 bytes,
+        // the most a DYNAMIC table allows, and one of 3076 in a non-strict
+        // sql_mode, where MySQL cuts it to a prefix (see [`key_too_long`]).
+        "add-index-desc",
+        "add-index-two-columns",
+        "add-index-key-at-limit",
+        "add-index-key-over-limit-sql-mode-not-strict",
     ],
     exceptions: &[Exception {
         scenarios: &[
@@ -825,12 +971,30 @@ const ADD_UNIQUE_INDEX: Case = Case {
         // on delete.
         "on-delete-cascade-add-unique-index",
         "on-delete-set-null-add-unique-index",
+        // A NOT NULL column, two columns, and a key of 3072 bytes, the most
+        // a DYNAMIC table allows. On a table without a primary key: a
+        // nullable column, and a NOT NULL one next to a UNIQUE index of a
+        // NOT NULL column, which InnoDB keeps the rows in already.
+        "add-unique-index-not-null",
+        "add-unique-index-two-columns",
+        "add-unique-index-key-at-limit",
+        "add-unique-index-nullable-without-primary-key",
+        "add-unique-index-without-primary-key-with-unique-key",
     ],
     exceptions: &[
         Exception {
             scenarios: &["add-unique-index-duplicates"],
             when: DUPLICATE_VALUES,
             conditions: &[Condition::Hidden],
+        },
+        Exception {
+            scenarios: &[
+                "add-unique-index-without-primary-key",
+                "add-unique-index-two-columns-without-primary-key",
+            ],
+            when: "if the table has no primary key and the new index becomes the one InnoDB \
+                   keeps the rows in",
+            conditions: &[Condition::ClusteredKey],
         },
         Exception {
             scenarios: &[
@@ -846,19 +1010,38 @@ const ADD_UNIQUE_INDEX: Case = Case {
     ],
 };
 
+/// A key past the 3072 bytes a key holds on a DYNAMIC table, by kilit's
+/// count (see [`key_count`]): MySQL refuses it (error 1071) as written and
+/// in every variant, the key's length checked before the algorithm. The
+/// lab measured a new plain and UNIQUE index of one VARCHAR column, a
+/// VARCHAR of a plain index made longer, and the UNIQUE index in a
+/// non-strict sql_mode too. See [`key_too_long`] for the shapes kilit
+/// answers from them.
+const KEY_TOO_LONG: Case = Case {
+    id: "key-too-long",
+    scenarios: &[
+        "add-index-key-over-limit",
+        "add-unique-index-key-over-limit",
+        "add-unique-index-key-over-limit-sql-mode-not-strict",
+        "varchar-255-to-769-indexed",
+    ],
+    exceptions: &[],
+};
+
 const ADD_FULLTEXT_INDEX: Case = Case {
     id: "add-fulltext-index",
     scenarios: &[
         "add-fulltext-index",
-        // On one TEXT, MEDIUMTEXT or LONGTEXT column, or on a VARCHAR and a
-        // TEXT one; and with a foreign key that cascades or sets NULL on
-        // delete.
+        // On one VARCHAR, TEXT, MEDIUMTEXT or LONGTEXT column, or on a
+        // VARCHAR and a TEXT one; and with a foreign key that cascades or
+        // sets NULL on delete.
         "on-delete-cascade-add-fulltext-index",
         "on-delete-set-null-add-fulltext-index",
         "add-fulltext-index-text",
         "add-fulltext-index-mediumtext",
         "add-fulltext-index-longtext",
         "add-fulltext-index-two-columns",
+        "add-fulltext-index-email",
     ],
     exceptions: &[
         Exception {
@@ -870,6 +1053,11 @@ const ADD_FULLTEXT_INDEX: Case = Case {
             scenarios: &["add-fulltext-index-binary-text"],
             when: BINARY_TEXT,
             conditions: &[Condition::BinaryText],
+        },
+        Exception {
+            scenarios: &["add-fulltext-index-after-dropping-fulltext"],
+            when: DROPPED_FULLTEXT,
+            conditions: &[Condition::DroppedFulltext],
         },
     ],
 };
@@ -950,6 +1138,11 @@ const ADD_FOREIGN_KEY: Case = Case {
         "add-foreign-key-on-delete-cascade",
         "add-foreign-key-on-delete-set-null",
         "add-foreign-key-on-delete-set-default",
+        // ON DELETE RESTRICT, ON UPDATE CASCADE, and both CASCADE, as
+        // Laravel writes them.
+        "add-foreign-key-on-delete-restrict",
+        "add-foreign-key-on-update-cascade",
+        "add-foreign-key-on-delete-and-update-cascade",
     ],
     exceptions: &[
         Exception {
@@ -1020,6 +1213,8 @@ const ADD_FOREIGN_KEY_CHECKS_OFF: Case = Case {
         // The key with ON DELETE CASCADE or SET NULL (on a nullable column).
         "add-foreign-key-checks-off-on-delete-cascade",
         "add-foreign-key-checks-off-on-delete-set-null",
+        // To a table that does not exist.
+        "add-foreign-key-checks-off-missing-parent",
     ],
     exceptions: &[
         Exception {
@@ -1162,7 +1357,7 @@ const SET_TABLE_COMMENT: Case = Case {
 const MAX_TABLE_COMMENT: usize = 2048;
 
 /// Every case kilit knows.
-pub const CASES: [&Case; 36] = [
+pub const CASES: [&Case; 38] = [
     &ADD_COLUMN,
     &ADD_COLUMN_EXPRESSION_DEFAULT,
     &ADD_COLUMN_BINLOG_UNSAFE_DEFAULT,
@@ -1180,6 +1375,7 @@ pub const CASES: [&Case; 36] = [
     &CHANGE_COLUMN_CHARSET,
     &CHANGE_COLUMN_COLLATION,
     &MAKE_COLUMN_NOT_NULL,
+    &MAKE_COLUMN_NOT_NULL_NOT_STRICT,
     &MAKE_COLUMN_NULLABLE,
     &MODIFY_COLUMN_DEFAULT,
     &MOVE_COLUMN,
@@ -1187,6 +1383,7 @@ pub const CASES: [&Case; 36] = [
     &ADD_INDEX,
     &ADD_FUNCTIONAL_INDEX,
     &ADD_UNIQUE_INDEX,
+    &KEY_TOO_LONG,
     &ADD_FULLTEXT_INDEX,
     &ADD_FULLTEXT_INDEX_WITH_ORDER,
     &DROP_INDEX,
@@ -2226,10 +2423,154 @@ fn go_on(schema: &mut Schema, statement: &Statement, prediction: &Prediction, se
                 schema.apply(statement);
                 schema.lose_table(&table, reason, engine, false);
             }
+            Rewritten::Cut { table, keys } => {
+                schema.apply(statement);
+                schema.cut_keys(&table, &keys);
+            }
         }
     } else {
         follow(schema, statement, prediction);
     }
+}
+
+/// What MySQL makes of an ALTER that leaves a key of a table kilit knows
+/// past the most bytes a key holds (see [`long_keys`]). In strict SQL mode
+/// it refuses the statement. In a non-strict one it refuses a UNIQUE key or
+/// a key of several columns, and cuts a plain key of one column to a
+/// prefix: by hand on MySQL 8.0.46 and 8.4.13, SHOW CREATE TABLE then
+/// shows the key as `code`(768) for utf8mb4 on a DYNAMIC table. kilit
+/// follows that cut only after the input sets a non-strict sql_mode, as
+/// for a column too long (see [`rewritten`]); with the server's own
+/// sql_mode, or one kilit cannot tell, it stops trusting the table. A
+/// primary key, an ALTER of several changes, and a MODIFY or CHANGE on a
+/// table of another row format are not followed either. A new index on
+/// such a table is answered as before: see [`measured_case`].
+fn long_key(statement: &Statement, schema: &Schema, session: &Session) -> Option<Rewritten> {
+    let StatementKind::Alter(alter) = &statement.kind else {
+        return None;
+    };
+    let may_be_long = |operation: &Operation| match operation {
+        Operation::AddIndex(index) => matches!(index.kind, IndexKind::Plain | IndexKind::Unique),
+        Operation::ModifyColumn { .. } | Operation::ChangeColumn { .. } => true,
+        _ => false,
+    };
+    if !alter.operations.iter().any(may_be_long) {
+        return None;
+    }
+    let TableState::Known(table) = schema.table(&alter.table) else {
+        return None;
+    };
+    if alter.operations.len() > 1 {
+        return long_key_beside_other_changes(statement, alter, table, schema);
+    }
+    let dynamic = is_innodb_dynamic(table);
+    let mut long = Vec::new();
+    for operation in &alter.operations {
+        if !dynamic && matches!(operation, Operation::AddIndex(_)) {
+            continue;
+        }
+        if let Ok(keys) = long_keys(table, operation) {
+            long.extend(keys);
+        }
+    }
+    if long.is_empty() {
+        return None;
+    }
+    let lost = |why: &str| {
+        Some(Rewritten::Lost {
+            table: alter.table.clone(),
+            reason: format!("line {}: {why}", statement.line),
+            engine: table.engine.clone(),
+        })
+    };
+    if long.iter().any(|key| key.primary) {
+        return lost("a key past the bytes MySQL allows, which kilit does not follow here");
+    }
+    let cut = long.iter().all(|key| key.cut.is_some());
+    match &session.sql_mode {
+        SqlMode::Strict => Some(Rewritten::Refused),
+        _ if dynamic && !cut => Some(Rewritten::Refused),
+        SqlMode::NotStrict if dynamic => {
+            let keys: Option<Vec<(String, u64)>> = long
+                .iter()
+                .map(|key| match &key.cut {
+                    Some((column, Some(characters))) => Some((column.clone(), *characters)),
+                    _ => None,
+                })
+                .collect();
+            match keys {
+                Some(keys) => Some(Rewritten::Cut {
+                    table: alter.table.clone(),
+                    keys,
+                }),
+                None => lost("a key MySQL cuts to a prefix kilit cannot count"),
+            }
+        }
+        _ => lost(
+            "a key past the bytes MySQL allows: MySQL refuses it in strict SQL mode and cuts it \
+             to a prefix in the others, and kilit cannot tell the sql_mode",
+        ),
+    }
+}
+
+/// An ALTER of several changes that makes a new index or changes a column:
+/// kilit counts the keys of the table the whole statement leaves that it
+/// adds or whose columns it changes, and stops trusting the table if one is
+/// past the most bytes a key holds or cannot be counted.
+fn long_key_beside_other_changes(
+    statement: &Statement,
+    alter: &Alter,
+    table: &Table,
+    schema: &Schema,
+) -> Option<Rewritten> {
+    let after = crate::schema::table_after(schema, table, alter).ok()?;
+    let limit = key_limit(&after)?;
+    // The keys the statement adds, or whose columns it changes or adds.
+    let changed = |name: &str| {
+        let new = after.column(name);
+        new.is_none() || new != table.column(name)
+    };
+    let touched = |entries: &[String], before: Option<&[String]>| {
+        before != Some(entries)
+            || entries
+                .iter()
+                .any(|entry| changed(crate::schema::indexed_column(entry)))
+    };
+    let mut keys = Vec::new();
+    if touched(&after.primary_key, Some(&table.primary_key)) {
+        keys.push(after.primary_key.clone());
+    }
+    for index in &after.indexes {
+        if !matches!(index.kind, IndexKind::Plain | IndexKind::Unique) {
+            continue;
+        }
+        let before = table
+            .indexes
+            .iter()
+            .find(|old| old.name.is_some() && old.name == index.name)
+            .map(|old| old.columns.as_slice());
+        if touched(&index.columns, before) {
+            keys.push(index.columns.clone());
+        }
+    }
+    let fits = keys
+        .iter()
+        .filter(|entries| !entries.is_empty())
+        .all(|entries| {
+            matches!(
+                key_count(&after, entries, None, limit),
+                Ok(KeyCount::Fits | KeyCount::NotCounted)
+            )
+        });
+    (!fits).then(|| Rewritten::Lost {
+        table: alter.table.clone(),
+        reason: format!(
+            "line {}: a key past the bytes MySQL allows, or one kilit cannot count, beside \
+             other changes",
+            statement.line
+        ),
+        engine: table.engine.clone(),
+    })
 }
 
 /// Whether `column` may be longer than its type holds in some character
@@ -2252,6 +2593,12 @@ enum Rewritten {
         reason: String,
         engine: Option<Engine>,
     },
+    /// MySQL runs it, and cuts the plain keys of one column it makes too
+    /// long to a prefix: the column and the characters of each.
+    Cut {
+        table: String,
+        keys: Vec<(String, u64)>,
+    },
 }
 
 /// A column longer than its type holds, in ADD, MODIFY, CHANGE or CREATE
@@ -2267,6 +2614,9 @@ enum Rewritten {
 fn rewritten(statement: &Statement, schema: &Schema, session: &Session) -> Option<Rewritten> {
     if let Some(refused) = refused_by_mysql(statement, schema) {
         return Some(refused);
+    }
+    if let Some(long) = long_key(statement, schema, session) {
+        return Some(long);
     }
     // Without a dump, a table no statement before shows may be there: MySQL
     // then keeps it as it is, and creates nothing. One a statement before
@@ -3931,7 +4281,11 @@ fn answer<'r>(
         // The same situation measured with rows kilit cannot see, such as
         // duplicates, still becomes a note.
         for (hidden_at, hidden) in &unseen {
-            if !hidden.conditions.contains(&Condition::Hidden) || !includes(hidden, exception) {
+            // Duplicates refuse a UNIQUE index whichever key keeps the rows.
+            let clustered = exception.conditions == [Condition::ClusteredKey];
+            if !hidden.conditions.contains(&Condition::Hidden)
+                || !(includes(hidden, exception) || clustered)
+            {
                 continue;
             }
             if let Ok(rows) =
@@ -3952,10 +4306,15 @@ fn answer<'r>(
             notes,
         };
     }
+    let mut history = Vec::new();
     for (at, exception) in unseen {
         let Ok(other) = agreements.agreed(case, Group::Exception(at), variant, results) else {
             continue;
         };
+        if is_instant_history(exception) {
+            history.push((exception, other));
+            continue;
+        }
         let scenarios = scenario_list(exception.scenarios);
         if other == verdict {
             notes.push(format!("{}: same result ({scenarios})", exception.when));
@@ -3967,12 +4326,71 @@ fn answer<'r>(
             ));
         }
     }
+    notes.extend(history_notes(&history, &verdict, ""));
 
     Prediction::Measured {
         case: case.id,
         verdict,
         evidence: case.scenarios.to_vec(),
         notes,
+    }
+}
+
+/// Whether `exception` is a history of the table that turns an instant
+/// change into a rebuild: see [`INSTANT_HISTORY`].
+fn is_instant_history(exception: &Exception) -> bool {
+    exception
+        .scenarios
+        .iter()
+        .any(|id| INSTANT_HISTORY.contains(id))
+}
+
+/// The notes of the histories in `history`, each with its answer, for an
+/// answer `verdict`: none unless `verdict` is INSTANT, since a table that
+/// never takes an instant change has no such history to fear; one note for
+/// two histories with the same answer. `measured_apart` goes before the
+/// answer when it was measured in another situation, such as `not measured
+/// on a COMPACT table; on a DYNAMIC table, `.
+fn history_notes(
+    history: &[(&Exception, Verdict)],
+    verdict: &Verdict,
+    measured_apart: &str,
+) -> Vec<String> {
+    let instant = matches!(
+        verdict,
+        Verdict::Runs {
+            algorithm: Some(Algorithm::Instant),
+            ..
+        }
+    );
+    if !instant {
+        return Vec::new();
+    }
+    let said = |other: &Verdict| {
+        if other == verdict && measured_apart.is_empty() {
+            "same result".to_owned()
+        } else {
+            brief(other)
+        }
+    };
+    match history {
+        [(first, a), (second, b)] if a == b => vec![format!(
+            "{SIXTY_FOUR_CHANGES_OR_DROPPED_FULLTEXT}: {measured_apart}{} ({}, {})",
+            said(a),
+            scenario_list(first.scenarios),
+            scenario_list(second.scenarios)
+        )],
+        _ => history
+            .iter()
+            .map(|(exception, other)| {
+                format!(
+                    "{}: {measured_apart}{} ({})",
+                    exception.when,
+                    said(other),
+                    scenario_list(exception.scenarios)
+                )
+            })
+            .collect(),
     }
 }
 
@@ -4165,6 +4583,14 @@ fn measured_apart<'r>(
             hidden.push((at, exception));
             continue;
         }
+        // A FULLTEXT index dropped from a table kilit cannot see the history
+        // of is a note, as the hidden ones are.
+        if exception.conditions == [Condition::DroppedFulltext]
+            && holds(exception, situation) == Applies::Maybe
+        {
+            hidden.push((at, exception));
+            continue;
+        }
         match holds(exception, situation) {
             Applies::No => {}
             Applies::Unmeasured(reason) => return unknown(reason),
@@ -4196,10 +4622,15 @@ fn measured_apart<'r>(
     let too_long = measured
         .key_too_long
         .is_some_and(|too_long| too_long.id == case.id);
+    let mut history = Vec::new();
     for (at, exception) in hidden.into_iter().filter(|_| !too_long) {
         let Ok(other) = agreements.agreed(innodb, Group::Exception(at), variant, results) else {
             continue;
         };
+        if is_instant_history(exception) {
+            history.push((exception, other));
+            continue;
+        }
         notes.push(format!(
             "{}: not measured {}; {}, {} ({})",
             exception.when,
@@ -4208,6 +4639,12 @@ fn measured_apart<'r>(
             brief(&other),
             scenario_list(exception.scenarios)
         ));
+    }
+    if !history.is_empty()
+        && let Ok(verdict) = agreements.agreed(case, Group::Case, variant, results)
+    {
+        let apart = format!("not measured {}; {}, ", measured.name, measured.instead);
+        notes.extend(history_notes(&history, &verdict, &apart));
     }
     answer(case, situation, variant, results, agreements, notes)
 }
@@ -4937,7 +5374,10 @@ fn applies(condition: Condition, situation: &Situation<'_>) -> Applies {
             | Condition::ForeignKeyColumn
             | Condition::GeneratedColumnSource
             | Condition::CheckWithAnotherColumn
-            | Condition::CheckUsesColumn,
+            | Condition::CheckUsesColumn
+            | Condition::ReferencedColumn
+            | Condition::InOwnForeignKey
+            | Condition::VirtualColumn,
             None,
         ) => Applies::Maybe,
         (Condition::OnlyIndexOfForeignKey, _) => {
@@ -4955,6 +5395,23 @@ fn applies(condition: Condition, situation: &Situation<'_>) -> Applies {
         (Condition::BlobOrTextWithoutPrefix, _) => situation.index.map_or(Applies::No, |index| {
             blob_or_text_without_prefix(table, index)
         }),
+        (Condition::DroppedFulltext, _) => dropped_fulltext(table, situation.schema),
+        (Condition::ClusteredKey, _) => situation
+            .index
+            .map_or(Applies::No, |index| clustered_key(table, index)),
+        (Condition::ReferencedColumn, Some(column)) => referenced_column(table, column, situation),
+        (Condition::InOwnForeignKey, Some(column)) => in_own_foreign_key(table, column),
+        (Condition::VirtualColumn, Some(column)) => match table.column(column) {
+            Some(found)
+                if found
+                    .generated
+                    .as_ref()
+                    .is_some_and(|generated| !generated.stored) =>
+            {
+                Applies::Yes(vec![format!("{column} is a VIRTUAL generated column")])
+            }
+            _ => Applies::No,
+        },
         (Condition::FulltextIndex, _) => match kept_fulltext_index(table, situation.dropped) {
             Some(index) => Applies::Yes(vec![format!(
                 "{} has the FULLTEXT index {}",
@@ -4996,6 +5453,119 @@ fn applies(condition: Condition, situation: &Situation<'_>) -> Applies {
                 None => Applies::No,
             }
         }
+    }
+}
+
+/// Whether the new UNIQUE index `index` becomes the table's clustered
+/// index: see [`Condition::ClusteredKey`]. A primary key kilit sees, also
+/// an invisible one in a dump, keeps it from that.
+fn clustered_key(table: &Table, index: &Index) -> Applies {
+    let whole_not_null = |entries: &[String]| {
+        !entries.is_empty()
+            && entries.iter().all(|entry| {
+                !is_expression(entry)
+                    && !has_prefix(entry)
+                    && table
+                        .column(crate::schema::indexed_column(entry))
+                        .is_some_and(|column| {
+                            !table.is_nullable(column) && !is_blob_or_text(&column.data_type)
+                        })
+            })
+    };
+    if index.kind != IndexKind::Unique
+        || !table.primary_key.is_empty()
+        || !is_innodb(table)
+        || !whole_not_null(&index.columns)
+        || table
+            .indexes
+            .iter()
+            .any(|other| other.kind == IndexKind::Unique && whole_not_null(&other.columns))
+    {
+        return Applies::No;
+    }
+    Applies::Yes(vec![format!(
+        "{} has no primary key and no UNIQUE index of NOT NULL columns, so InnoDB keeps the \
+         rows in the new one",
+        table.name
+    )])
+}
+
+/// Whether a foreign key of another table references `column`, which the
+/// statement renames: see [`Condition::ReferencedColumn`]. Only a table a
+/// key may point at is looked at.
+fn referenced_column(table: &Table, column: &str, situation: &Situation<'_>) -> Applies {
+    let schema = situation.schema;
+    // A key never references a temporary table.
+    if schema.has_temporary(&table.name) {
+        return Applies::No;
+    }
+    // No key kilit holds references it: only one of a table kilit does not
+    // know may, and only an indexed column.
+    if !schema.may_be_referenced(&table.name, column) {
+        let indexed = table.in_primary_key(column)
+            || table.indexes.iter().any(|index| {
+                index
+                    .columns
+                    .iter()
+                    .any(|entry| same_column(crate::schema::indexed_column(entry), column))
+            });
+        return if indexed && schema.unseen_key_may_point_at(&table.name) {
+            Applies::Unmeasured(format!(
+                "{column} may be referenced by a foreign key of a table kilit does not know or \
+                 lost track of, and renaming a referenced column is measured only for a key \
+                 kilit knows"
+            ))
+        } else {
+            Applies::No
+        };
+    }
+    let Some((other, key)) = referenced_by(schema, table, column) else {
+        return match referenced(schema, table, column) {
+            Some(may_be) => Applies::Unmeasured(format!(
+                "{column} {may_be}, and renaming a referenced column is measured only for a \
+                 key kilit knows"
+            )),
+            None => Applies::No,
+        };
+    };
+    if same_in_any_case(&other, &table.name) {
+        return Applies::Unmeasured(format!(
+            "{column} is referenced by the foreign key {key} of the table itself, and renaming \
+             such a column has not been measured"
+        ));
+    }
+    Applies::Yes(vec![format!(
+        "{column} is referenced by the foreign key {key} on {other}"
+    )])
+}
+
+/// Whether `column`, which the statement renames, is in a foreign key of
+/// the table itself: see [`Condition::InOwnForeignKey`].
+fn in_own_foreign_key(table: &Table, column: &str) -> Applies {
+    match table.foreign_key_on(column) {
+        Some(key) => Applies::Yes(vec![format!(
+            "{column} is in the foreign key {}",
+            key.name.as_deref().unwrap_or_default()
+        )]),
+        None => Applies::No,
+    }
+}
+
+/// Whether the table has InnoDB's hidden column FTS_DOC_ID and no FULLTEXT
+/// index: see [`Condition::DroppedFulltext`].
+fn dropped_fulltext(table: &Table, schema: &Schema) -> Applies {
+    if !is_innodb(table) || table.fulltext_index().is_some() {
+        return Applies::No;
+    }
+    match table.doc_id {
+        DocId::Kept => Applies::Yes(vec![format!(
+            "{} had a FULLTEXT index that was dropped, and InnoDB keeps the hidden column \
+             FTS_DOC_ID it added",
+            table.name
+        )]),
+        DocId::Absent => Applies::No,
+        DocId::Unseen if schema.created(&table.name).is_some() => Applies::No,
+        DocId::Unseen | DocId::Unclear => Applies::Maybe,
     }
 }
 
@@ -7184,7 +7754,8 @@ fn classify(
                 &mut notes,
             )?;
             row = row_size(table, Some(&column.name), column)?;
-            case
+            let case = not_null(table, case, session, &mut notes)?;
+            modified_key(table, operation, case, session, &mut notes)?
         }
         Operation::ChangeColumn {
             old_name,
@@ -7232,7 +7803,8 @@ fn classify(
                 &mut notes,
             )?;
             row = row_size(table, Some(old_name), column)?;
-            case
+            let case = not_null(table, case, session, &mut notes)?;
+            modified_key(table, operation, case, session, &mut notes)?
         }
         Operation::AddIndex(index) if index.columns.iter().any(|entry| is_expression(entry)) => {
             check_functional_index(index, table)?;
@@ -7266,14 +7838,32 @@ fn classify(
             {
                 fulltext_shape(table, index)?;
             }
+            let plain = match index.kind {
+                IndexKind::Plain => &ADD_INDEX,
+                IndexKind::Unique => &ADD_UNIQUE_INDEX,
+                _ => &ADD_FULLTEXT_INDEX,
+            };
             match index.kind {
-                IndexKind::Plain => {
+                IndexKind::Plain | IndexKind::Unique => {
                     check_json_columns(index, table, &mut notes)?;
-                    &ADD_INDEX
-                }
-                IndexKind::Unique => {
-                    check_json_columns(index, table, &mut notes)?;
-                    &ADD_UNIQUE_INDEX
+                    if unmeasured.is_none()
+                        && let TableState::Known(table) = table
+                        && is_innodb_dynamic(table)
+                    {
+                        let keys = long_keys(table, operation)?;
+                        if let Some(case) =
+                            key_too_long(table, &keys, KeyShape::NewIndex, session, &mut notes)?
+                        {
+                            return Ok(Classified {
+                                case,
+                                notes,
+                                unmeasured: None,
+                                column: None,
+                                row,
+                            });
+                        }
+                    }
+                    plain
                 }
                 // MySQL refuses some on a table kilit knows: that reason first.
                 // Otherwise it is answered as the ALTER TABLE it runs as, and
@@ -7476,17 +8066,14 @@ fn check_new_index(table: &Table, index: &Index) -> Result<(), String> {
             other.name.as_deref().unwrap_or_default()
         ));
     }
-    let mut bytes: Option<u64> = Some(0);
     for entry in &index.columns {
         if is_expression(entry) {
-            bytes = None;
             continue;
         }
         let name = entry.split('(').next().unwrap_or(entry).trim();
         // The parser cuts a name that starts with a digit, such as `2e`, at
         // the digits: such a key part says nothing kilit can check.
         if name.starts_with(|c: char| c.is_ascii_digit()) {
-            bytes = None;
             continue;
         }
         let Some(found) = table.column(name) else {
@@ -7497,67 +8084,434 @@ fn check_new_index(table: &Table, index: &Index) -> Result<(), String> {
             ));
         };
         if has_prefix(entry) {
-            let more = prefix_bytes(table, found, entry)?;
-            bytes = match (bytes, more) {
-                (Some(total), Some(more)) => Some(total.saturating_add(more)),
-                _ => None,
-            };
-            continue;
+            prefix_bytes(table, found, entry)?;
         }
-        bytes = match (bytes, innodb_key_part_bytes(table, found)) {
-            (Some(total), Some(more)) => Some(total.saturating_add(more)),
-            _ => None,
-        };
-    }
-    // A FULLTEXT or spatial index has no such limit.
-    let innodb_dynamic = matches!(index.kind, IndexKind::Plain | IndexKind::Unique)
-        && matches!(table.engine, None | Some(Engine::InnoDb))
-        && matches!(
-            table.row_format,
-            None | Some(RowFormat::Default | RowFormat::Dynamic)
-        )
-        && table.key_block_size.is_none();
-    if innodb_dynamic && let Some(total) = bytes.filter(|total| *total > INNODB_KEY_BYTES) {
-        return Err(format!(
-            "the key takes {}, past the {INNODB_KEY_BYTES} bytes of an InnoDB key, which the \
-             lab has not measured",
-            row::bytes(total)
-        ));
     }
     Ok(())
 }
 
-/// The bytes a whole column takes in an InnoDB key: an integer its size, a
-/// CHAR or VARCHAR its length in its character set's widest characters, a
-/// BINARY or VARBINARY its length; `None` for any other type, or a
-/// character set kilit cannot tell.
-fn innodb_key_part_bytes(table: &Table, column: &Column) -> Option<u64> {
-    let per_character = || {
-        table
-            .text_settings(column)
-            .ok()
-            .map(|settings| settings.charset.max_bytes)
+/// What the parts of a key come to against the most bytes a key holds.
+#[derive(Debug, PartialEq, Eq)]
+enum KeyCount {
+    /// Within the limit.
+    Fits,
+    /// Past it, by kilit's count: this many bytes at least.
+    Over(u64),
+    /// Not counted, as before kilit counted keys: an expression, which a
+    /// functional index takes (see [`check_functional_index`]); a name the
+    /// parser cut at its leading digits, such as `2e`; a TEXT or BLOB column
+    /// taken whole, which MySQL refuses for that (error 1170, see
+    /// [`Condition::BlobOrTextWithoutPrefix`]) whatever the bytes.
+    NotCounted,
+    /// Why kilit cannot tell.
+    Unclear(String),
+}
+
+/// The bytes of the key of `entries` on `table`, as InnoDB counts them
+/// against `limit` (see [`row::key_part_bytes`]): the column `new` takes
+/// the place of the one named `old`, for a MODIFY or CHANGE. A prefix
+/// counts its length in characters, or in bytes for a binary type.
+fn key_count(
+    table: &Table,
+    entries: &[String],
+    new: Option<(&str, &Column)>,
+    limit: u64,
+) -> Result<KeyCount, String> {
+    let (mut least, mut most) = (0u64, 0u64);
+    for entry in entries {
+        let name = crate::schema::indexed_column(entry);
+        if is_expression(entry) || name.starts_with(|c: char| c.is_ascii_digit()) {
+            return Ok(KeyCount::NotCounted);
+        }
+        let column = match new {
+            Some((old, column)) if same_column(name, old) => column,
+            _ => match table.column(name) {
+                Some(column) => column,
+                None => {
+                    return Ok(KeyCount::Unclear(format!(
+                        "{} has no column {name} that kilit knows",
+                        table.name
+                    )));
+                }
+            },
+        };
+        let bytes = if has_prefix(entry) {
+            match prefix_bytes(table, column, entry)? {
+                Some(bytes) => Some((bytes, bytes)),
+                // A character set kilit cannot tell: 1 to 4 bytes a
+                // character.
+                None => entry
+                    .split_once('(')
+                    .and_then(|(_, rest)| rest.trim_end_matches(')').trim().parse::<u64>().ok())
+                    .map(|prefix| (prefix, prefix.saturating_mul(row::MOST_BYTES_PER_CHARACTER))),
+            }
+        } else if is_blob_or_text(&column.data_type) {
+            return Ok(KeyCount::NotCounted);
+        } else {
+            row::key_part_bytes(table, column)
+        };
+        let Some((low, high)) = bytes else {
+            return Ok(KeyCount::Unclear(format!(
+                "kilit cannot count the bytes {}, a {} column, takes in a key",
+                column.name,
+                type_name(&column.data_type)
+            )));
+        };
+        least = least.saturating_add(low);
+        most = most.saturating_add(high);
+    }
+    Ok(if most <= limit {
+        KeyCount::Fits
+    } else if least > limit {
+        KeyCount::Over(least)
+    } else {
+        KeyCount::Unclear(format!(
+            "kilit cannot tell the character set of a column of the key, which may take more \
+             than the {limit} bytes MySQL allows"
+        ))
+    })
+}
+
+/// A key of the table that a statement makes, or leaves, past the most
+/// bytes a key holds.
+#[derive(Debug)]
+struct LongKey {
+    /// `the index idx_code` or `the primary key`.
+    name: String,
+    unique: bool,
+    primary: bool,
+    /// The column of a plain key of one column, which MySQL cuts to a
+    /// prefix in a non-strict sql_mode, as the statement leaves it, with the
+    /// characters it cuts it to if kilit can count them: the most whole
+    /// characters within the limit. By hand on MySQL 8.0.46 and 8.4.13:
+    /// 768 of utf8mb4 and 3072 of latin1 at 3072 bytes, 191 of utf8mb4 at
+    /// 767, a prefix past the limit too; a UNIQUE key or a key of several
+    /// columns is never cut.
+    cut: Option<(String, Option<u64>)>,
+    /// The key takes a prefix of its column, a shape the lab has not
+    /// measured past the limit.
+    prefix: bool,
+    bytes: u64,
+    limit: u64,
+}
+
+/// The most bytes a key holds on an InnoDB table kilit knows the row format
+/// of: 3072 on DYNAMIC and COMPRESSED, 767 on COMPACT and REDUNDANT. `None`
+/// for another engine, or a row format kilit cannot tell.
+fn key_limit(table: &Table) -> Option<u64> {
+    if !matches!(table.engine, None | Some(Engine::InnoDb)) {
+        return None;
+    }
+    match (&table.row_format, &table.key_block_size) {
+        (None | Some(RowFormat::Default | RowFormat::Dynamic | RowFormat::Compressed), _) => {
+            Some(INNODB_KEY_BYTES)
+        }
+        (Some(RowFormat::Compact | RowFormat::Redundant), None) => Some(767),
+        _ => None,
+    }
+}
+
+/// The keys of `table` that `operation` makes, or makes longer, past the
+/// most bytes a key holds (see [`key_count`]): a new plain or UNIQUE index,
+/// or the keys a MODIFY or CHANGE of one of their columns leaves. A key
+/// kilit cannot count gives the reason.
+fn long_keys(table: &Table, operation: &Operation) -> Result<Vec<LongKey>, String> {
+    let Some(limit) = key_limit(table) else {
+        return Ok(Vec::new());
     };
-    match &column.data_type {
-        DataType::Integer { size, .. } => Some(match size {
-            IntegerSize::Tiny => 1,
-            IntegerSize::Small => 2,
-            IntegerSize::Medium => 3,
-            IntegerSize::Int => 4,
-            IntegerSize::Big => 8,
-        }),
-        DataType::VarChar { length } => Some(length.saturating_mul(per_character()?)),
-        DataType::Text(written) | DataType::Other(written) => {
-            let written = written.trim().to_ascii_uppercase();
-            let (base, rest) = written.split_once('(')?;
-            let length: u64 = rest.strip_suffix(')')?.trim().parse().ok()?;
-            match base.trim() {
-                "CHAR" | "CHARACTER" => Some(length.saturating_mul(per_character()?)),
-                "BINARY" | "VARBINARY" => Some(length),
-                _ => None,
+    let (keys, new): (Vec<KeyOf>, _) = match operation {
+        Operation::AddIndex(index)
+            if matches!(index.kind, IndexKind::Plain | IndexKind::Unique) =>
+        {
+            let name = match &index.name {
+                Some(name) => format!("the index {name}"),
+                None => "the index".to_owned(),
+            };
+            (
+                vec![KeyOf {
+                    name,
+                    entries: index.columns.clone(),
+                    unique: index.kind == IndexKind::Unique,
+                    primary: false,
+                }],
+                None,
+            )
+        }
+        Operation::ModifyColumn { column, .. } => (
+            keys_with(table, &column.name),
+            Some((column.name.as_str(), column)),
+        ),
+        Operation::ChangeColumn {
+            old_name, column, ..
+        } => (
+            keys_with(table, old_name),
+            Some((old_name.as_str(), column)),
+        ),
+        _ => return Ok(Vec::new()),
+    };
+    let mut long = Vec::new();
+    for KeyOf {
+        name,
+        entries,
+        unique,
+        primary,
+    } in keys
+    {
+        match key_count(table, &entries, new, limit)? {
+            KeyCount::Fits | KeyCount::NotCounted => {}
+            KeyCount::Unclear(reason) => return Err(reason),
+            KeyCount::Over(bytes) => {
+                let cut = match entries.as_slice() {
+                    [entry] if !unique && !primary => {
+                        let name = crate::schema::indexed_column(entry);
+                        let column = match new {
+                            Some((old, column)) if same_column(name, old) => Some(column),
+                            _ => table.column(name),
+                        };
+                        column.map(|column| {
+                            let characters = table
+                                .text_settings(column)
+                                .ok()
+                                .map(|settings| limit / settings.charset.max_bytes.max(1));
+                            (column.name.clone(), characters)
+                        })
+                    }
+                    _ => None,
+                };
+                long.push(LongKey {
+                    name,
+                    unique,
+                    primary,
+                    cut,
+                    prefix: entries.iter().any(|entry| has_prefix(entry)),
+                    bytes,
+                    limit,
+                });
             }
         }
     }
+    Ok(long)
+}
+
+/// A key of a table, or one a statement adds.
+struct KeyOf {
+    /// `the index idx_code` or `the primary key`.
+    name: String,
+    entries: Vec<String>,
+    unique: bool,
+    primary: bool,
+}
+
+/// The primary key and the plain and UNIQUE indexes of `table` that take
+/// the column `column`.
+fn keys_with(table: &Table, column: &str) -> Vec<KeyOf> {
+    let takes = |entries: &[String]| {
+        entries
+            .iter()
+            .any(|entry| same_column(crate::schema::indexed_column(entry), column))
+    };
+    let mut keys = Vec::new();
+    if takes(&table.primary_key) {
+        keys.push(KeyOf {
+            name: "the primary key".to_owned(),
+            entries: table.primary_key.clone(),
+            unique: true,
+            primary: true,
+        });
+    }
+    for index in &table.indexes {
+        if matches!(index.kind, IndexKind::Plain | IndexKind::Unique) && takes(&index.columns) {
+            keys.push(KeyOf {
+                name: format!("the index {}", index.name.as_deref().unwrap_or_default()),
+                entries: index.columns.clone(),
+                unique: index.kind == IndexKind::Unique,
+                primary: false,
+            });
+        }
+    }
+    keys
+}
+
+/// How a statement makes a key long.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyShape {
+    /// ADD INDEX or ADD UNIQUE INDEX.
+    NewIndex,
+    /// A MODIFY or CHANGE that makes a VARCHAR longer.
+    Longer,
+    /// Any other MODIFY or CHANGE, such as a wider character set.
+    OtherChange,
+}
+
+/// The answer for a statement that leaves the keys `keys` past the most
+/// bytes a key holds on a DYNAMIC table: `Some` case that measured the
+/// failure (error 1071), or `None` when MySQL cuts the key to a prefix and
+/// runs the statement as the plain change, with a note saying so.
+///
+/// The lab measured a new plain or UNIQUE index of one VARCHAR column, and
+/// a VARCHAR of a plain index made longer, in strict and non-strict
+/// sql_mode: strict refuses them all, in every variant; a non-strict one
+/// cuts the plain key of one column to a prefix with a warning, and
+/// refuses the UNIQUE one. By hand on MySQL 8.0.46 and 8.4.13, a key of
+/// two or more columns, and a UNIQUE one, are refused in every sql_mode,
+/// and a wider character set too in strict mode.
+fn key_too_long(
+    table: &Table,
+    keys: &[LongKey],
+    shape: KeyShape,
+    session: &Session,
+    notes: &mut Vec<String>,
+) -> Result<Option<&'static Case>, String> {
+    let Some(first) = keys.first() else {
+        return Ok(None);
+    };
+    let what = format!(
+        "{} takes {}, past the {} bytes a key holds",
+        first.name,
+        row::bytes(first.bytes),
+        first.limit
+    );
+    if keys.iter().any(|key| key.primary) {
+        return Err(format!(
+            "{what}, and a primary key that long has not been measured; MySQL refuses a key \
+             that long in strict SQL mode (error 1071, by hand on MySQL 8.0.46 and 8.4.13)"
+        ));
+    }
+    if !is_innodb_dynamic(table) {
+        return Err(format!(
+            "{what} on {}, which the lab has not measured there; MySQL refuses a key that long \
+             in strict SQL mode (error 1071, by hand on MySQL 8.0.46 and 8.4.13)",
+            table.name
+        ));
+    }
+    let cut = keys.iter().all(|key| key.cut.is_some());
+    let cut_measured = cut && shape != KeyShape::OtherChange && keys.iter().all(|key| !key.prefix);
+    let unique_measured = shape == KeyShape::NewIndex
+        && keys
+            .iter()
+            .all(|key| key.unique && key.cut.is_none() && !key.prefix);
+    match &session.sql_mode {
+        _ if unique_measured => Ok(Some(&KEY_TOO_LONG)),
+        SqlMode::Strict => Ok(Some(&KEY_TOO_LONG)),
+        SqlMode::ServerDefault => {
+            if cut {
+                notes.push(format!(
+                    "{STRICT_FOR_AN_EMPTY_DEFAULT} {}",
+                    if cut_measured {
+                        "MySQL cuts the key to a prefix with a warning (1071) and runs the \
+                         statement (add-index-key-over-limit-sql-mode-not-strict and 1 more \
+                         lab scenario)"
+                    } else {
+                        "MySQL may cut the key to a prefix with a warning, which the lab has \
+                         not measured for this change"
+                    }
+                ));
+            }
+            Ok(Some(&KEY_TOO_LONG))
+        }
+        SqlMode::NotStrict if cut_measured => {
+            for key in keys {
+                let Some((column, Some(characters))) = &key.cut else {
+                    return Err(format!(
+                        "{} takes {}, past the {} bytes a key holds, and kilit cannot tell the \
+                         prefix MySQL cuts it to in the non-strict sql_mode the input sets",
+                        key.name,
+                        row::bytes(key.bytes),
+                        key.limit
+                    ));
+                };
+                notes.push(format!(
+                    "{} takes {}, past the {} bytes a key holds: in the non-strict sql_mode the \
+                     input sets, MySQL cuts it to {column}({characters}) with a warning (1071)",
+                    key.name,
+                    row::bytes(key.bytes),
+                    key.limit
+                ));
+            }
+            Ok(None)
+        }
+        SqlMode::NotStrict => Err(format!(
+            "{what}; the input sets a non-strict sql_mode, in which the lab has not measured \
+             such a key: by hand on MySQL 8.0.46 and 8.4.13, MySQL refuses a UNIQUE key or a \
+             key of several columns (error 1071) and cuts a plain key of one column to a prefix"
+        )),
+        SqlMode::Unclear(reason) => Err(format!(
+            "{reason}, and {what}: MySQL refuses it in strict SQL mode (error 1071), and may cut \
+             it to a prefix in the others"
+        )),
+    }
+}
+
+/// A change to NOT NULL: MySQL copies the table when the sql_mode is not
+/// strict, and changes it in place when it is. The input shows the mode
+/// when it sets it; a framework may set one it does not show (Laravel's
+/// `'strict' => false`), so with none set kilit gives the strict answer and
+/// says what changes without it.
+fn not_null(
+    table: TableState<'_>,
+    case: &'static Case,
+    session: &Session,
+    notes: &mut Vec<String>,
+) -> Result<&'static Case, String> {
+    if !std::ptr::eq(case, &MAKE_COLUMN_NOT_NULL) {
+        return Ok(case);
+    }
+    match &session.sql_mode {
+        SqlMode::Strict => Ok(case),
+        SqlMode::NotStrict => Ok(&MAKE_COLUMN_NOT_NULL_NOT_STRICT),
+        SqlMode::Unclear(reason) => Err(format!(
+            "{reason}, and whether MySQL changes the column in place or copies the table \
+             depends on it"
+        )),
+        SqlMode::ServerDefault => {
+            if let TableState::Known(table) = table
+                && is_innodb_dynamic(table)
+            {
+                notes.push(format!(
+                    "{STRICT_FOR_AN_EMPTY_DEFAULT} MySQL copies the table, and writes wait \
+                     (make-column-not-null-sql-mode-not-strict and 1 more lab scenario)"
+                ));
+            }
+            Ok(case)
+        }
+    }
+}
+
+/// The answer for a MODIFY or CHANGE of `case` that may leave a key of the
+/// table past the most bytes a key holds: see [`key_too_long`].
+fn modified_key(
+    table: TableState<'_>,
+    operation: &Operation,
+    case: &'static Case,
+    session: &Session,
+    notes: &mut Vec<String>,
+) -> Result<&'static Case, String> {
+    let TableState::Known(table) = table else {
+        return Ok(case);
+    };
+    let keys = long_keys(table, operation)?;
+    if keys.is_empty() {
+        return Ok(case);
+    }
+    let shape = if std::ptr::eq(case, &LENGTHEN_VARCHAR)
+        || std::ptr::eq(case, &LENGTHEN_VARCHAR_PAST_255_BYTES)
+    {
+        KeyShape::Longer
+    } else {
+        KeyShape::OtherChange
+    };
+    Ok(key_too_long(table, &keys, shape, session, notes)?.unwrap_or(case))
+}
+
+/// Whether `table` is InnoDB with the DYNAMIC row format, the server's
+/// default, where a key holds 3072 bytes.
+fn is_innodb_dynamic(table: &Table) -> bool {
+    matches!(table.engine, None | Some(Engine::InnoDb))
+        && matches!(
+            table.row_format,
+            None | Some(RowFormat::Default | RowFormat::Dynamic)
+        )
+        && table.key_block_size.is_none()
 }
 
 /// The bytes a key part on a prefix of `column` takes, such as `note(10)`;
@@ -8520,6 +9474,16 @@ mod tests {
         }
     }
 
+    /// The notes of an answer but the one note of a table's history, which
+    /// every INSTANT add or drop of a column gets on a table the input did
+    /// not create; and how many such notes there were.
+    fn without_history(notes: &[String]) -> (Vec<&String>, usize) {
+        let (history, rest): (Vec<&String>, Vec<&String>) = notes
+            .iter()
+            .partition(|note| note.starts_with(SIXTY_FOUR_CHANGES));
+        (rest, history.len())
+    }
+
     /// The case, verdict and notes of a measured prediction.
     fn measured(prediction: Prediction) -> (&'static str, String, Vec<String>) {
         match prediction {
@@ -8768,8 +9732,9 @@ mod tests {
         assert_eq!(case, "add-column");
         assert_eq!(answer, "INSTANT, no rebuild, writes continue");
         // kilit does not know the table, so the exceptions are notes, and
-        // so is the limit of a record in a page.
-        assert_eq!(notes.len(), ADD_COLUMN.exceptions.len() + 1);
+        // so is the limit of a record in a page; the two histories of the
+        // table share one note.
+        assert_eq!(notes.len(), ADD_COLUMN.exceptions.len());
         assert_eq!(notes[0], PAGE_RECORD_UNSEEN);
         assert!(notes[1].starts_with("if the table has a FULLTEXT index: COPY"));
     }
@@ -9635,11 +10600,12 @@ mod tests {
                     PAGE_RECORD_UNSEEN,
                     "if the table has a FULLTEXT index: COPY, copies every row, writes wait \
                      (add-column-with-fulltext)",
-                    "if the table has had 64 instant column changes since it was last \
-                     rebuilt: INPLACE, rebuilds the table, writes continue \
-                     (add-column-after-64-changes)",
                     "if the row grows past the 65,535 bytes MySQL allows: fails with error 1118 \
                      (add-column-over-row-size-limit)",
+                    "if the table has had 64 instant column changes since it was last \
+                     rebuilt, or a FULLTEXT index that was dropped since then: INPLACE, \
+                     rebuilds the table, writes continue (add-column-after-64-changes, \
+                     add-column-after-dropping-fulltext)",
                 ],
                 "{unreadable}"
             );
@@ -9975,7 +10941,6 @@ mod tests {
                 "ALTER TABLE orders ADD UNIQUE INDEX I_AMOUNT (note)",
                 "error 1061",
             ),
-            ("ALTER TABLE orders ADD INDEX i (body)", "4000 bytes"),
             ("ALTER TABLE orders ADD INDEX i (note(51))", "error 1089"),
             (
                 "ALTER TABLE orders DROP INDEX ft_a",
@@ -10012,6 +10977,15 @@ mod tests {
                 on_shop(body, sql)
             );
         }
+        // A key past 3072 bytes is the lab's 1071 now (key-too-long).
+        let (case, verdict, _) = measured(on_shop(setup, "ALTER TABLE orders ADD INDEX i (body)"));
+        assert_eq!(
+            (case, verdict.as_str()),
+            (
+                "key-too-long",
+                "fails with error 1071: Specified key was too long; max key length is 3072 bytes"
+            )
+        );
     }
 
     #[test]
@@ -10129,20 +11103,38 @@ mod tests {
     }
 
     #[test]
-    fn a_fulltext_index_dropped_earlier_no_longer_counts() {
+    fn a_fulltext_index_dropped_earlier_leaves_the_hidden_column_the_next_one_uses() {
         // InnoDB keeps a hidden column for FULLTEXT indexes after the last
         // one is dropped, and MySQL then adds the next one without a
-        // rebuild. No schema shows that column, so kilit warns of a
-        // rebuild: the safe side.
+        // rebuild (add-fulltext-index-after-dropping-fulltext).
         let predictions = predictions_with(
             SHOP,
             "ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note);
              ALTER TABLE orders DROP INDEX ft_note;
              ALTER TABLE orders ADD FULLTEXT INDEX ft_email (email);",
         );
+        assert_eq!(said(&predictions[2]), "INPLACE, no rebuild, writes wait");
+        // A new column in between may rebuild the table, which the lab has
+        // not measured: the next one is answered as the first again, with
+        // the history as a note.
+        let predictions = predictions_with(
+            SHOP,
+            "ALTER TABLE orders ADD FULLTEXT INDEX ft_note (note);
+             ALTER TABLE orders DROP INDEX ft_note;
+             ALTER TABLE orders ADD COLUMN coupon INT NULL;
+             ALTER TABLE orders ADD FULLTEXT INDEX ft_email (email);",
+        );
         assert_eq!(
             said(&predictions[2]),
-            "INPLACE, rebuilds the table, writes wait"
+            "INPLACE, rebuilds the table, writes continue"
+        );
+        let (_, verdict, notes) = measured(predictions[3].clone());
+        assert_eq!(verdict, "INPLACE, rebuilds the table, writes wait");
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("add-fulltext-index-after-dropping-fulltext")),
+            "{notes:?}"
         );
     }
 
@@ -10158,6 +11150,10 @@ mod tests {
                     .to_owned(),
                 "if the column is TEXT in the binary character set, which MySQL makes a BLOB: \
                  fails with error 1283 (add-fulltext-index-binary-text)"
+                    .to_owned(),
+                "if the table has had a FULLTEXT index that was dropped since it was last \
+                 rebuilt: INPLACE, no rebuild, writes wait \
+                 (add-fulltext-index-after-dropping-fulltext)"
                     .to_owned(),
                 "if the table is MyISAM: COPY, copies every row, writes wait \
                  (myisam-add-fulltext-index and myisam-add-fulltext-index-text)"
@@ -10641,7 +11637,7 @@ mod tests {
         };
         assert_eq!(verdict.to_string(), "INSTANT, no rebuild, writes continue");
         assert_eq!(evidence, DROP_COLUMN.scenarios);
-        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(without_history(&notes), (vec![], 1), "{notes:?}");
         // A copy when the table has a FULLTEXT index.
         let Prediction::Measured {
             verdict,
@@ -10694,6 +11690,372 @@ mod tests {
                  duplicate values: fails with error 1062 \
                  (drop-column-in-two-column-primary-key-duplicates)",
                 "if the table has no such column: fails with error 1091 (drop-column-missing)",
+                "if the column is a VIRTUAL generated column: same result \
+                 (drop-column-virtual-generated)",
+                "if the table has had 64 instant column changes since it was last rebuilt, or a \
+                 FULLTEXT index that was dropped since then: INPLACE, rebuilds the table, \
+                 writes continue (drop-column-after-64-changes, \
+                 drop-column-after-dropping-fulltext)",
+            ]
+        );
+    }
+
+    /// The lab's default sql_mode, set for the session: strict.
+    const STRICT_SET: &str = "SET sql_mode = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,\
+        NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';";
+
+    #[test]
+    fn a_key_part_whose_character_set_is_unknown_counts_one_to_four_bytes_a_character() {
+        let table = |length: u64| {
+            Schema::from_sql(&format!(
+                "CREATE TABLE t (id INT PRIMARY KEY, code VARCHAR({length}) NULL)"
+            ))
+        };
+        let count = |length: u64| {
+            let schema = table(length);
+            let TableState::Known(t) = schema.table("t") else {
+                panic!("t is not known");
+            };
+            key_count(t, &["code".to_owned()], None, INNODB_KEY_BYTES).unwrap()
+        };
+        // 768 characters take 3072 bytes at most: within the limit.
+        assert_eq!(count(768), KeyCount::Fits);
+        // 769 to 3072 characters may or may not be past it.
+        assert!(matches!(count(769), KeyCount::Unclear(_)));
+        assert!(matches!(count(3072), KeyCount::Unclear(_)));
+        // 3073 characters take at least 3073 bytes.
+        assert_eq!(count(3073), KeyCount::Over(3073));
+    }
+
+    #[test]
+    fn a_key_counts_each_part_by_its_type() {
+        // By hand on MySQL 8.0.46 and 8.4.13: the largest utf8mb4 VARCHAR a
+        // key takes next to each type, and one more character is 1071.
+        for (other, largest) in [
+            ("DATE", 767),
+            ("TIMESTAMP", 767),
+            ("INT", 767),
+            ("DATETIME", 766),
+            ("DECIMAL(10,2)", 766),
+            ("DATETIME(6)", 766),
+            ("BIGINT", 766),
+            ("DECIMAL(20,2)", 765),
+            ("CHAR(10)", 758),
+        ] {
+            for (length, fits) in [(largest, true), (largest + 1, false)] {
+                let schema = Schema::from_sql(&format!(
+                    "CREATE TABLE t (id INT PRIMARY KEY, code VARCHAR({length}) NULL, \
+                     other {other} NULL) DEFAULT CHARSET=utf8mb4"
+                ));
+                let TableState::Known(t) = schema.table("t") else {
+                    panic!("t is not known");
+                };
+                let count = key_count(
+                    t,
+                    &["code".to_owned(), "other".to_owned()],
+                    None,
+                    INNODB_KEY_BYTES,
+                )
+                .unwrap();
+                assert_eq!(
+                    count == KeyCount::Fits,
+                    fits,
+                    "{other} with {length}: {count:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_key_mysql_cuts_to_a_prefix_is_followed_as_the_prefix() {
+        // In a non-strict sql_mode the key is code(768), so a longer column
+        // later fits even in strict mode.
+        let predictions = predictions_with(
+            SHOP,
+            &format!(
+                "SET sql_mode = 'NO_ENGINE_SUBSTITUTION';
+                 ALTER TABLE orders ADD COLUMN code VARCHAR(769) NULL;
+                 ALTER TABLE orders ADD INDEX idx_code (code);
+                 {STRICT_SET}
+                 ALTER TABLE orders MODIFY COLUMN code VARCHAR(2000) NULL;"
+            ),
+        );
+        let (case, _, notes) = measured(predictions[2].clone());
+        assert_eq!(case, "add-index");
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.ends_with("MySQL cuts it to code(768) with a warning (1071)")),
+            "{notes:?}"
+        );
+        let (case, _, _) = measured(predictions[4].clone());
+        assert_eq!(case, "lengthen-varchar");
+        // In strict mode MySQL refuses it, and the table stays as it was.
+        let predictions = predictions_with(
+            SHOP,
+            &format!(
+                "{STRICT_SET}
+                 ALTER TABLE orders ADD COLUMN code VARCHAR(769) NULL;
+                 ALTER TABLE orders ADD INDEX idx_code (code);
+                 ALTER TABLE orders DROP INDEX idx_code;"
+            ),
+        );
+        assert_eq!(measured(predictions[2].clone()).0, "key-too-long");
+        assert!(
+            reason(predictions[3].clone()).contains("no index idx_code"),
+            "{:?}",
+            predictions[3]
+        );
+        // With the server's own sql_mode MySQL may have cut it: kilit no
+        // longer knows the table.
+        let predictions = predictions_with(
+            SHOP,
+            "ALTER TABLE orders ADD COLUMN code VARCHAR(769) NULL;
+             ALTER TABLE orders ADD INDEX idx_code (code);
+             ALTER TABLE orders ADD COLUMN x INT NULL;",
+        );
+        assert_eq!(measured(predictions[1].clone()).0, "key-too-long");
+        assert!(matches!(predictions[2], Prediction::Unknown { .. }));
+    }
+
+    #[test]
+    fn a_temporary_table_hiding_a_parent_leaves_the_parent_s_keys_alone() {
+        let schema = format!(
+            "{SHOP}\nALTER TABLE orders ADD CONSTRAINT fk_user FOREIGN KEY (user_id) \
+             REFERENCES users (id);"
+        );
+        let predictions = predictions_with(
+            &schema,
+            "CREATE TEMPORARY TABLE users (id BIGINT UNSIGNED NOT NULL PRIMARY KEY);
+             ALTER TABLE users RENAME COLUMN id TO uid;
+             DROP TEMPORARY TABLE users;
+             ALTER TABLE users RENAME COLUMN id TO uid, ALGORITHM=INSTANT;",
+        );
+        // No key points at the temporary table.
+        let (_, _, notes) = measured(predictions[1].clone());
+        assert!(
+            notes.iter().all(|note| !note.contains("fk_user")),
+            "{notes:?}"
+        );
+        // The base table's key still references id: forced INSTANT fails
+        // (parent-rename-column-id).
+        assert_eq!(
+            fails_with(&predictions[3]),
+            Ok(1846),
+            "{:?}",
+            predictions[3]
+        );
+    }
+
+    #[test]
+    fn a_long_key_beside_other_changes_loses_the_table() {
+        let predictions = predictions_with(
+            SHOP,
+            "ALTER TABLE orders ADD COLUMN code VARCHAR(1000) NULL, ADD INDEX ix (code);
+             ALTER TABLE orders MODIFY code VARCHAR(1000) NOT NULL;",
+        );
+        match &predictions[1] {
+            Prediction::Unknown { reason, .. } => {
+                assert!(reason.contains("beside other changes"), "{reason}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_long_prefix_is_cut_in_a_non_strict_mode_and_refused_in_a_strict_one() {
+        // By hand on MySQL 8.0.46 and 8.4.13: code(900) on a utf8mb4
+        // VARCHAR(1000) becomes code(768) with warning 1071 in a non-strict
+        // sql_mode. kilit has no lab answer for it, and follows the cut.
+        let setup = "ALTER TABLE orders ADD COLUMN code VARCHAR(1000) NULL;";
+        let predictions = predictions_with(
+            &format!("{SHOP}\n{setup}"),
+            &format!(
+                "SET sql_mode = 'NO_ENGINE_SUBSTITUTION';
+                 ALTER TABLE orders ADD INDEX ix (code(900));
+                 {STRICT_SET}
+                 ALTER TABLE orders MODIFY COLUMN code VARCHAR(2000) NULL;"
+            ),
+        );
+        assert!(matches!(predictions[1], Prediction::Unknown { .. }));
+        assert_eq!(measured(predictions[3].clone()).0, "lengthen-varchar");
+        // A COMPACT table's MODIFY past 767 bytes is unknown, and in strict
+        // mode MySQL refuses it: the column keeps its length.
+        let compact = "CREATE TABLE c (id INT PRIMARY KEY, code VARCHAR(191) NULL, \
+                       KEY ix (code)) ENGINE=InnoDB ROW_FORMAT=COMPACT DEFAULT CHARSET=utf8mb4;";
+        let predictions = predictions_with(
+            compact,
+            &format!(
+                "{STRICT_SET}
+                 ALTER TABLE c MODIFY code VARCHAR(192) NULL;
+                 ALTER TABLE c MODIFY code VARCHAR(191) NULL;"
+            ),
+        );
+        assert!(
+            reason(predictions[1].clone()).contains("767"),
+            "{:?}",
+            predictions[1]
+        );
+        assert!(
+            reason(predictions[2].clone()).contains("modify-same-definition"),
+            "{:?}",
+            predictions[2]
+        );
+    }
+
+    #[test]
+    fn a_cut_leaves_a_shorter_prefix_index_of_the_column_as_it_is() {
+        let predictions = predictions_with(
+            SHOP,
+            &format!(
+                "ALTER TABLE orders ADD COLUMN code VARCHAR(1000) NULL;
+                 ALTER TABLE orders ADD INDEX a (code(100));
+                 SET sql_mode = 'NO_ENGINE_SUBSTITUTION';
+                 ALTER TABLE orders ADD INDEX b (code);
+                 {STRICT_SET}
+                 ALTER TABLE orders DROP INDEX b;
+                 ALTER TABLE orders MODIFY code VARCHAR(500) NULL;"
+            ),
+        );
+        assert_eq!(measured(predictions[6].clone()).0, "shorten-varchar");
+    }
+
+    #[test]
+    fn a_referenced_column_without_an_index_is_still_referenced() {
+        let schema = format!(
+            "{SHOP}\nALTER TABLE users ADD UNIQUE INDEX users_name_unique (name);\n\
+             ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL;\n\
+             ALTER TABLE orders ADD CONSTRAINT fk_name FOREIGN KEY (user_name) \
+             REFERENCES users (name);"
+        );
+        let predictions = predictions_with(
+            &schema,
+            "SET foreign_key_checks = 0;
+             ALTER TABLE users DROP INDEX users_name_unique;
+             ALTER TABLE users RENAME COLUMN name TO full_name, ALGORITHM=INSTANT;",
+        );
+        assert_eq!(
+            fails_with(&predictions[2]),
+            Ok(1846),
+            "{:?}",
+            predictions[2]
+        );
+    }
+
+    #[test]
+    fn engine_innodb_with_algorithm_instant_keeps_the_hidden_column() {
+        // By hand on MySQL 8.0.46 and 8.4.13: refused (1845), and the next
+        // ADD COLUMN ... ALGORITHM=INSTANT fails 1845 too.
+        let predictions = predictions_with(
+            SHOP,
+            "ALTER TABLE orders ADD FULLTEXT INDEX ft (note);
+             ALTER TABLE orders DROP INDEX ft;
+             ALTER TABLE orders ENGINE=InnoDB, ALGORITHM=INSTANT;
+             ALTER TABLE orders ADD COLUMN c INT NULL, ALGORITHM=INSTANT;",
+        );
+        assert_eq!(
+            fails_with(&predictions[3]),
+            Ok(1845),
+            "{:?}",
+            predictions[3]
+        );
+    }
+
+    #[test]
+    fn a_key_the_statement_does_not_touch_is_not_counted_beside_other_changes() {
+        let schema = "CREATE TABLE legacy (id INT PRIMARY KEY, flags BIT(20) NOT NULL, \
+                      KEY ix_flags (flags)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
+        let predictions = predictions_with(
+            schema,
+            "ALTER TABLE legacy ADD COLUMN c INT NULL, ADD INDEX ic (c);
+             ALTER TABLE legacy ADD COLUMN d INT NULL;",
+        );
+        assert_eq!(said(&predictions[1]), INSTANT_ANSWER);
+    }
+
+    #[test]
+    fn a_renamed_parent_column_is_the_one_its_keys_reference() {
+        let schema = format!(
+            "{SHOP}\nALTER TABLE orders ADD CONSTRAINT fk_user FOREIGN KEY (user_id) \
+             REFERENCES users (id);"
+        );
+        let predictions = predictions_with(
+            &schema,
+            "ALTER TABLE users RENAME COLUMN id TO uid;
+             ALTER TABLE users RENAME COLUMN uid TO id;
+             ALTER TABLE users RENAME COLUMN name TO full_name;",
+        );
+        for prediction in &predictions[..2] {
+            let (case, verdict, notes) = measured(prediction.clone());
+            assert_eq!(case, "rename-column");
+            assert_eq!(verdict, "INPLACE, no rebuild, writes continue");
+            assert!(
+                notes
+                    .iter()
+                    .any(|note| note.contains("foreign key fk_user on orders")),
+                "{notes:?}"
+            );
+        }
+        assert_eq!(
+            measured(predictions[2].clone()).1,
+            "INSTANT, no rebuild, writes continue"
+        );
+    }
+
+    #[test]
+    fn the_hidden_column_of_a_dropped_fulltext_index_goes_with_a_rebuild() {
+        let dropped = "ALTER TABLE orders ADD FULLTEXT INDEX ft (note);
+             ALTER TABLE orders DROP INDEX ft;";
+        // Measured: the next column is added with a rebuild.
+        let predictions = predictions_with(
+            SHOP,
+            &format!("{dropped}\nALTER TABLE orders ADD COLUMN c INT NULL;"),
+        );
+        assert_eq!(
+            said(&predictions[2]),
+            "INPLACE, rebuilds the table, writes continue"
+        );
+        // ENGINE=InnoDB rebuilds the table without it, as the lab saw.
+        let predictions = predictions_with(
+            SHOP,
+            &format!(
+                "{dropped}\nALTER TABLE orders ENGINE=InnoDB;\nALTER TABLE orders ADD COLUMN c INT NULL;"
+            ),
+        );
+        let (_, verdict, notes) = measured(predictions[3].clone());
+        assert_eq!(verdict, INSTANT_ANSWER);
+        assert_eq!(without_history(&notes), (vec![], 1));
+        assert!(!notes[0].contains("FULLTEXT"), "{notes:?}");
+        // With ALGORITHM=INSTANT MySQL refuses the rebuild (error 1845, by
+        // hand on MySQL 8.0.46 and 8.4.13): the column is still there.
+        let predictions = predictions_with(
+            SHOP,
+            &format!(
+                "{dropped}\nALTER TABLE orders ENGINE=InnoDB, ALGORITHM=INSTANT;\n\
+                 ALTER TABLE orders ADD COLUMN c INT NULL;"
+            ),
+        );
+        assert_eq!(
+            said(&predictions[3]),
+            "INPLACE, rebuilds the table, writes continue"
+        );
+        // A table the input created without FULLTEXT has no such history.
+        let predictions = predictions_with(
+            "",
+            "CREATE TABLE t (id INT PRIMARY KEY) ENGINE=InnoDB;
+             INSERT INTO t VALUES (1);
+             ALTER TABLE t ADD COLUMN c INT NULL;",
+        );
+        let notes = match predictions[2].clone() {
+            Prediction::Measured { notes, .. } => notes,
+            other => panic!("{other:?}"),
+        };
+        // Only its 64 instant column changes are a note, as they were.
+        assert_eq!(
+            notes,
+            [
+                "if the table has had 64 instant column changes since it was last rebuilt: \
+              INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)"
             ]
         );
     }
@@ -11051,11 +12413,7 @@ mod tests {
             );
             // The exceptions kilit cannot check without the table, and the
             // limit of a record in a page.
-            assert_eq!(
-                notes.len(),
-                ADD_COLUMN.exceptions.len() + 1,
-                "{sql}: {notes:?}"
-            );
+            assert_eq!(notes.len(), ADD_COLUMN.exceptions.len(), "{sql}: {notes:?}");
         }
         assert_eq!(
             measured(on_shop(
@@ -11877,6 +13235,11 @@ mod tests {
                 JSON_INDEX_UNSEEN.to_owned(),
                 "if the columns hold duplicate values: fails with error 1062 \
                  (add-unique-index-duplicates)"
+                    .to_owned(),
+                "if the table has no primary key and the new index becomes the one InnoDB \
+                 keeps the rows in: INPLACE, rebuilds the table, writes continue \
+                 (add-unique-index-without-primary-key and \
+                 add-unique-index-two-columns-without-primary-key)"
                     .to_owned(),
                 note(&ADD_UNIQUE_INDEX)
             ]
@@ -13107,7 +14470,7 @@ mod tests {
             let (case, verdict, notes) = measured(on_shop(setup, DROP_AMOUNT));
             assert_eq!(case, "drop-column", "{setup}");
             assert_eq!(verdict, INSTANT_ANSWER, "{setup}");
-            assert!(notes.is_empty(), "{setup}: {notes:?}");
+            assert_eq!(without_history(&notes), (vec![], 1), "{setup}");
         }
     }
 
@@ -13816,7 +15179,9 @@ mod tests {
             // The table stays known: no note for a table kilit lost.
             let (_, _, notes) = measured(predictions[1].clone());
             assert!(
-                notes.iter().all(|note| !note.contains("FULLTEXT")),
+                notes
+                    .iter()
+                    .all(|note| !note.contains("if the table has a FULLTEXT index")),
                 "{sql}: {notes:?}"
             );
         }
@@ -13911,7 +15276,9 @@ mod tests {
             assert_eq!(reason(predictions[0].clone()), why, "{sql}");
             let (_, _, notes) = measured(predictions[1].clone());
             assert_eq!(
-                notes.iter().any(|note| note.contains("FULLTEXT")),
+                notes
+                    .iter()
+                    .any(|note| note.contains("if the table has a FULLTEXT index")),
                 lost,
                 "{sql}: {notes:?}"
             );

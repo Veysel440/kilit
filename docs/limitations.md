@@ -6,6 +6,7 @@ safe.
 
 - [Input](#input)
 - [What is measured](#what-is-measured)
+- [Hidden situations](#hidden-situations)
 - [Tables kilit does not know](#tables-kilit-does-not-know)
 - [Columns and keys kilit does not judge](#columns-and-keys-kilit-does-not-judge)
 - [Defaults and row size](#defaults-and-row-size)
@@ -102,6 +103,56 @@ safe.
   together, is `UNKNOWN`. `KEY_BLOCK_SIZE` is measured at 8 only.
 - The cases of 64 instant column changes and of duplicate values were measured
   on DYNAMIC tables only; on other row formats the answer carries a note.
+
+## Hidden situations
+
+Some facts that change an answer are in neither the schema nor the migration.
+For these kilit keeps the plain answer and adds a note, or answers `UNKNOWN`
+where it cannot tell.
+
+- The rows of a table. A `NOT NULL` change, a unique index or a foreign key
+  may fail on rows kilit cannot see; the notes say which error.
+- The `sql_mode` a framework sets without a statement. Laravel with
+  `'strict' => false` sets `NO_ENGINE_SUBSTITUTION` when it connects, and
+  `--pretend` does not print it. kilit assumes strict mode. Then a change to
+  `NOT NULL` copies the table and writes wait, where kilit says INPLACE and
+  writes continue, and a key past 3072 bytes is cut to a prefix with a warning
+  where kilit says it fails with error 1071. The notes say so. When the input
+  itself sets `sql_mode` to `''` or `'NO_ENGINE_SUBSTITUTION'`, kilit answers
+  for that mode; in a form it cannot read, the answer is `UNKNOWN`.
+- Instant column changes. After 64 of them since the table was last rebuilt,
+  `ADD COLUMN` and `DROP COLUMN` rebuild the table. A dump does not show the
+  count.
+- A dropped FULLTEXT index. InnoDB leaves the hidden `FTS_DOC_ID` column
+  behind, and then `ADD COLUMN` and `DROP COLUMN` rebuild the table and `ADD
+  FULLTEXT` does not. A dump does not show it. On a table the input created,
+  or one that has a FULLTEXT index in the dump, kilit follows the column and
+  answers; on any other table the 64-change note and this one are one note.
+  `ADD FULLTEXT` on such a table gets a note that it may not rebuild. After a
+  statement that may have rebuilt the table, other than `ENGINE=InnoDB` alone,
+  kilit cannot tell whether the column is still there, and the note returns.
+
+What stays open:
+
+- Refusals that MySQL gives for input kilit still answers (a key that names a
+  column twice, `DECIMAL(66,2)`, a default the column cannot take, and the
+  like) are not all `UNKNOWN` yet.
+- A `MODIFY` that makes an indexed column pass 767 bytes on a COMPACT or
+  REDUNDANT table is `UNKNOWN`, naming error 1071 and the limit: the lab did
+  not measure it.
+- A key past the limit in a non-strict `sql_mode` is measured for a plain key
+  of one part and for a UNIQUE key. Other shapes (a prefix written longer than
+  the limit, a primary key, several clauses in one statement) are `UNKNOWN` or
+  lose the table; kilit follows a cut prefix only where it can tell exactly.
+- `CREATE TABLE` does not check the key length. `ALTER TABLE ... ENGINE=InnoDB`
+  with `ALGORITHM=INPLACE`, and other rebuilds, are not measured for the hidden
+  column, so kilit does not know whether they clear it.
+- Renaming a column that a foreign key references, on a COMPACT, COMPRESSED or
+  MyISAM table, is `UNKNOWN`: the lab measured the difference on DYNAMIC
+  tables only.
+- Under `--pretend` a migration may read the table first (`Schema::hasIndex()`)
+  and then drop an index kilit still sees; the statements after a read are
+  answered on the dump's table.
 
 ## Tables kilit does not know
 
@@ -216,8 +267,8 @@ kilit gives no answer that the table could change.
   them. The reason names an error only where a hand test on both servers
   recorded it: `ADD COLUMN ... NOT NULL` of a `DATE`, `DATETIME` or
   `TIMESTAMP` without a default; an index on a column the table does not have
-  (1072) or under a name the table has (1061); a key that kilit counts past
-  3072 bytes; a prefix longer than its column (1089 on a `VARCHAR`); dropping
+  (1072) or under a name the table has (1061); a key with a part kilit cannot
+  size; a prefix longer than its column (1089 on a `VARCHAR`); dropping
   one of several `FULLTEXT` indexes, a `UNIQUE` index on several columns, or a
   `UNIQUE` index of `NOT NULL` columns on a table without a primary key; a
   `MODIFY` that makes a primary key column nullable; and a `MODIFY` or
@@ -262,10 +313,10 @@ kilit gives no answer that the table could change.
   against adding an index. Each equals its plain twin, so kilit gives the
   twin's answer on a table with such a key. Keys of several columns, more
   than one such key on a table and a key that points at its own table are
-  not measured; nor
-  is `ADD FOREIGN KEY` with only `ON UPDATE CASCADE`, `ON UPDATE SET
-  DEFAULT`, `RESTRICT` or `NO ACTION`, which gets the answer of
-  `add-foreign-key`. `ON DELETE SET DEFAULT` is accepted by MySQL 8.0.46 and
+  not measured. `ADD FOREIGN KEY` was measured with `ON UPDATE CASCADE`, with
+  both actions `CASCADE` and with `ON DELETE RESTRICT`; with only `ON UPDATE SET
+  DEFAULT`, `RESTRICT` or `NO ACTION` it gets the answer of `add-foreign-key`
+  without a scenario of its own. `ON DELETE SET DEFAULT` is accepted by MySQL 8.0.46 and
   8.4.13 and measured.
 - A refusal is judged on the table the whole `ALTER` leaves, not clause by
   clause. `DROP FOREIGN KEY k, MODIFY c ... NOT NULL` is followed; `MODIFY c
@@ -301,11 +352,7 @@ kilit gives no answer that the table could change.
   columns of `utf8mb4` with a `VIRTUAL` generated column fail in a `CREATE
   TABLE` with error 1118: kilit does not count generated virtual columns in
   the row.
-- The 3072-byte count does not cover a `DATE`, `DATETIME` or `TIMESTAMP` key
-  part, so a key that holds one runs when MySQL may refuse it (1071). A key
-  that names a column twice (error 1060) runs too. Adding a `UNIQUE` index of
-  `NOT NULL` columns to a table without a primary key makes it the clustered
-  key, and kilit says no rebuild.
+- A key that names a column twice (error 1060) runs, where MySQL refuses it.
 
 - One `ALTER TABLE` takes every clause against the names the table had before
   the statement. kilit follows swaps and moves of names, `DROP x` with `ADD x`,

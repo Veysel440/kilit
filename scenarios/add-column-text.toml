@@ -1,0 +1,2 @@
+title = "Add a nullable TEXT column"
+operation = "add `body` text null"

@@ -1,0 +1,5 @@
+title = "Rename a VIRTUAL generated column"
+setup = [
+    "ALTER TABLE orders ADD COLUMN amount2 INT AS (amount * 2) VIRTUAL",
+]
+operation = "RENAME COLUMN amount2 TO amount3"

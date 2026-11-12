@@ -1,0 +1,5 @@
+title = "Drop a STORED generated column"
+setup = [
+    "ALTER TABLE orders ADD COLUMN amount2 INT AS (amount * 2) STORED",
+]
+operation = "DROP COLUMN amount2"

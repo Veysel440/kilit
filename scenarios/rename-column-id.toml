@@ -1,0 +1,2 @@
+title = "Rename the primary key column"
+operation = "RENAME COLUMN id TO order_id"

@@ -12,8 +12,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::charset::{Charset, canonical};
 use crate::parse::{parse, truncated_table};
 use crate::statement::{
-    Alter, Check, CheckColumns, Column, DataType, Engine, ForeignKey, ForeignKeyAction, Index,
-    IndexKind, IntegerSize, Operation, Position, RowFormat, Statement, StatementKind, Table,
+    Algorithm, Alter, Check, CheckColumns, Column, DataType, DocId, Engine, ForeignKey,
+    ForeignKeyAction, Index, IndexKind, IntegerSize, Operation, Position, RowFormat, Statement,
+    StatementKind, Table,
 };
 
 /// The tables kilit knows at one point of the input.
@@ -29,6 +30,11 @@ pub struct Schema {
     /// less: it only saves looking through every table for a key that
     /// points at one.
     pointed_at: BTreeSet<String>,
+    /// The columns a foreign key may reference, folded, with their table
+    /// folded: a key's columns, or "" for any column of a table a statement
+    /// kilit could not read points at. Like `pointed_at`, it may say too
+    /// much, never too little.
+    referenced_columns: BTreeSet<(String, String)>,
     /// A statement before this point names `default_storage_engine`, so a
     /// table created without `ENGINE` may have any engine. Only
     /// [`check`](crate::check) sets it: a schema dump writes `ENGINE` on
@@ -249,6 +255,28 @@ impl Schema {
         }
     }
 
+    /// MySQL cut each plain index of the table `name` that takes only the
+    /// column of an entry of `keys` to a prefix of that many characters (see
+    /// the caller in check.rs).
+    pub(crate) fn cut_keys(&mut self, name: &str, keys: &[(String, u64)]) {
+        let Some(Entry::Known(table)) = self.tables.get_mut(name) else {
+            return;
+        };
+        for index in &mut table.indexes {
+            if index.kind != IndexKind::Plain {
+                continue;
+            }
+            if let [entry] = index.columns.as_mut_slice()
+                && let Some((column, characters)) = keys.iter().find(|(column, characters)| {
+                    same(indexed_column(entry), column)
+                        && prefix_length(entry).is_none_or(|prefix| prefix > *characters)
+                })
+            {
+                *entry = format!("{column}({characters})");
+            }
+        }
+    }
+
     /// kilit stops trusting what it knew about the table `name`.
     pub(crate) fn lose_table(
         &mut self,
@@ -270,6 +298,26 @@ impl Schema {
     /// A key that points at the table in another letter case counts.
     pub(crate) fn may_be_pointed_at(&self, name: &str) -> bool {
         self.pointed_at.contains(&folded(name))
+    }
+
+    /// Whether a foreign key may reference the column `column` of the table
+    /// `name`. If not, none does.
+    pub(crate) fn may_be_referenced(&self, name: &str, column: &str) -> bool {
+        let table = folded(name);
+        self.referenced_columns
+            .contains(&(table.clone(), column.to_lowercase()))
+            || self.referenced_columns.contains(&(table, String::new()))
+    }
+
+    /// A foreign key `key` now points at its parent: the table and the
+    /// columns it references.
+    fn points(&mut self, key: &ForeignKey) {
+        let table = folded(&key.referenced_table);
+        for column in &key.referenced_columns {
+            self.referenced_columns
+                .insert((table.clone(), column.to_lowercase()));
+        }
+        self.pointed_at.insert(table);
     }
 
     /// Whether a foreign key of a table kilit does not know (one it lost
@@ -428,6 +476,8 @@ impl Schema {
                 Role::Unread => !names_one || temporary,
                 Role::PointsAt => {
                     self.pointed_at.insert(folded(written));
+                    self.referenced_columns
+                        .insert((folded(written), String::new()));
                     false
                 }
                 Role::Empties => false,
@@ -621,6 +671,13 @@ impl Schema {
         let mut table = source_table.clone();
         name.clone_into(&mut table.name);
         table.foreign_keys.clear();
+        // Whether the new table gets a hidden FTS_DOC_ID column the source
+        // kept, or may have, has not been measured.
+        if (table.fulltext_index().is_none() && table.doc_id != DocId::Unseen)
+            || self.created(source).is_none()
+        {
+            table.doc_id = DocId::Unclear;
+        }
         let mut checks = std::mem::take(&mut table.checks);
         if checks
             .iter()
@@ -858,8 +915,7 @@ impl Schema {
                 }
                 for foreign_key in table.foreign_keys.clone() {
                     index_foreign_key(&mut table, &foreign_key);
-                    self.pointed_at
-                        .insert(folded(&foreign_key.referenced_table));
+                    self.points(&foreign_key);
                 }
                 name_new_checks(&mut table);
                 self.put(key(&table.name), Entry::Known(table));
@@ -1108,8 +1164,66 @@ impl Schema {
         if self.pointed_at.contains(&folded(from)) {
             self.pointed_at.insert(folded(to));
         }
+        let moved: Vec<(String, String)> = self
+            .referenced_columns
+            .iter()
+            .filter(|(table, _)| *table == folded(from))
+            .map(|(_, column)| (folded(to), column.clone()))
+            .collect();
+        self.referenced_columns.extend(moved);
         if self.unseen_keys_point_at.contains(&folded(from)) {
             self.unseen_keys_point_at.insert(folded(to));
+        }
+    }
+
+    /// The foreign keys that point at a column of the table `name` that the
+    /// statement renames point at its new name: MySQL renames the column in
+    /// every key that references it. Only a table a key may point at is
+    /// looked at.
+    fn references_follow_their_column(&mut self, name: &str, operations: &[Operation]) {
+        // A key never points at a temporary table.
+        if !self.may_be_pointed_at(name) || self.hidden_by_temporary.contains_key(name) {
+            return;
+        }
+        let renames: Vec<(&str, &str)> = operations
+            .iter()
+            .filter_map(|operation| match operation {
+                Operation::RenameColumn { from, to } if !same(from, to) => {
+                    Some((from.as_str(), to.as_str()))
+                }
+                Operation::ChangeColumn {
+                    old_name, column, ..
+                } if !same(old_name, &column.name) => {
+                    Some((old_name.as_str(), column.name.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        let renames: Vec<(&str, &str)> = renames
+            .into_iter()
+            .filter(|(from, _)| self.may_be_referenced(name, from))
+            .collect();
+        if renames.is_empty() {
+            return;
+        }
+        for entry in self.tables.values_mut() {
+            let Entry::Known(table) = entry else {
+                continue;
+            };
+            for key in &mut table.foreign_keys {
+                if key.referenced_table != name {
+                    continue;
+                }
+                for column in &mut key.referenced_columns {
+                    if let Some((_, to)) = renames.iter().find(|(from, _)| same(column, from)) {
+                        (*to).clone_into(column);
+                    }
+                }
+            }
+        }
+        for (_, to) in renames {
+            self.referenced_columns
+                .insert((folded(name), to.to_lowercase()));
         }
     }
 
@@ -1294,6 +1408,8 @@ impl Schema {
         };
         // The table changes in place: an operation kilit cannot follow loses
         // it, so what the operations before that one did is never seen.
+        let had_fulltext = table.fulltext_index().is_some();
+        let was_innodb = matches!(table.engine, None | Some(Engine::InnoDb));
         let mut new_name = None;
         for operation in operations.iter() {
             let changed = match operation {
@@ -1368,10 +1484,22 @@ impl Schema {
             if let Operation::AddForeignKey(foreign_key) = operation
                 && table.engine != Some(Engine::MyIsam)
             {
-                self.pointed_at
-                    .insert(folded(&foreign_key.referenced_table));
+                let table = folded(&foreign_key.referenced_table);
+                for column in &foreign_key.referenced_columns {
+                    self.referenced_columns
+                        .insert((table.clone(), column.to_lowercase()));
+                }
+                self.pointed_at.insert(table);
             }
         }
+        table.doc_id = doc_id_after(
+            table,
+            had_fulltext,
+            was_innodb,
+            alter.algorithm,
+            &operations,
+        );
+        self.references_follow_their_column(&alter.table, &operations);
         if let Some(name) = new_name {
             // ALTER TABLE ... RENAME TO moves a temporary table (by hand on
             // MySQL 8.0.46 and 8.4.13): the table it hid is back, and kilit
@@ -2876,6 +3004,55 @@ fn unfollowed_options(column: &Column) -> Result<(), String> {
             column.name,
             column.other_options.join(" ")
         ))
+    }
+}
+
+/// The prefix length of a key entry such as `code(100)`.
+fn prefix_length(entry: &str) -> Option<u64> {
+    let (_, rest) = entry.split_once('(')?;
+    rest.trim_end_matches(')').trim().parse().ok()
+}
+
+/// What kilit knows of the hidden column FTS_DOC_ID after `operations`
+/// changed `table`, InnoDB before them if `was_innodb`, with the ALGORITHM
+/// `algorithm` the statement wrote (see [`DocId`]). A table that has a
+/// FULLTEXT index has it. Dropping the last one alone keeps it, and
+/// `ENGINE=InnoDB` alone, which rebuilds the table, removes it, as the lab
+/// saw; with ALGORITHM=COPY too, and with ALGORITHM=INSTANT MySQL refuses
+/// it (error 1845) and the column stays, by hand on MySQL 8.0.46 and
+/// 8.4.13. Any other statement on a table that has the column
+/// and no FULLTEXT index may rebuild it, which has not been measured, so
+/// kilit cannot tell any more.
+fn doc_id_after(
+    table: &Table,
+    had_fulltext: bool,
+    was_innodb: bool,
+    algorithm: Option<Algorithm>,
+    operations: &[Operation],
+) -> DocId {
+    if table.fulltext_index().is_some() {
+        return DocId::Kept;
+    }
+    if let [Operation::ChangeTableOptions(options)] = operations
+        && was_innodb
+        && options.engine == Some(Engine::InnoDb)
+        && options.row_format.is_none()
+        && options.key_block_size.is_none()
+    {
+        match algorithm {
+            None | Some(Algorithm::Copy) => return DocId::Absent,
+            Some(Algorithm::Instant) => return table.doc_id,
+            Some(Algorithm::Inplace) => {}
+        }
+    }
+    let only_drops_indexes = operations
+        .iter()
+        .all(|operation| matches!(operation, Operation::DropIndex { .. }));
+    match table.doc_id {
+        _ if had_fulltext && only_drops_indexes => DocId::Kept,
+        _ if had_fulltext => DocId::Unclear,
+        DocId::Kept => DocId::Unclear,
+        other => other,
     }
 }
 

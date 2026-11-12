@@ -1,0 +1,3 @@
+title = "Change a TEXT column's collation, keeping its character set"
+setup = ["ALTER TABLE orders ADD COLUMN body TEXT NULL"]
+operation = "MODIFY COLUMN body TEXT COLLATE utf8mb4_bin NULL"

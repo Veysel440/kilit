@@ -1,0 +1,2 @@
+title = "Change a BIGINT UNSIGNED column that no key uses to INT UNSIGNED"
+operation = "MODIFY COLUMN user_id INT UNSIGNED NOT NULL"

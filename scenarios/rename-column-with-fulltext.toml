@@ -1,0 +1,5 @@
+title = "Rename a column of a table that has a FULLTEXT index on another column"
+setup = [
+    "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_email (email)",
+]
+operation = "RENAME COLUMN note TO memo"

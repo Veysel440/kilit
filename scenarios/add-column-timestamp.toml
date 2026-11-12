@@ -1,0 +1,2 @@
+title = "Add a nullable TIMESTAMP column"
+operation = "add `created_at` timestamp null"

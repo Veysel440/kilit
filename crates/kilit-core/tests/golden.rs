@@ -52,14 +52,15 @@ fn lab_options(scenario: &ScenarioResult) -> String {
     options
 }
 
-/// The lab's tables as a scenario measured them: after its setup.
+/// The lab's tables as a scenario measured them: after its setup, as a
+/// schema dump of the lab's database shows them, which has no other table.
 fn lab_schema(scenario: &ScenarioResult) -> Schema {
     let mut sql = lab_tables_with(scenario.engine.as_deref(), &lab_options(scenario));
     for statement in &scenario.setup {
         sql.push_str(statement);
         sql.push_str(";\n");
     }
-    Schema::from_sql(&sql)
+    Schema::from_dump(&sql)
 }
 
 /// The scenario's statements as one SQL text, run as `variant`.
@@ -5672,7 +5673,7 @@ fn first_reason_on(server: &str, schema: &str, sql: &str) -> String {
 fn mentions_fulltext(prediction: &Prediction) -> bool {
     notes_of(prediction)
         .iter()
-        .any(|note| note.contains("FULLTEXT"))
+        .any(|note| note.contains("if the table has a FULLTEXT index"))
 }
 
 /// The lab's record of a forced COPY says the table was copied and does not
@@ -10127,14 +10128,24 @@ fn a_table_of_another_database_with_the_written_name_makes_a_case_only_statement
         "{sql}"
     );
     // Without that table the DROP INDEX is A: applied to orders, which no
-    // longer has the index, so no FULLTEXT note.
+    // longer has the index, so no FULLTEXT note. The dropped FULLTEXT index
+    // left its hidden column, so the new column rebuilds the table (the lab's
+    // add-column-after-dropping-fulltext).
     let sql = "ALTER TABLE ORDERS DROP INDEX ft;
         ALTER TABLE orders ADD COLUMN x INT NULL;";
-    assert_eq!(case_answers(&schema, sql), [UNKNOWN, INSTANT]);
+    assert_eq!(case_answers(&schema, sql), [UNKNOWN, INPLACE_REBUILD]);
+    // The index is gone: no note says the table has one. The hidden column
+    // it left is the one note.
     assert!(
         case_last_notes(&schema, sql)
             .iter()
-            .all(|note| !note.contains("FULLTEXT")),
+            .all(|note| !note.contains("if the table has a FULLTEXT index")),
+        "{sql}"
+    );
+    assert!(
+        case_last_notes(&schema, sql)
+            .iter()
+            .any(|note| note.contains("FTS_DOC_ID")),
         "{sql}"
     );
 }
@@ -13441,13 +13452,12 @@ fn the_four_shapes_the_lab_never_measured_are_unknown_on_a_known_table() {
         ("ALTER TABLE orders ADD COLUMN d DATETIME NOT NULL", &lab),
         ("ALTER TABLE orders ADD COLUMN d TIMESTAMP NOT NULL", &lab),
         ("alter table `orders` add `d` date not null", &lab),
-        // a column the table lacks, a name the table has, a key past
-        // 3072 bytes, a prefix longer than its column.
+        // a column the table lacks, a name the table has, a prefix longer
+        // than its column.
         ("ALTER TABLE orders ADD INDEX ix_x (nosuch)", &lab),
         ("CREATE INDEX ix_x ON orders (nosuch)", &lab),
         ("ALTER TABLE orders ADD INDEX ix_amount (email)", &lab),
         ("CREATE INDEX ix_amount ON orders (email)", &lab),
-        ("ALTER TABLE w ADD INDEX ix_big (a, b, c, d)", &wide),
         ("ALTER TABLE w ADD INDEX ix_note (note(100))", &wide),
         ("ALTER TABLE orders ADD INDEX ix_note (note(100))", &lab),
         // a column moved after itself.
@@ -13477,6 +13487,15 @@ fn the_four_shapes_the_lab_never_measured_are_unknown_on_a_known_table() {
                 "{server}: {statement}"
             );
         }
+    }
+    // A key past 3072 bytes is measured now (add-index-key-over-limit): four
+    // VARCHAR(255) utf8mb4 columns are 4080 bytes, 1071.
+    for server in [MYSQL_80, MYSQL_84] {
+        assert_eq!(
+            b1c_answer(server, &wide, "ALTER TABLE w ADD INDEX ix_big (a, b, c, d)"),
+            FAILS_1071,
+            "{server}"
+        );
     }
 }
 
@@ -13905,8 +13924,10 @@ fn dropping_a_unique_index_of_not_null_columns_on_a_table_without_a_primary_key_
 }
 
 #[test]
-fn a_prefix_that_makes_a_key_past_3072_bytes_is_unknown() {
-    // By hand: 1071 for body(800) and for summary(500), body(400) in utf8mb4.
+fn a_prefix_that_makes_a_key_past_3072_bytes_fails_with_1071() {
+    // By hand on MySQL 8.0.46 and 8.4.13: 1071 for body(800) and for
+    // summary(500), body(400) in utf8mb4; the lab's add-index-key-over-limit
+    // fails with 1071 in all six variants.
     let schema = Schema::from_sql(
         "CREATE TABLE `posts` (`id` bigint unsigned NOT NULL AUTO_INCREMENT, \
          `title` varchar(255) NOT NULL, `summary` varchar(600) NOT NULL, \
@@ -13918,10 +13939,10 @@ fn a_prefix_that_makes_a_key_past_3072_bytes_is_unknown() {
             "ALTER TABLE posts ADD INDEX i (body(800))",
             "ALTER TABLE posts ADD INDEX i2 (summary(500), body(400))",
         ] {
-            let reason = b1c_reason(server, &schema, sql);
-            assert!(
-                reason.contains("past the 3072 bytes"),
-                "{server}: {sql}: {reason}"
+            assert_eq!(
+                b1c_answer(server, &schema, sql),
+                FAILS_1071,
+                "{server}: {sql}"
             );
         }
         // Control: a prefix that fits keeps the lab's answer.
@@ -14121,11 +14142,13 @@ fn a_temporary_table_named_like_the_child_does_not_hide_the_real_child_keys() {
 }
 
 #[test]
-fn a_key_of_a_text_prefix_and_a_char_column_past_3072_bytes_is_unknown() {
+fn a_key_of_a_text_prefix_and_a_char_column_past_3072_bytes_fails_with_1071() {
     // By hand on MySQL 8.0.46 and 8.4.13: t(767) is 3068 bytes in utf8mb4, and
     // with c CHAR(20) (80 bytes) the key is 3148 bytes: 1071. With id INT
     // (4 bytes) it is 3072: accepted. Integers count their size, CHAR and
-    // VARCHAR their character set, BINARY and VARBINARY their bytes.
+    // VARCHAR their character set, BINARY and VARBINARY their bytes. A key
+    // over the limit fails with 1071 in every variant (the lab's
+    // add-index-key-over-limit); a JSON column stays unknown.
     let schema = Schema::from_sql(
         "CREATE TABLE `p` (`id` int NOT NULL, `t` text, `c` char(20) NOT NULL, \
          `bn` binary(20) NOT NULL, `vb` varbinary(100) NOT NULL, `j` json DEFAULT NULL, \
@@ -14133,22 +14156,18 @@ fn a_key_of_a_text_prefix_and_a_char_column_past_3072_bytes_is_unknown() {
          COLLATE=utf8mb4_unicode_ci;",
     );
     for server in [MYSQL_80, MYSQL_84] {
-        let reason = b1c_reason(server, &schema, "ALTER TABLE p ADD INDEX i16 (t(767), c)");
-        assert!(
-            reason.contains("the key takes 3148 bytes"),
-            "{server}: {reason}"
+        assert_eq!(
+            b1c_answer(server, &schema, "ALTER TABLE p ADD INDEX i16 (t(767), c)"),
+            FAILS_1071,
+            "{server}"
         );
         assert_eq!(
             b1c_answer(server, &schema, "ALTER TABLE p ADD INDEX i21 (t(767), id)"),
             INPLACE,
             "{server}"
         );
-        for sql in [
-            "ALTER TABLE p ADD INDEX i19 (vb(100), t(750))",
-            "ALTER TABLE p ADD INDEX i20 (j(10))",
-        ] {
-            assert_eq!(b1c_answer(server, &schema, sql), UNKNOWN, "{server}: {sql}");
-        }
+        let sql = "ALTER TABLE p ADD INDEX i20 (j(10))";
+        assert_eq!(b1c_answer(server, &schema, sql), UNKNOWN, "{server}: {sql}");
     }
 }
 
@@ -20316,4 +20335,1610 @@ fn dropping_every_column_of_a_two_column_check_in_one_alter_is_refused_with_3959
     assert_not_a_measured_answer(&run, 0, "drop a and b");
     assert_eq!(run.answers()[1], "unknown");
     assert!(run.reason(1).contains("1060"), "{}", run.reason(1));
+}
+
+// ---------------------------------------------------------------------------
+// A change to NOT NULL in a session that is not strict, the key length limit
+// of an index, the hidden column of a dropped FULLTEXT index, renaming a
+// column a foreign key uses, a UNIQUE index that becomes the clustered key,
+// and the forced variants of a VIRTUAL column and of a foreign key column.
+//
+// The expectations come from the lab: each test compares kilit's answers in
+// the six variants (as written, ALGORITHM=INSTANT, INPLACE, INPLACE with
+// LOCK=NONE, COPY, LOCK=NONE) with the verdicts of the scenario it names,
+// which are the same on MySQL 8.0.46 and 8.4.13. Where a comment says "By
+// hand on MySQL 8.0.46 and 8.4.13", the fact comes from a hand test on both
+// servers.
+// ---------------------------------------------------------------------------
+
+/// A verdict as the tests of this file write it.
+fn shown_verdict(verdict: &Verdict) -> String {
+    match verdict {
+        Verdict::Fails { code, .. } => format!("fails with error {code}"),
+        other => other.to_string(),
+    }
+}
+
+/// What the lab measured for the scenario `id` in the six variants, in the
+/// order of `Variant::ALL`; the two servers must agree.
+fn lab_six(id: &str) -> Vec<String> {
+    let mut seen: Option<Vec<String>> = None;
+    for results in Knowledge::built_in().servers() {
+        let server = results.server.name();
+        let scenario = results
+            .scenario(id)
+            .unwrap_or_else(|| panic!("{id} was not measured on {server}"));
+        let six: Vec<String> = Variant::ALL
+            .iter()
+            .map(|variant| shown_verdict(&scenario.verdict_for(*variant).unwrap()))
+            .collect();
+        match &seen {
+            Some(first) => assert_eq!(first, &six, "{id} differs between the servers"),
+            None => seen = Some(six),
+        }
+    }
+    seen.unwrap()
+}
+
+/// kilit's answer to `ALTER TABLE orders <operation>` in the six variants,
+/// after the statements in `before`, against the dump `dump`; the same on
+/// both servers.
+fn six_answers(dump: &str, before: &str, operation: &str) -> Vec<String> {
+    Variant::ALL
+        .iter()
+        .map(|variant| {
+            let sql = format!(
+                "{before}\nALTER TABLE orders {operation}{};",
+                variant.clause()
+            );
+            run_on_dump(dump, &sql).last_answer()
+        })
+        .collect()
+}
+
+/// The notes of the last statement of `run`.
+fn notes_of_last(run: &FilesRun) -> Vec<String> {
+    notes_of(&run.findings.last().unwrap().prediction).to_vec()
+}
+
+/// The lab's tables after `setup`, as a schema dump shows them.
+fn lab_dump(setup: &[&str]) -> String {
+    lab_after(setup)
+}
+
+const MODIFY_EMAIL_NOT_NULL: &str = "MODIFY COLUMN email VARCHAR(255) NOT NULL";
+const MODIFY_NOTE_NOT_NULL: &str = "MODIFY COLUMN note VARCHAR(50) NOT NULL";
+const LARAVEL_STRICT_SQL_MODE: &str = "SET sql_mode = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,\
+    NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';";
+
+#[test]
+fn making_a_column_not_null_after_an_empty_sql_mode_copies_the_table_and_the_other_variants_fail() {
+    // make-column-not-null-sql-mode-empty: COPY, writes wait; INSTANT,
+    // INPLACE, INPLACE with LOCK=NONE and LOCK=NONE fail with 1846.
+    for set in [
+        "SET sql_mode = '';",
+        "SET SESSION sql_mode = '';",
+        "set session sql_mode='';",
+    ] {
+        let six = six_answers(&lab_dump(&[]), set, MODIFY_EMAIL_NOT_NULL);
+        assert_eq!(six, lab_six("make-column-not-null-sql-mode-empty"), "{set}");
+        assert_eq!(six[0], COPY, "{set}");
+        for at in [1, 2, 3, 5] {
+            assert_eq!(six[at], FAILS_1846, "{set}: variant {at}");
+        }
+    }
+}
+
+#[test]
+fn making_a_column_not_null_after_no_engine_substitution_copies_the_table_and_the_other_variants_fail()
+ {
+    // make-column-not-null-sql-mode-not-strict.
+    let six = six_answers(
+        &lab_dump(&[]),
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION';",
+        MODIFY_EMAIL_NOT_NULL,
+    );
+    assert_eq!(six, lab_six("make-column-not-null-sql-mode-not-strict"));
+    assert_eq!(six[0], COPY);
+    assert_eq!(six[1], FAILS_1846);
+}
+
+#[test]
+fn making_a_column_with_nulls_not_null_after_a_sql_mode_that_is_not_strict_copies_the_table() {
+    // make-column-not-null-with-nulls-sql-mode-not-strict: the same six
+    // answers when some rows are NULL (they become the empty value).
+    for set in [
+        "SET sql_mode = '';",
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION';",
+    ] {
+        let six = six_answers(&lab_dump(&[]), set, MODIFY_NOTE_NOT_NULL);
+        assert_eq!(
+            six,
+            lab_six("make-column-not-null-with-nulls-sql-mode-not-strict"),
+            "{set}"
+        );
+        assert_eq!(six[0], COPY, "{set}");
+    }
+}
+
+#[test]
+fn a_change_that_makes_a_column_not_null_waits_for_writes_after_a_sql_mode_that_is_not_strict() {
+    let run = run_on_dump(
+        &lab_dump(&[]),
+        &format!("SET sql_mode = '';\nALTER TABLE orders {MODIFY_EMAIL_NOT_NULL};"),
+    );
+    assert_eq!(run.last_impact(), Impact::WritesWait);
+    // Laravel's spelling of the same change, ->change() on a nullable string.
+    let run = run_on_dump(
+        &lab_dump(&[]),
+        "SET SESSION sql_mode = '';\nalter table `orders` modify `email` varchar(255) not null;",
+    );
+    assert_eq!(run.last_answer(), COPY);
+    assert_eq!(run.last_impact(), Impact::WritesWait);
+    // CHANGE with the same name is the same change.
+    let run = run_on_dump(
+        &lab_dump(&[]),
+        "SET sql_mode = '';\nALTER TABLE orders CHANGE COLUMN email email VARCHAR(255) NOT NULL;",
+    );
+    assert_eq!(run.last_answer(), COPY);
+}
+
+#[test]
+fn making_a_column_not_null_after_a_strict_sql_mode_list_keeps_the_strict_answer_without_a_note() {
+    // not-null-no-nulls is the strict answer: INPLACE with a rebuild, writes
+    // continue. A strict list is no reason for the note about the mode.
+    for set in [
+        LARAVEL_STRICT_SQL_MODE,
+        "SET sql_mode = 'STRICT_TRANS_TABLES';",
+        "SET sql_mode = 'STRICT_ALL_TABLES';",
+        "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION,STRICT_TRANS_TABLES';",
+    ] {
+        let six = six_answers(&lab_dump(&[]), set, MODIFY_EMAIL_NOT_NULL);
+        assert_eq!(six, lab_six("not-null-no-nulls"), "{set}");
+        assert_eq!(six[0], INPLACE_REBUILD, "{set}");
+        let run = run_on_dump(
+            &lab_dump(&[]),
+            &format!("{set}\nALTER TABLE orders {MODIFY_EMAIL_NOT_NULL};"),
+        );
+        assert!(
+            notes_of_last(&run)
+                .iter()
+                .all(|note| !note.starts_with("assumes strict SQL mode")
+                    && !note.contains("make-column-not-null-sql-mode-not-strict")),
+            "{set}: {:?}",
+            notes_of_last(&run)
+        );
+    }
+}
+
+#[test]
+fn making_a_column_not_null_with_no_sql_mode_in_the_input_keeps_the_strict_answer_and_adds_a_note()
+{
+    // Laravel's 'strict' => false sets sql_mode = 'NO_ENGINE_SUBSTITUTION'
+    // on the connection and --pretend does not print it. kilit assumes the
+    // strict mode and says that MySQL copies the table otherwise.
+    let six = six_answers(&lab_dump(&[]), "", MODIFY_EMAIL_NOT_NULL);
+    assert_eq!(six, lab_six("not-null-no-nulls"));
+    let run = run_on_dump(
+        &lab_dump(&[]),
+        &format!("ALTER TABLE orders {MODIFY_EMAIL_NOT_NULL};"),
+    );
+    assert_eq!(run.last_impact(), Impact::WritesContinue);
+    let notes = notes_of_last(&run);
+    let note = notes
+        .iter()
+        .find(|note| note.starts_with("assumes strict SQL mode"))
+        .unwrap_or_else(|| panic!("no note about the SQL mode: {notes:?}"));
+    assert!(
+        note.contains("make-column-not-null-sql-mode-not-strict"),
+        "{note}"
+    );
+    assert!(note.contains("NO_ENGINE_SUBSTITUTION"), "{note}");
+    // The same in Laravel's spelling.
+    let run = run_on_dump(
+        &lab_dump(&[]),
+        "alter table `orders` modify `email` varchar(255) not null;",
+    );
+    assert_eq!(run.last_answer(), INPLACE_REBUILD);
+    assert!(
+        notes_of_last(&run)
+            .iter()
+            .any(|note| note.starts_with("assumes strict SQL mode")),
+        "{:?}",
+        notes_of_last(&run)
+    );
+}
+
+#[test]
+fn making_a_column_not_null_after_a_sql_mode_kilit_cannot_read_is_unknown() {
+    for set in [
+        "SET sql_mode = CONCAT(@@sql_mode, ',X');",
+        "SET GLOBAL sql_mode = '';",
+        "SET sql_mode = 'ANSI';",
+    ] {
+        let run = run_on_dump(
+            &lab_dump(&[]),
+            &format!("{set}\nALTER TABLE orders {MODIFY_EMAIL_NOT_NULL};"),
+        );
+        assert_eq!(run.last_answer(), UNKNOWN, "{set}");
+        assert_eq!(run.last_impact(), Impact::Unknown, "{set}");
+    }
+}
+
+#[test]
+fn a_sql_mode_set_after_the_change_to_not_null_does_not_change_its_answer() {
+    let run = run_on_dump(
+        &lab_dump(&[]),
+        &format!("ALTER TABLE orders {MODIFY_EMAIL_NOT_NULL};\nSET sql_mode = '';"),
+    );
+    assert_eq!(run.answers()[0], INPLACE_REBUILD);
+}
+
+#[test]
+fn a_sql_mode_that_is_not_strict_leaves_the_change_to_nullable_as_it_was() {
+    // make-column-nullable: no row can fail, whatever the mode.
+    let six = six_answers(
+        &lab_dump(&[]),
+        "SET sql_mode = '';",
+        "MODIFY COLUMN amount INT NULL",
+    );
+    assert_eq!(six, lab_six("make-column-nullable"));
+}
+
+// The hidden situations of an instant ADD COLUMN or DROP COLUMN: 64 instant
+// column changes since the last rebuild, and the hidden FTS_DOC_ID column
+// that a dropped FULLTEXT index leaves behind. A schema dump shows neither.
+
+const ADD_COUPON_COLUMN: &str = "ADD COLUMN coupon VARCHAR(255) NULL";
+const ADD_FULLTEXT_ON_NOTE: &str = "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note);";
+const DROP_FULLTEXT_ON_NOTE: &str = "ALTER TABLE orders DROP INDEX ft_orders_note;";
+
+/// The one note an INSTANT ADD COLUMN or DROP COLUMN on a table the input did
+/// not create carries for the two hidden situations. The words of the two
+/// verdicts come from the lab, and they are the same.
+fn instant_change_note(operation: &str) -> String {
+    let (after_64, after_fulltext) = (
+        format!("{operation}-after-64-changes"),
+        format!("{operation}-after-dropping-fulltext"),
+    );
+    let verdict = lab_six(&after_64)[0].clone();
+    assert_eq!(verdict, lab_six(&after_fulltext)[0]);
+    format!(
+        "if the table has had 64 instant column changes since it was last rebuilt, or a \
+         FULLTEXT index that was dropped since then: {verdict} ({after_64}, {after_fulltext})"
+    )
+}
+
+#[test]
+fn adding_a_column_to_a_dump_table_has_one_note_for_the_64_changes_and_a_dropped_fulltext_index() {
+    // add-column-after-64-changes and add-column-after-dropping-fulltext:
+    // INPLACE with a rebuild, writes continue.
+    let run = run_on_dump(
+        &lab_dump(&[]),
+        &format!("ALTER TABLE orders {ADD_COUPON_COLUMN};"),
+    );
+    assert_eq!(run.last_answer(), INSTANT);
+    let notes = notes_of_last(&run);
+    assert_eq!(
+        notes
+            .iter()
+            .filter(|note| note.contains("64 instant column changes"))
+            .count(),
+        1,
+        "{notes:?}"
+    );
+    assert!(
+        notes.contains(&instant_change_note("add-column")),
+        "{notes:?}"
+    );
+    // One answer, one note: nothing else speaks of a FULLTEXT index.
+    assert_eq!(
+        notes
+            .iter()
+            .filter(|note| note.contains("FULLTEXT"))
+            .count(),
+        1,
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn dropping_a_column_of_a_dump_table_has_one_note_for_the_64_changes_and_a_dropped_fulltext_index()
+{
+    // drop-column-after-64-changes and drop-column-after-dropping-fulltext.
+    let run = run_on_dump(&lab_dump(&[]), "ALTER TABLE orders DROP COLUMN note;");
+    assert_eq!(run.last_answer(), INSTANT);
+    let notes = notes_of_last(&run);
+    assert!(
+        notes.contains(&instant_change_note("drop-column")),
+        "{notes:?}"
+    );
+    assert_eq!(
+        notes
+            .iter()
+            .filter(|note| note.contains("FULLTEXT"))
+            .count(),
+        1,
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn the_note_follows_a_forced_instant_but_not_a_forced_inplace_or_copy() {
+    // The note belongs to an INSTANT answer only: the hidden situations
+    // turn an INSTANT change into a rebuild, and nothing else.
+    for operation in [ADD_COUPON_COLUMN, "DROP COLUMN note"] {
+        let instant = run_on_dump(
+            &lab_dump(&[]),
+            &format!("ALTER TABLE orders {operation}, ALGORITHM=INSTANT;"),
+        );
+        assert_eq!(instant.last_answer(), INSTANT, "{operation}");
+        assert!(
+            notes_of_last(&instant)
+                .iter()
+                .any(|note| note.contains("64 instant column changes")),
+            "{operation}"
+        );
+        for clause in [
+            ", ALGORITHM=INPLACE",
+            ", ALGORITHM=COPY",
+            ", ALGORITHM=INPLACE, LOCK=NONE",
+        ] {
+            let run = run_on_dump(
+                &lab_dump(&[]),
+                &format!("ALTER TABLE orders {operation}{clause};"),
+            );
+            assert_ne!(run.last_answer(), INSTANT, "{operation}{clause}");
+            assert!(
+                notes_of_last(&run)
+                    .iter()
+                    .all(|note| !note.contains("64 instant column changes")
+                        && !note.contains("FULLTEXT index that was dropped")),
+                "{operation}{clause}: {:?}",
+                notes_of_last(&run)
+            );
+        }
+    }
+}
+
+#[test]
+fn an_add_or_drop_column_on_a_table_that_never_takes_an_instant_change_has_no_such_note() {
+    // COMPRESSED and MyISAM tables never take an instant change.
+    let compressed = lab_with_options(COMPRESSED, &[]);
+    let myisam = lab_tables(Some("MyISAM"));
+    for (name, dump) in [("COMPRESSED", &compressed), ("MyISAM", &myisam)] {
+        for operation in ["ADD COLUMN coupon VARCHAR(255) NULL", "DROP COLUMN note"] {
+            let run = run_on_dump(dump, &format!("ALTER TABLE orders {operation};"));
+            assert_ne!(run.last_answer(), INSTANT, "{name}: {operation}");
+            if let Prediction::Measured { notes, .. } = &run.findings.last().unwrap().prediction {
+                assert!(
+                    notes
+                        .iter()
+                        .all(|note| !note.contains("64 instant column changes")
+                            && !note.contains("FULLTEXT index that was dropped")),
+                    "{name}: {operation}: {notes:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_table_the_input_created_without_a_fulltext_index_has_no_note_about_one() {
+    let run = run_without_dump(
+        "CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT) ENGINE=InnoDB;
+         ALTER TABLE t ADD COLUMN c INT NULL;
+         ALTER TABLE t DROP COLUMN b;",
+    );
+    for at in [1, 2] {
+        assert_eq!(run.answers()[at], INSTANT, "statement {at}");
+        let notes = notes_of(&run.findings[at].prediction);
+        assert!(
+            notes.iter().all(|note| !note.contains("FULLTEXT")),
+            "statement {at}: {notes:?}"
+        );
+    }
+    // The 64 changes need no FULLTEXT index; the note stays on an ADD COLUMN.
+    assert!(
+        notes_of(&run.findings[1].prediction)
+            .iter()
+            .any(|note| note.starts_with("if the table has had 64 instant column changes")),
+    );
+}
+
+#[test]
+fn a_fulltext_index_added_and_dropped_in_the_input_makes_the_next_add_column_the_measured_rebuild()
+{
+    // add-column-after-dropping-fulltext: INPLACE with a rebuild; INSTANT 1845.
+    let before = format!("{ADD_FULLTEXT_ON_NOTE}\n{DROP_FULLTEXT_ON_NOTE}");
+    let six = six_answers(&lab_dump(&[]), &before, ADD_COUPON_COLUMN);
+    assert_eq!(six, lab_six("add-column-after-dropping-fulltext"));
+    assert_eq!(six[0], INPLACE_REBUILD);
+    assert_eq!(six[1], FAILS_1845);
+    let run = run_on_dump(
+        &lab_dump(&[]),
+        &format!("{before}\nALTER TABLE orders {ADD_COUPON_COLUMN};"),
+    );
+    assert_eq!(run.last_impact(), Impact::WritesContinue);
+}
+
+#[test]
+fn a_fulltext_index_added_and_dropped_in_the_input_makes_the_next_drop_column_the_measured_rebuild()
+{
+    // drop-column-after-dropping-fulltext (DROP COLUMN amount).
+    let before = format!("{ADD_FULLTEXT_ON_NOTE}\n{DROP_FULLTEXT_ON_NOTE}");
+    let six = six_answers(&lab_dump(&[]), &before, "DROP COLUMN amount");
+    assert_eq!(six, lab_six("drop-column-after-dropping-fulltext"));
+    assert_eq!(six[0], INPLACE_REBUILD);
+}
+
+#[test]
+fn a_fulltext_index_added_and_dropped_in_the_input_makes_the_next_fulltext_index_not_rebuild() {
+    // add-fulltext-index-after-dropping-fulltext: INPLACE, no rebuild,
+    // writes wait (the hidden column is there already).
+    let before = format!("{ADD_FULLTEXT_ON_NOTE}\n{DROP_FULLTEXT_ON_NOTE}");
+    let six = six_answers(
+        &lab_dump(&[]),
+        &before,
+        "ADD FULLTEXT INDEX ft_orders_email (email)",
+    );
+    assert_eq!(six, lab_six("add-fulltext-index-after-dropping-fulltext"));
+    assert_eq!(six[0], FULLTEXT_SECOND);
+}
+
+#[test]
+fn the_fulltext_index_laravel_drops_leaves_the_same_hidden_column() {
+    // $table->fullText('note'); then $table->dropFullText(...) in a later
+    // migration, in Laravel's spelling.
+    let run = run_on_dump(
+        &lab_dump(&[]),
+        "alter table `orders` add fulltext `orders_note_fulltext`(`note`);
+         alter table `orders` drop index `orders_note_fulltext`;
+         alter table `orders` add `coupon` varchar(255) null;",
+    );
+    assert_eq!(run.last_answer(), INPLACE_REBUILD);
+}
+
+#[test]
+fn dropping_a_fulltext_index_the_dump_shows_leaves_the_hidden_column_too() {
+    // The dump has the index, so kilit knows the table has the column.
+    let dump = format!(
+        "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `amount` int NOT NULL,
+  `note` text,
+  PRIMARY KEY (`id`){FULLTEXT_KEY}
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+"
+    );
+    let six = six_answers(
+        &dump,
+        "ALTER TABLE orders DROP INDEX ft_note;",
+        ADD_COUPON_COLUMN,
+    );
+    assert_eq!(six, lab_six("add-column-after-dropping-fulltext"));
+    // With the index still there the table is copied for a new column.
+    let run = run_on_dump(&dump, &format!("ALTER TABLE orders {ADD_COUPON_COLUMN};"));
+    assert_eq!(run.last_answer(), COPY);
+}
+
+#[test]
+fn another_fulltext_index_keeps_a_new_column_a_copy_after_one_is_dropped() {
+    let dump = "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `note` text,
+  `body` text,
+  PRIMARY KEY (`id`),
+  FULLTEXT KEY `ft_note` (`note`),
+  FULLTEXT KEY `ft_body` (`body`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+    let run = run_on_dump(
+        dump,
+        &format!("ALTER TABLE orders DROP INDEX ft_note;\nALTER TABLE orders {ADD_COUPON_COLUMN};"),
+    );
+    assert_eq!(run.last_answer(), COPY);
+    let run = run_on_dump(
+        dump,
+        &format!(
+            "ALTER TABLE orders DROP INDEX ft_note;
+             ALTER TABLE orders DROP INDEX ft_body;
+             ALTER TABLE orders {ADD_COUPON_COLUMN};"
+        ),
+    );
+    assert_eq!(run.last_answer(), INPLACE_REBUILD);
+}
+
+#[test]
+fn rebuilding_the_table_with_engine_innodb_removes_the_hidden_column() {
+    // add-column-after-dropping-fulltext-and-rebuilding: INSTANT, as for a
+    // table that never had the index.
+    let before = format!(
+        "{ADD_FULLTEXT_ON_NOTE}\n{DROP_FULLTEXT_ON_NOTE}\nALTER TABLE orders ENGINE=InnoDB;"
+    );
+    let six = six_answers(&lab_dump(&[]), &before, ADD_COUPON_COLUMN);
+    assert_eq!(
+        six,
+        lab_six("add-column-after-dropping-fulltext-and-rebuilding")
+    );
+    assert_eq!(six[0], INSTANT);
+    // No hidden column to note: the note is the old one for the 64 changes.
+    let run = run_on_dump(
+        &lab_dump(&[]),
+        &format!("{before}\nALTER TABLE orders {ADD_COUPON_COLUMN};"),
+    );
+    assert!(
+        notes_of_last(&run)
+            .iter()
+            .all(|note| !note.contains("FTS_DOC_ID")),
+        "{:?}",
+        notes_of_last(&run)
+    );
+}
+
+#[test]
+fn any_other_statement_after_the_dropped_fulltext_index_makes_the_hidden_column_unclear_again() {
+    // Only ENGINE=InnoDB was measured to remove the column. After another
+    // statement kilit gives the plain answer and the note.
+    let run = run_on_dump(
+        &lab_dump(&[]),
+        &format!(
+            "{ADD_FULLTEXT_ON_NOTE}
+             {DROP_FULLTEXT_ON_NOTE}
+             ALTER TABLE orders ADD COLUMN first_added INT NULL;
+             ALTER TABLE orders {ADD_COUPON_COLUMN};"
+        ),
+    );
+    assert_eq!(run.answers()[2], INPLACE_REBUILD);
+    assert_eq!(run.last_answer(), INSTANT);
+    assert!(
+        notes_of_last(&run).contains(&instant_change_note("add-column")),
+        "{:?}",
+        notes_of_last(&run)
+    );
+}
+
+#[test]
+fn adding_a_fulltext_index_to_a_dump_table_says_it_may_not_rebuild() {
+    // add-fulltext-index-after-dropping-fulltext: a dropped index leaves the
+    // hidden column, and then the table is not rebuilt. A dump cannot show it.
+    let run = run_on_dump(
+        &lab_dump(&[]),
+        "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note);",
+    );
+    assert_eq!(run.last_answer(), FULLTEXT_REBUILD_WAIT);
+    let after_drop = lab_six("add-fulltext-index-after-dropping-fulltext")[0].clone();
+    assert!(
+        notes_of_last(&run).iter().any(|note| {
+            note.contains(&after_drop)
+                && note.contains("add-fulltext-index-after-dropping-fulltext")
+        }),
+        "{:?}",
+        notes_of_last(&run)
+    );
+}
+
+#[test]
+fn adding_a_fulltext_index_to_a_table_the_input_created_has_no_note_about_a_dropped_one() {
+    let run = run_without_dump(
+        "CREATE TABLE t (id INT PRIMARY KEY, a TEXT) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+         ALTER TABLE t ADD FULLTEXT INDEX ft_a (a);",
+    );
+    assert!(
+        notes_of(&run.findings[1].prediction)
+            .iter()
+            .all(|note| !note.contains("add-fulltext-index-after-dropping-fulltext")),
+        "{:?}",
+        notes_of(&run.findings[1].prediction)
+    );
+}
+
+#[test]
+fn the_plain_add_and_drop_column_answers_equal_the_lab_s_at_63_changes() {
+    // add-column-after-63-changes and drop-column-after-63-changes: the 64th
+    // version is still allowed, so INSTANT, writes continue.
+    assert_eq!(
+        six_answers(&lab_dump(&[]), "", ADD_COUPON_COLUMN),
+        lab_six("add-column-after-63-changes")
+    );
+    assert_eq!(
+        six_answers(&lab_dump(&[]), "", "DROP COLUMN note"),
+        lab_six("drop-column-after-63-changes")
+    );
+}
+
+#[test]
+fn a_column_added_after_a_dropped_fulltext_index_is_not_a_fulltext_copy() {
+    // add-column (1 lab scenario with a FULLTEXT index) is the copy; after
+    // the index is gone the answer is the rebuild, not the copy.
+    let run = run_on_dump(
+        &lab_dump(&[]),
+        &format!(
+            "{ADD_FULLTEXT_ON_NOTE}
+             ALTER TABLE orders {ADD_COUPON_COLUMN};"
+        ),
+    );
+    assert_eq!(run.last_answer(), COPY);
+    let run = run_on_dump(
+        &lab_dump(&[]),
+        &format!(
+            "{ADD_FULLTEXT_ON_NOTE}
+             {DROP_FULLTEXT_ON_NOTE}
+             ALTER TABLE orders {ADD_COUPON_COLUMN};"
+        ),
+    );
+    assert_eq!(run.last_answer(), INPLACE_REBUILD);
+}
+
+// The key length limit of an index on a DYNAMIC table: 3072 bytes, counted
+// over every part of the key.
+//
+// By hand on MySQL 8.0.46 and 8.4.13, to the byte: a string part counts its
+// characters times the most bytes the character set gives one (utf8mb4 4),
+// or its prefix; DATE 3, TIMESTAMP 4, INT 4, DATETIME 5, DECIMAL(10,2) 5,
+// DATETIME(6) 8, BIGINT 8, DECIMAL(20,2) 9, CHAR(10) in utf8mb4 40. A
+// VARCHAR's two length bytes are not counted, and NULL or NOT NULL changes
+// nothing. ADD INDEX and ADD UNIQUE INDEX have the same limit. Over it MySQL
+// fails with 1071 in all six variants, in a strict sql_mode.
+
+/// The part types of the hand tests, with their bytes and the longest
+/// utf8mb4 VARCHAR that fits before them.
+const KEY_PARTS: [(&str, usize); 9] = [
+    ("DATE", 767),
+    ("TIMESTAMP", 767),
+    ("INT", 767),
+    ("DATETIME", 766),
+    ("DECIMAL(10,2)", 766),
+    ("DATETIME(6)", 766),
+    ("BIGINT", 766),
+    ("DECIMAL(20,2)", 765),
+    ("CHAR(10)", 758),
+];
+
+/// The lab's tables with a VARCHAR(`length`) column `code` and one more
+/// column `part` of the type `part_type`.
+fn lab_with_code_and_part(length: usize, part_type: &str) -> String {
+    lab_dump(&[
+        &format!("ALTER TABLE orders ADD COLUMN code VARCHAR({length}) NULL"),
+        &format!("ALTER TABLE orders ADD COLUMN part {part_type} NULL"),
+    ])
+}
+
+#[test]
+fn a_key_of_a_varchar_and_another_part_fits_at_3072_bytes_and_fails_with_1071_one_character_over() {
+    let at_limit_index = lab_six("add-index-key-at-limit")[0].clone();
+    let at_limit_unique = lab_six("add-unique-index-key-at-limit")[0].clone();
+    for (part_type, longest) in KEY_PARTS {
+        for (operation, at_limit) in [
+            ("ADD INDEX ix_code (code, part)", &at_limit_index),
+            ("ADD UNIQUE INDEX ix_code (code, part)", &at_limit_unique),
+        ] {
+            let fits = run_on_dump(
+                &lab_with_code_and_part(longest, part_type),
+                &format!("ALTER TABLE orders {operation};"),
+            );
+            assert_eq!(
+                &fits.last_answer(),
+                at_limit,
+                "{operation} with VARCHAR({longest}) and {part_type}"
+            );
+            let over = run_on_dump(
+                &lab_with_code_and_part(longest + 1, part_type),
+                &format!("ALTER TABLE orders {operation};"),
+            );
+            assert_eq!(
+                over.last_answer(),
+                FAILS_1071,
+                "{operation} with VARCHAR({}) and {part_type}",
+                longest + 1
+            );
+            assert_eq!(over.last_impact(), Impact::Fails);
+        }
+    }
+}
+
+#[test]
+fn a_key_of_a_varchar_and_a_datetime_over_3072_bytes_fails_where_it_used_to_run() {
+    // VARCHAR(768) in utf8mb4 is 3072 bytes alone; with a DATETIME (5 bytes)
+    // the key is over the limit.
+    let dump = lab_with_code_and_part(768, "DATETIME");
+    let run = run_on_dump(&dump, "ALTER TABLE orders ADD INDEX ix_code (code, part);");
+    assert_eq!(run.last_answer(), FAILS_1071);
+    // The control: the same VARCHAR alone is at the limit.
+    let run = run_on_dump(&dump, "ALTER TABLE orders ADD INDEX ix_code (code);");
+    assert_eq!(run.last_answer(), lab_six("add-index-key-at-limit")[0]);
+}
+
+#[test]
+fn an_index_on_one_varchar_is_at_the_limit_at_768_characters_and_over_it_at_769_in_all_six_variants()
+ {
+    for (operation, at, over) in [
+        (
+            "ADD INDEX idx_code (code)",
+            "add-index-key-at-limit",
+            "add-index-key-over-limit",
+        ),
+        (
+            "ADD UNIQUE INDEX uq_code (code)",
+            "add-unique-index-key-at-limit",
+            "add-unique-index-key-over-limit",
+        ),
+    ] {
+        let six = six_answers(&lab_with_code_and_part(768, "INT"), "", operation);
+        assert_eq!(six, lab_six(at), "{operation} at 768");
+        let six = six_answers(&lab_with_code_and_part(769, "INT"), "", operation);
+        assert_eq!(six, lab_six(over), "{operation} at 769");
+        assert!(six.iter().all(|answer| answer == FAILS_1071), "{six:?}");
+    }
+}
+
+#[test]
+fn a_key_of_a_prefix_counts_the_prefix_not_the_column() {
+    // By hand on MySQL 8.0.46 and 8.4.13: code(769) on VARCHAR(1000) and
+    // body(769) on TEXT are 3076 bytes, 1071; 768 is the limit.
+    let dump = lab_dump(&[
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(1000) NULL",
+        "ALTER TABLE orders ADD COLUMN body TEXT NULL",
+    ]);
+    for column in ["code", "body"] {
+        let run = run_on_dump(
+            &dump,
+            &format!("ALTER TABLE orders ADD INDEX ix_{column} ({column}(769));"),
+        );
+        assert_eq!(run.last_answer(), FAILS_1071, "{column}(769)");
+        let run = run_on_dump(
+            &dump,
+            &format!("ALTER TABLE orders ADD INDEX ix_{column} ({column}(768));"),
+        );
+        assert_eq!(
+            run.last_answer(),
+            lab_six("add-index-key-at-limit")[0],
+            "{column}(768)"
+        );
+    }
+}
+
+#[test]
+fn lengthening_an_indexed_varchar_to_768_characters_runs_and_to_769_fails_with_1071() {
+    // varchar-255-to-768-indexed: INPLACE, no rebuild; INSTANT 1845.
+    // varchar-255-to-769-indexed: 1071 in all six variants.
+    let dump = lab_dump(&["ALTER TABLE orders ADD INDEX idx_orders_email (email)"]);
+    let six = six_answers(&dump, "", "MODIFY COLUMN email VARCHAR(768) NULL");
+    assert_eq!(six, lab_six("varchar-255-to-768-indexed"));
+    let six = six_answers(&dump, "", "MODIFY COLUMN email VARCHAR(769) NULL");
+    assert_eq!(six, lab_six("varchar-255-to-769-indexed"));
+    assert!(six.iter().all(|answer| answer == FAILS_1071), "{six:?}");
+    // Laravel's ->change() spelling, and CHANGE with the same name.
+    for statement in [
+        "alter table `orders` modify `email` varchar(769) null",
+        "ALTER TABLE orders CHANGE COLUMN email email VARCHAR(769) NULL",
+    ] {
+        let run = run_on_dump(&dump, &format!("{statement};"));
+        assert_eq!(run.last_answer(), FAILS_1071, "{statement}");
+        assert_eq!(run.last_impact(), Impact::Fails, "{statement}");
+    }
+}
+
+#[test]
+fn lengthening_a_varchar_that_is_in_a_key_with_another_part_counts_the_other_part() {
+    // By hand on MySQL 8.0.46 and 8.4.13: (VARCHAR(255), DATETIME) to 766 is
+    // at the limit, INPLACE with no rebuild; to 767 is 1071.
+    let dump = lab_dump(&[
+        "ALTER TABLE orders ADD COLUMN part DATETIME NULL",
+        "ALTER TABLE orders ADD INDEX idx_orders_email_part (email, part)",
+    ]);
+    let six = six_answers(&dump, "", "MODIFY COLUMN email VARCHAR(766) NULL");
+    assert_eq!(six, lab_six("varchar-255-to-768-indexed"));
+    for operation in [
+        "MODIFY COLUMN email VARCHAR(767) NULL",
+        "MODIFY COLUMN email VARCHAR(769) NULL",
+    ] {
+        let six = six_answers(&dump, "", operation);
+        assert!(
+            six.iter().all(|answer| answer == FAILS_1071),
+            "{operation}: {six:?}"
+        );
+    }
+}
+
+#[test]
+fn widening_the_character_set_of_an_indexed_column_counts_the_new_bytes() {
+    // By hand on MySQL 8.0.46 and 8.4.13: latin1 VARCHAR(769) to utf8mb4 and
+    // utf8mb3 VARCHAR(1024) to utf8mb4 fail with 1071 in all six variants;
+    // the controls at 768 characters are COPY, the charset change.
+    for (from, length_over, length_at) in [("latin1", 769, 768), ("utf8mb3", 1024, 768)] {
+        let dump = |length: usize| {
+            format!(
+                "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `code` varchar({length}) CHARACTER SET {from} DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ix` (`code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+"
+            )
+        };
+        let operation = |length: usize| {
+            format!("MODIFY COLUMN code VARCHAR({length}) CHARACTER SET utf8mb4 NULL")
+        };
+        let six = six_answers(&dump(length_over), "", &operation(length_over));
+        assert!(
+            six.iter().all(|answer| answer == FAILS_1071),
+            "{from}: {six:?}"
+        );
+        let run = run_on_dump(
+            &dump(length_at),
+            &format!("ALTER TABLE orders {};", operation(length_at)),
+        );
+        assert_eq!(run.last_answer(), COPY, "{from} at {length_at}");
+    }
+}
+
+#[test]
+fn a_refused_key_in_a_strict_sql_mode_leaves_the_table_as_it_was() {
+    // The ADD INDEX fails (1071), so the table is as it was and known: the
+    // next statement is measured, not unknown.
+    let run = run_on_dump(
+        &lab_with_code_and_part(769, "INT"),
+        &format!(
+            "{LARAVEL_STRICT_SQL_MODE}
+             ALTER TABLE orders ADD INDEX ix_code (code);
+             ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;"
+        ),
+    );
+    assert_eq!(run.answers()[1], FAILS_1071);
+    assert_eq!(run.answers()[2], INSTANT);
+    // The MODIFY fails (1071), so the column is still VARCHAR(255): 768 is a
+    // lengthening, not a shortening.
+    let run = run_on_dump(
+        &lab_dump(&["ALTER TABLE orders ADD INDEX idx_orders_email (email)"]),
+        &format!(
+            "{LARAVEL_STRICT_SQL_MODE}
+             ALTER TABLE orders MODIFY COLUMN email VARCHAR(769) NULL;
+             ALTER TABLE orders MODIFY COLUMN email VARCHAR(768) NULL;"
+        ),
+    );
+    assert_eq!(run.answers()[1], FAILS_1071);
+    assert_eq!(run.answers()[2], lab_six("varchar-255-to-768-indexed")[0]);
+}
+
+#[test]
+fn an_index_over_the_limit_with_no_sql_mode_in_the_input_fails_and_notes_the_strict_mode() {
+    // add-index-key-over-limit, and with a non-strict mode MySQL cuts the
+    // key instead (add-index-key-over-limit-sql-mode-not-strict), so the
+    // answer rests on the mode: kilit says it assumes a strict one.
+    let run = run_on_dump(
+        &lab_with_code_and_part(769, "INT"),
+        "ALTER TABLE orders ADD INDEX ix_code (code);",
+    );
+    assert_eq!(run.last_answer(), FAILS_1071);
+    assert!(
+        notes_of_last(&run)
+            .iter()
+            .any(|note| note.starts_with("assumes strict SQL mode")),
+        "{:?}",
+        notes_of_last(&run)
+    );
+    // After a strict list there is nothing to assume.
+    let run = run_on_dump(
+        &lab_with_code_and_part(769, "INT"),
+        &format!("{LARAVEL_STRICT_SQL_MODE}\nALTER TABLE orders ADD INDEX ix_code (code);"),
+    );
+    assert_eq!(run.last_answer(), FAILS_1071);
+    assert!(
+        notes_of_last(&run)
+            .iter()
+            .all(|note| !note.starts_with("assumes strict SQL mode")),
+        "{:?}",
+        notes_of_last(&run)
+    );
+}
+
+#[test]
+fn a_plain_key_over_the_limit_with_no_sql_mode_in_the_input_loses_the_table() {
+    // A non-strict mode may cut the key and accept the statement, so kilit
+    // does not know whether the table has the index.
+    let run = run_on_dump(
+        &lab_with_code_and_part(769, "INT"),
+        "ALTER TABLE orders ADD INDEX ix_code (code);
+         ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;",
+    );
+    assert_eq!(run.answers()[0], FAILS_1071);
+    assert_eq!(run.answers()[1], UNKNOWN);
+}
+
+#[test]
+fn an_index_over_the_limit_in_a_sql_mode_that_is_not_strict_is_cut_and_runs() {
+    // add-index-key-over-limit-sql-mode-not-strict: the index is cut to a
+    // prefix with a warning and the ADD INDEX is the plain one.
+    for set in [
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION';",
+        "SET sql_mode = '';",
+    ] {
+        let dump = lab_dump(&["ALTER TABLE orders ADD COLUMN code VARCHAR(769) NULL"]);
+        let six = six_answers(&dump, set, "ADD INDEX idx_code (code)");
+        assert_eq!(
+            six,
+            lab_six("add-index-key-over-limit-sql-mode-not-strict"),
+            "{set}"
+        );
+        let run = run_on_dump(
+            &dump,
+            &format!("{set}\nALTER TABLE orders ADD INDEX idx_code (code);"),
+        );
+        assert!(
+            notes_of_last(&run).iter().any(|note| note.contains("768")),
+            "{set}: {:?}",
+            notes_of_last(&run)
+        );
+    }
+}
+
+#[test]
+fn a_longer_indexed_varchar_in_a_sql_mode_that_is_not_strict_is_the_plain_answer_with_a_cut_key() {
+    // varchar-255-to-769-indexed-sql-mode-not-strict: INPLACE, no rebuild.
+    let dump = lab_dump(&["ALTER TABLE orders ADD INDEX idx_orders_email (email)"]);
+    let six = six_answers(
+        &dump,
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION';",
+        "MODIFY COLUMN email VARCHAR(769) NULL",
+    );
+    assert_eq!(
+        six,
+        lab_six("varchar-255-to-769-indexed-sql-mode-not-strict")
+    );
+    let run = run_on_dump(
+        &dump,
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION';
+         ALTER TABLE orders MODIFY COLUMN email VARCHAR(769) NULL;",
+    );
+    assert!(
+        notes_of_last(&run).iter().any(|note| note.contains("768")),
+        "{:?}",
+        notes_of_last(&run)
+    );
+}
+
+#[test]
+fn the_table_follows_the_cut_of_a_key_in_a_sql_mode_that_is_not_strict() {
+    // By hand on MySQL 8.0.46 and 8.4.13: the cut index is email(768), a key
+    // of 3072 bytes, whatever the column's length. A later MODIFY that
+    // lengthens the column further keeps the key at 3072 bytes, so it is
+    // neither a failure nor unknown.
+    let run = run_on_dump(
+        &lab_dump(&["ALTER TABLE orders ADD INDEX idx_orders_email (email)"]),
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION';
+         ALTER TABLE orders MODIFY COLUMN email VARCHAR(769) NULL;
+         SET sql_mode = 'STRICT_TRANS_TABLES';
+         ALTER TABLE orders MODIFY COLUMN email VARCHAR(800) NULL;",
+    );
+    assert_ne!(run.last_answer(), FAILS_1071);
+    assert_ne!(run.last_answer(), UNKNOWN);
+}
+
+#[test]
+fn a_unique_index_over_the_limit_fails_with_1071_even_in_a_sql_mode_that_is_not_strict() {
+    // add-unique-index-key-over-limit-sql-mode-not-strict: 1071 in all six
+    // variants. A unique key is never cut.
+    let dump = lab_dump(&["ALTER TABLE orders ADD COLUMN code VARCHAR(769) NULL"]);
+    for set in [
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION';",
+        "SET sql_mode = '';",
+    ] {
+        let six = six_answers(&dump, set, "ADD UNIQUE INDEX uq_code (code)");
+        assert_eq!(
+            six,
+            lab_six("add-unique-index-key-over-limit-sql-mode-not-strict"),
+            "{set}"
+        );
+        assert!(six.iter().all(|answer| answer == FAILS_1071), "{six:?}");
+    }
+    // The failure left the table as it was: the next statement is measured.
+    let run = run_on_dump(
+        &dump,
+        "SET sql_mode = '';
+         ALTER TABLE orders ADD UNIQUE INDEX uq_code (code);
+         ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;",
+    );
+    assert_eq!(run.last_answer(), INSTANT);
+}
+
+#[test]
+fn in_a_sql_mode_that_is_not_strict_a_key_of_several_parts_or_a_unique_column_change_is_unknown_naming_1071()
+ {
+    // By hand on MySQL 8.0.46 and 8.4.13: a key of two or more parts over the
+    // limit is refused with 1071 in every variant, and so is the MODIFY of a
+    // UNIQUE-indexed column. The lab has no scenario for them.
+    let set = "SET sql_mode = 'NO_ENGINE_SUBSTITUTION';";
+    let run = run_on_dump(
+        &lab_with_code_and_part(769, "DATETIME"),
+        &format!("{set}\nALTER TABLE orders ADD INDEX ix_code (code, part);"),
+    );
+    assert_eq!(run.last_answer(), UNKNOWN);
+    assert!(run.reason(1).contains("1071"), "{}", run.reason(1));
+    let run = run_on_dump(
+        &lab_dump(&["ALTER TABLE orders ADD UNIQUE INDEX uq_orders_email (email)"]),
+        &format!("{set}\nALTER TABLE orders MODIFY COLUMN email VARCHAR(769) NULL;"),
+    );
+    assert_eq!(run.last_answer(), UNKNOWN);
+    assert!(run.reason(1).contains("1071"), "{}", run.reason(1));
+}
+
+#[test]
+fn an_index_over_the_limit_after_a_sql_mode_kilit_cannot_read_is_unknown() {
+    for set in [
+        "SET GLOBAL sql_mode = '';",
+        "SET sql_mode = CONCAT(@@sql_mode, ',X');",
+    ] {
+        let run = run_on_dump(
+            &lab_with_code_and_part(769, "INT"),
+            &format!("{set}\nALTER TABLE orders ADD INDEX ix_code (code);"),
+        );
+        assert_eq!(run.last_answer(), UNKNOWN, "{set}");
+        let run = run_on_dump(
+            &lab_dump(&["ALTER TABLE orders ADD INDEX idx_orders_email (email)"]),
+            &format!("{set}\nALTER TABLE orders MODIFY COLUMN email VARCHAR(769) NULL;"),
+        );
+        assert_eq!(run.last_answer(), UNKNOWN, "{set}");
+    }
+}
+
+#[test]
+fn a_key_part_the_count_cannot_size_makes_the_answer_unknown() {
+    // An ENUM of more than 255 values takes two bytes, and a part of a type
+    // kilit does not size is not counted: no failure is claimed.
+    let values: Vec<String> = (0..300).map(|n| format!("'v{n}'")).collect();
+    let dump = format!(
+        "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `code` varchar(769) DEFAULT NULL,
+  `kind` enum({}) DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+",
+        values.join(",")
+    );
+    let run = run_on_dump(&dump, "ALTER TABLE orders ADD INDEX ix_code (code, kind);");
+    assert_eq!(run.last_answer(), UNKNOWN);
+}
+
+#[test]
+fn a_primary_key_over_the_limit_is_unknown() {
+    let run = run_on_dump(
+        &lab_dump(&[
+            "ALTER TABLE orders ADD COLUMN code VARCHAR(769) NULL",
+            "ALTER TABLE orders MODIFY COLUMN id BIGINT UNSIGNED NOT NULL",
+            "ALTER TABLE orders DROP PRIMARY KEY",
+        ]),
+        "ALTER TABLE orders ADD PRIMARY KEY (code);",
+    );
+    assert_eq!(run.last_answer(), UNKNOWN);
+}
+
+#[test]
+fn a_modify_over_767_bytes_on_a_compact_table_is_unknown_naming_1071_and_the_limit() {
+    // By hand on MySQL 8.0.46 and 8.4.13: on a COMPACT table the limit is 767
+    // bytes; VARCHAR(191) to 192 on an indexed utf8mb4 column is 1071 in a
+    // strict mode. The lab has no scenario for the MODIFY.
+    let dump = lab_with_options(
+        COMPACT_OPTION,
+        &[
+            "ALTER TABLE orders MODIFY COLUMN email VARCHAR(191) NULL",
+            "ALTER TABLE orders ADD INDEX idx_orders_email (email)",
+        ],
+    );
+    let run = run_on_dump(
+        &dump,
+        "ALTER TABLE orders MODIFY COLUMN email VARCHAR(192) NULL;",
+    );
+    assert_eq!(run.last_answer(), UNKNOWN);
+    let reason = run.reason(0);
+    assert!(reason.contains("1071"), "{reason}");
+    assert!(reason.contains("767"), "{reason}");
+}
+
+#[test]
+fn an_index_over_767_bytes_on_a_compact_table_still_fails_with_1071() {
+    // The lab's COMPACT scenarios: the limit is 767 bytes there.
+    let dump = lab_with_options(COMPACT_OPTION, &[]);
+    for operation in [
+        "ALTER TABLE orders ADD INDEX idx_email (email);",
+        "ALTER TABLE orders ADD UNIQUE INDEX uq_email (email);",
+    ] {
+        let run = run_on_dump(&dump, operation);
+        assert_eq!(run.last_answer(), FAILS_1071, "{operation}");
+    }
+}
+
+#[test]
+fn an_index_over_the_limit_on_a_compressed_table_is_unknown() {
+    // The lab did not measure the key limit of COMPRESSED tables.
+    let dump = lab_with_options(
+        COMPRESSED,
+        &["ALTER TABLE orders ADD COLUMN code VARCHAR(769) NULL"],
+    );
+    let run = run_on_dump(&dump, "ALTER TABLE orders ADD INDEX ix_code (code);");
+    assert_eq!(run.last_answer(), UNKNOWN);
+}
+
+#[test]
+fn an_index_that_fits_keeps_its_plain_answer() {
+    // The nearest answers, which did not change: a short key, and a longer
+    // indexed VARCHAR that stays under the limit.
+    let six = six_answers(&lab_dump(&[]), "", "ADD INDEX idx_orders_amount (amount)");
+    assert_eq!(six, lab_six("add-index"));
+    let six = six_answers(
+        &lab_dump(&["ALTER TABLE orders ADD INDEX idx_orders_email (email)"]),
+        "",
+        "MODIFY COLUMN email VARCHAR(300) NULL",
+    );
+    assert_eq!(six, lab_six("varchar-255-to-768-indexed"));
+}
+
+// Renaming a column that another table's foreign key references, and a
+// foreign key's own column.
+//
+// parent-rename-column-id: INPLACE, no rebuild, writes continue; forced
+// INSTANT and COPY fail with 1846. With foreign_key_checks off
+// (parent-rename-column-id-checks-off) the six answers are the same.
+// rename-column-in-foreign-key: forced COPY fails with 1846, and with the
+// checks off (rename-column-in-foreign-key-checks-off) too.
+
+const ORDER_ITEMS_WITH_KEY: &str = "CREATE TABLE order_items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, \
+    order_id BIGINT UNSIGNED NOT NULL, CONSTRAINT fk_items_order FOREIGN KEY (order_id) \
+    REFERENCES orders (id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+const ORDERS_KEY_TO_USERS: &str =
+    "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)";
+
+#[test]
+fn renaming_a_column_another_table_s_key_references_is_inplace_and_forced_instant_and_copy_fail() {
+    let dump = lab_dump(&[ORDER_ITEMS_WITH_KEY]);
+    // With the checks on, off, and never set.
+    for (set, scenario) in [
+        ("SET foreign_key_checks = 1;", "parent-rename-column-id"),
+        ("", "parent-rename-column-id"),
+        (
+            "SET foreign_key_checks = 0;",
+            "parent-rename-column-id-checks-off",
+        ),
+    ] {
+        let six = six_answers(&dump, set, "RENAME COLUMN id TO order_id");
+        assert_eq!(six, lab_six(scenario), "{set}");
+        assert_eq!(six[0], INPLACE, "{set}");
+        assert_eq!(six[1], FAILS_1846, "{set}");
+        assert_eq!(six[4], FAILS_1846, "{set}");
+    }
+}
+
+#[test]
+fn changing_a_referenced_column_to_a_new_name_with_change_is_a_rename_too() {
+    // CHANGE that only renames.
+    let dump = lab_dump(&[ORDER_ITEMS_WITH_KEY]);
+    let run = run_on_dump(
+        &dump,
+        "ALTER TABLE orders CHANGE COLUMN id order_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT;",
+    );
+    assert_eq!(run.last_answer(), INPLACE);
+    // Laravel 12: $table->renameColumn('id', 'order_id').
+    let run = run_on_dump(
+        &dump,
+        "alter table `orders` rename column `id` to `order_id`;",
+    );
+    assert_eq!(run.last_answer(), INPLACE);
+    assert_eq!(run.last_impact(), Impact::WritesContinue);
+}
+
+#[test]
+fn renaming_a_column_no_key_references_stays_instant() {
+    // rename-column-id: the same rename with no key on the table.
+    let six = six_answers(&lab_dump(&[]), "", "RENAME COLUMN id TO order_id");
+    assert_eq!(six, lab_six("rename-column-id"));
+    assert_eq!(six[0], INSTANT);
+    // The column that has a key is only the referenced one.
+    let dump = lab_dump(&[ORDER_ITEMS_WITH_KEY]);
+    let six = six_answers(&dump, "", "RENAME COLUMN amount TO total");
+    assert_eq!(six, lab_six("rename-column-int"));
+}
+
+#[test]
+fn a_rename_of_the_referenced_column_is_followed_by_the_keys_that_point_at_it() {
+    // After the rename the key points at order_id: changing the type of the
+    // child column still fails with 3780 (the types differ), as before.
+    let run = run_on_dump(
+        &lab_dump(&[ORDER_ITEMS_WITH_KEY]),
+        "ALTER TABLE orders RENAME COLUMN id TO order_id;
+         ALTER TABLE order_items MODIFY COLUMN order_id INT UNSIGNED NOT NULL;",
+    );
+    assert_eq!(run.answers()[0], INPLACE);
+    assert_eq!(run.last_answer(), FAILS_3780);
+}
+
+#[test]
+fn a_self_reference_or_a_key_of_a_table_kilit_lost_makes_the_rename_of_the_column_unknown() {
+    // The column may be the one a key points at.
+    let self_reference = "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `parent_id` bigint unsigned DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `parent_id` (`parent_id`),
+  CONSTRAINT `fk_orders_parent` FOREIGN KEY (`parent_id`) REFERENCES `orders` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+    let run = run_on_dump(
+        self_reference,
+        "ALTER TABLE orders RENAME COLUMN id TO order_id;",
+    );
+    assert_eq!(run.last_answer(), UNKNOWN);
+    // order_items is lost by a statement kilit cannot read, but its key may
+    // still point at orders.id.
+    let run = run_on_dump(
+        &lab_dump(&[ORDER_ITEMS_WITH_KEY]),
+        "ALTER TABLE order_items CONVERT TO CHARACTER SET utf8mb4;
+         ALTER TABLE orders RENAME COLUMN id TO order_id;",
+    );
+    assert_eq!(run.answers()[1], UNKNOWN);
+    // A column without an index cannot be referenced: its answer stays.
+    let run = run_on_dump(
+        &lab_dump(&[ORDER_ITEMS_WITH_KEY]),
+        "ALTER TABLE order_items CONVERT TO CHARACTER SET utf8mb4;
+         ALTER TABLE orders RENAME COLUMN note TO memo;",
+    );
+    assert_eq!(run.answers()[1], lab_six("rename-column-int")[0]);
+}
+
+#[test]
+fn renaming_a_foreign_key_s_own_column_fails_for_a_forced_copy_only() {
+    let dump = lab_dump(&[ORDERS_KEY_TO_USERS]);
+    for (set, scenario) in [
+        (
+            "SET foreign_key_checks = 1;",
+            "rename-column-in-foreign-key",
+        ),
+        ("", "rename-column-in-foreign-key"),
+        (
+            "SET foreign_key_checks = 0;",
+            "rename-column-in-foreign-key-checks-off",
+        ),
+    ] {
+        let six = six_answers(&dump, set, "RENAME COLUMN user_id TO customer_id");
+        assert_eq!(six, lab_six(scenario), "{set}");
+        assert_eq!(six[0], INSTANT, "{set}");
+        assert_eq!(six[4], FAILS_1846, "{set}");
+        assert!(
+            six.iter()
+                .enumerate()
+                .all(|(at, answer)| at == 4 || answer != FAILS_1846),
+            "{set}: {six:?}"
+        );
+    }
+    // Laravel 12: $table->renameColumn('user_id', 'customer_id').
+    let run = run_on_dump(
+        &dump,
+        "alter table `orders` rename column `user_id` to `customer_id`, algorithm=copy;",
+    );
+    assert_eq!(run.last_answer(), FAILS_1846);
+    assert_eq!(run.last_impact(), Impact::Fails);
+}
+
+#[test]
+fn renaming_a_column_that_is_not_in_the_tables_own_key_keeps_the_plain_answer_for_a_forced_copy() {
+    // rename-column-int: the forced COPY is allowed.
+    let dump = lab_dump(&[ORDERS_KEY_TO_USERS]);
+    let six = six_answers(&dump, "", "RENAME COLUMN amount TO total");
+    assert_eq!(six, lab_six("rename-column-int"));
+}
+
+// Dropping a generated column: a VIRTUAL one in place needs no rebuild.
+
+#[test]
+fn dropping_a_virtual_generated_column_forced_inplace_does_not_rebuild_the_table() {
+    // drop-column-virtual-generated: INSTANT as written and forced; INPLACE
+    // with no rebuild; COPY copies.
+    let dump = lab_dump(&["ALTER TABLE orders ADD COLUMN amount2 INT AS (amount * 2) VIRTUAL"]);
+    let six = six_answers(&dump, "", "DROP COLUMN amount2");
+    assert_eq!(six, lab_six("drop-column-virtual-generated"));
+    assert_eq!(six[0], INSTANT);
+    assert_eq!(six[2], INPLACE);
+    // Laravel: $table->integer('amount2')->virtualAs('amount * 2') dropped.
+    let run = run_on_dump(
+        &dump,
+        "alter table `orders` drop `amount2`, algorithm=inplace;",
+    );
+    assert_eq!(run.last_answer(), INPLACE);
+}
+
+#[test]
+fn dropping_a_stored_generated_column_keeps_the_plain_answer() {
+    // drop-column-stored-generated: the same as drop-column.
+    let dump = lab_dump(&["ALTER TABLE orders ADD COLUMN amount2 INT AS (amount * 2) STORED"]);
+    let six = six_answers(&dump, "", "DROP COLUMN amount2");
+    assert_eq!(six, lab_six("drop-column-stored-generated"));
+}
+
+// ADD UNIQUE INDEX on a table without a primary key: a UNIQUE index of
+// NOT NULL columns becomes the clustered key, and the table is rebuilt.
+//
+// add-unique-index-without-primary-key and
+// add-unique-index-two-columns-without-primary-key: INPLACE with a rebuild,
+// writes continue; INSTANT 1845; COPY copies. Nullable columns, and a table
+// that has such a UNIQUE index already, are the plain answer with no rebuild
+// (add-unique-index-nullable-without-primary-key,
+// add-unique-index-without-primary-key-with-unique-key). With a primary key
+// it is add-unique-index-not-null.
+
+const NO_PRIMARY_KEY: [&str; 2] = [
+    "ALTER TABLE orders MODIFY COLUMN id BIGINT UNSIGNED NOT NULL",
+    "ALTER TABLE orders DROP PRIMARY KEY",
+];
+
+#[test]
+fn a_unique_index_on_a_not_null_column_of_a_table_without_a_primary_key_rebuilds_the_table() {
+    let dump = lab_dump(&NO_PRIMARY_KEY);
+    let six = six_answers(&dump, "", "ADD UNIQUE INDEX uq_orders_amount (amount)");
+    assert_eq!(six, lab_six("add-unique-index-without-primary-key"));
+    assert_eq!(six[0], INPLACE_REBUILD);
+    assert_eq!(six[1], FAILS_1845);
+    // Laravel: $table->unique('amount').
+    let run = run_on_dump(
+        &dump,
+        "alter table `orders` add unique `orders_amount_unique`(`amount`);",
+    );
+    assert_eq!(run.last_answer(), INPLACE_REBUILD);
+    assert_eq!(run.last_impact(), Impact::WritesContinue);
+    // CREATE UNIQUE INDEX is the same statement.
+    let run = run_on_dump(
+        &dump,
+        "CREATE UNIQUE INDEX uq_orders_amount ON orders (amount);",
+    );
+    assert_eq!(run.last_answer(), INPLACE_REBUILD);
+}
+
+#[test]
+fn a_unique_index_on_two_not_null_columns_of_a_table_without_a_primary_key_rebuilds_the_table() {
+    // Laravel's pivot table: $table->unique(['user_id', 'amount']).
+    let dump = lab_dump(&NO_PRIMARY_KEY);
+    let six = six_answers(
+        &dump,
+        "",
+        "ADD UNIQUE INDEX uq_orders_user_amount (user_id, amount)",
+    );
+    assert_eq!(
+        six,
+        lab_six("add-unique-index-two-columns-without-primary-key")
+    );
+    assert_eq!(six[0], INPLACE_REBUILD);
+}
+
+#[test]
+fn a_unique_index_on_a_table_created_in_the_input_without_a_primary_key_rebuilds_the_table_too() {
+    let run = run_without_dump(
+        "CREATE TABLE pivot (a BIGINT UNSIGNED NOT NULL, b BIGINT UNSIGNED NOT NULL) \
+         ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+         ALTER TABLE pivot ADD UNIQUE INDEX pivot_a_b_unique (a, b);",
+    );
+    assert_eq!(run.last_answer(), INPLACE_REBUILD);
+}
+
+#[test]
+fn a_unique_index_with_a_nullable_column_does_not_rebuild_the_table() {
+    let mut setup = NO_PRIMARY_KEY.to_vec();
+    setup.push("ALTER TABLE orders MODIFY COLUMN amount INT NULL");
+    let six = six_answers(
+        &lab_dump(&setup),
+        "",
+        "ADD UNIQUE INDEX uq_orders_amount (amount)",
+    );
+    assert_eq!(
+        six,
+        lab_six("add-unique-index-nullable-without-primary-key")
+    );
+    assert_eq!(six[0], INPLACE);
+    // One nullable column among two is enough.
+    let run = run_on_dump(
+        &lab_dump(&setup),
+        "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_user_amount (user_id, amount);",
+    );
+    assert_eq!(run.last_answer(), INPLACE);
+}
+
+#[test]
+fn a_unique_index_on_a_table_with_one_already_does_not_rebuild_the_table() {
+    let mut setup = NO_PRIMARY_KEY.to_vec();
+    setup.push("ALTER TABLE orders ADD UNIQUE INDEX uq_orders_id (id)");
+    let six = six_answers(
+        &lab_dump(&setup),
+        "",
+        "ADD UNIQUE INDEX uq_orders_amount (amount)",
+    );
+    assert_eq!(
+        six,
+        lab_six("add-unique-index-without-primary-key-with-unique-key")
+    );
+    assert_eq!(six[0], INPLACE);
+}
+
+#[test]
+fn the_first_unique_index_of_the_input_rebuilds_and_the_second_does_not() {
+    let run = run_on_dump(
+        &lab_dump(&NO_PRIMARY_KEY),
+        "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_id (id);
+         ALTER TABLE orders ADD UNIQUE INDEX uq_orders_amount (amount);",
+    );
+    assert_eq!(run.answers(), [INPLACE_REBUILD, INPLACE]);
+}
+
+#[test]
+fn a_unique_index_on_a_table_with_a_primary_key_does_not_rebuild_the_table() {
+    // add-unique-index-not-null, the twin with a primary key.
+    let six = six_answers(
+        &lab_dump(&[]),
+        "",
+        "ADD UNIQUE INDEX uq_orders_amount (amount)",
+    );
+    assert_eq!(six, lab_six("add-unique-index-not-null"));
+    assert_eq!(six[0], INPLACE);
+}
+
+#[test]
+fn a_plain_index_on_a_table_without_a_primary_key_does_not_rebuild_the_table() {
+    // Only a UNIQUE index can become the clustered key.
+    let run = run_on_dump(
+        &lab_dump(&NO_PRIMARY_KEY),
+        "ALTER TABLE orders ADD INDEX idx_orders_amount (amount);",
+    );
+    assert_eq!(run.last_answer(), lab_six("add-index")[0]);
+}
+
+// Cases at the edges of the rules above: a temporary table that hides a
+// parent, a multi-clause ALTER, the forced algorithm of a rebuild, a
+// FULLTEXT index made by CREATE TABLE, a cut key followed in a later MODIFY,
+// a binary part in a key, and a rename of a column no key can reference.
+
+#[test]
+fn a_temporary_table_that_hides_a_parent_leaves_the_base_table_s_child_keys_alone() {
+    // The rename on the temporary table is not a rename of the referenced
+    // column; the base table is again the parent after the DROP TEMPORARY,
+    // and parent-rename-column-id's forced INSTANT fails with 1846.
+    let run = run_on_dump(
+        &lab_dump(&[ORDER_ITEMS_WITH_KEY]),
+        "CREATE TEMPORARY TABLE orders (id BIGINT UNSIGNED PRIMARY KEY);
+         ALTER TABLE orders RENAME COLUMN id TO uid;
+         DROP TEMPORARY TABLE orders;
+         ALTER TABLE orders RENAME COLUMN id TO order_id, ALGORITHM=INSTANT;",
+    );
+    assert_eq!(run.last_answer(), lab_six("parent-rename-column-id")[1]);
+    assert_eq!(run.last_answer(), FAILS_1846);
+    assert!(
+        notes_of(&run.findings[1].prediction)
+            .iter()
+            .all(|note| !note.contains("order_items") && !note.contains("fk_items_order")),
+        "{:?}",
+        notes_of(&run.findings[1].prediction)
+    );
+}
+
+#[test]
+fn a_multi_clause_alter_that_adds_a_column_and_an_index_past_3072_bytes_loses_the_table() {
+    // The new index is over the limit, and the ALTER has two clauses: kilit
+    // does not claim a failure, and does not know the table afterwards.
+    let run = run_on_dump(
+        &lab_dump(&[]),
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(1000) NULL, ADD INDEX ix (code);
+         ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL;",
+    );
+    assert_eq!(run.answers()[1], UNKNOWN);
+}
+
+#[test]
+fn engine_innodb_forced_instant_does_not_clear_the_hidden_column_and_copy_or_no_algorithm_does() {
+    // By hand on MySQL 8.0.46 and 8.4.13: ENGINE=InnoDB, ALGORITHM=INSTANT is
+    // refused with 1845, and a later ADD COLUMN, ALGORITHM=INSTANT is still
+    // 1845; with ALGORITHM=COPY the table is rebuilt and that ADD COLUMN runs.
+    let drop_fulltext = format!("{ADD_FULLTEXT_ON_NOTE}\n{DROP_FULLTEXT_ON_NOTE}");
+    let run = run_on_dump(
+        &lab_dump(&[]),
+        &format!(
+            "{drop_fulltext}
+             ALTER TABLE orders ENGINE=InnoDB, ALGORITHM=INSTANT;
+             ALTER TABLE orders {ADD_COUPON_COLUMN};"
+        ),
+    );
+    // The column stays, so the next ADD COLUMN is the measured rebuild.
+    assert_eq!(
+        run.last_answer(),
+        lab_six("add-column-after-dropping-fulltext")[0]
+    );
+    for rebuild in ["ENGINE=InnoDB, ALGORITHM=COPY", "ENGINE=InnoDB"] {
+        let run = run_on_dump(
+            &lab_dump(&[]),
+            &format!(
+                "{drop_fulltext}
+                 ALTER TABLE orders {rebuild};
+                 ALTER TABLE orders {ADD_COUPON_COLUMN};"
+            ),
+        );
+        assert_eq!(run.last_answer(), INSTANT, "{rebuild}");
+        assert!(
+            notes_of_last(&run)
+                .iter()
+                .all(|note| !note.contains("FULLTEXT")),
+            "{rebuild}: {:?}",
+            notes_of_last(&run)
+        );
+    }
+}
+
+#[test]
+fn a_fulltext_index_made_by_create_table_and_dropped_fails_a_forced_instant_add_column() {
+    // By hand on MySQL 8.0.46 and 8.4.13: the same 1845 as for the measured
+    // ADD FULLTEXT shape (add-column-after-dropping-fulltext).
+    let run = run_without_dump(
+        "CREATE TABLE t (id INT PRIMARY KEY, a TEXT, FULLTEXT KEY ft (a)) \
+         ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+         ALTER TABLE t DROP INDEX ft;
+         ALTER TABLE t ADD COLUMN c INT NULL, ALGORITHM=INSTANT;",
+    );
+    assert_eq!(run.last_answer(), FAILS_1845);
+    assert_eq!(
+        run.last_answer(),
+        lab_six("add-column-after-dropping-fulltext")[1]
+    );
+}
+
+#[test]
+fn a_prefix_key_over_the_limit_in_a_sql_mode_that_is_not_strict_is_unknown_and_followed_as_the_cut()
+{
+    // By hand on MySQL 8.0.46 and 8.4.13: ADD INDEX ix (code(900)) on a
+    // utf8mb4 VARCHAR(1000) is accepted with warning 1071, and SHOW CREATE
+    // TABLE shows KEY `ix` (`code`(768)). The lab has no scenario for the
+    // prefix form. A later MODIFY in a strict mode is a lengthening: the key
+    // stays 3072 bytes.
+    let run = run_on_dump(
+        &lab_dump(&["ALTER TABLE orders ADD COLUMN code VARCHAR(1000) NULL"]),
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION';
+         ALTER TABLE orders ADD INDEX ix (code(900));
+         SET sql_mode = 'STRICT_TRANS_TABLES';
+         ALTER TABLE orders MODIFY code VARCHAR(2000) NULL;",
+    );
+    assert_eq!(run.answers()[1], UNKNOWN);
+    assert_eq!(run.last_answer(), lab_six("varchar-255-to-768-indexed")[0]);
+    assert_ne!(run.last_answer(), FAILS_1071);
+}
+
+#[test]
+fn a_binary_prefix_and_a_text_prefix_count_their_bytes_in_a_key() {
+    // By hand on MySQL 8.0.46 and 8.4.13: (vb(72), t(750)) is 72 + 3000 =
+    // 3072 bytes and accepted; (vb(73), t(750)) and (vb(100), t(750)) are
+    // refused with 1071.
+    let dump = "CREATE TABLE `p` (
+  `id` int NOT NULL,
+  `vb` varbinary(200) DEFAULT NULL,
+  `t` text,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+";
+    for (key, expected) in [
+        (
+            "vb(72), t(750)",
+            lab_six("add-index-key-at-limit")[0].clone(),
+        ),
+        ("vb(73), t(750)", FAILS_1071.to_owned()),
+        ("vb(100), t(750)", FAILS_1071.to_owned()),
+    ] {
+        let run = run_on_dump(dump, &format!("ALTER TABLE p ADD INDEX i19 ({key});"));
+        assert_eq!(run.last_answer(), expected, "{key}");
+    }
+}
+
+#[test]
+fn a_rename_of_a_column_no_key_can_reference_keeps_the_plain_answer_when_the_table_is_pointed_at() {
+    // note is in no index, so no foreign key references it.
+    let dump = lab_dump(&[ORDER_ITEMS_WITH_KEY]);
+    let six = six_answers(&dump, "", "RENAME COLUMN note TO memo");
+    assert_eq!(six, lab_six("rename-column-int"));
+    let run = run_on_dump(
+        &dump,
+        "alter table `orders` rename column `note` to `memo`;",
+    );
+    assert_eq!(run.last_answer(), INSTANT);
 }

@@ -1,0 +1,2 @@
+title = "Add a NOT NULL TINYINT(1) column with a quoted number as its default"
+operation = "add `active` tinyint(1) not null default '0'"

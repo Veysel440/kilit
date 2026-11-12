@@ -667,6 +667,165 @@
       ]
     },
     {
+      "id": "add-column-after-63-changes",
+      "title": "Add a column to a table that has had 63 instant column changes",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN extra_01 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_02 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_03 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_04 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_05 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_06 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_07 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_08 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_09 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_10 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_11 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_12 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_13 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_14 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_15 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_16 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_17 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_18 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_19 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_20 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_21 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_22 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_23 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_24 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_25 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_26 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_27 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_28 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_29 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_30 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_31 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_32 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_33 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_34 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_35 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_36 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_37 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_38 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_39 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_40 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_41 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_42 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_43 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_44 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_45 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_46 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_47 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_48 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_49 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_50 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_51 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_52 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_53 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_54 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_55 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_56 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_57 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_58 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_59 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_60 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_61 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_62 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_63 INT NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            63,
+            64
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            63,
+            64
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            63,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            63,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            63,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            63,
+            64
+          ]
+        }
+      ]
+    },
+    {
       "id": "add-column-after-64-changes",
       "title": "Add a column after 64 instant column changes",
       "setup": [
@@ -818,6 +977,199 @@
           "row_versions": [
             64,
             0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-column-after-dropping-fulltext",
+      "title": "Add a nullable column to a table whose only FULLTEXT index was dropped",
+      "setup": [
+        "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)",
+        "ALTER TABLE orders DROP INDEX ft_orders_note"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": true,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-column-after-dropping-fulltext-and-rebuilding",
+      "title": "Add a nullable column to a table whose only FULLTEXT index was dropped, after the table was rebuilt",
+      "setup": [
+        "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)",
+        "ALTER TABLE orders DROP INDEX ft_orders_note",
+        "ALTER TABLE orders ENGINE=InnoDB"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
           ]
         }
       ]
@@ -992,6 +1344,288 @@
         "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
       ],
       "statement": "ALTER TABLE orders ADD COLUMN c BLOB DEFAULT ''",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-column-boolean-default",
+      "title": "Add a NOT NULL TINYINT(1) column with a quoted number as its default",
+      "session": [],
+      "statement": "ALTER TABLE orders add `active` tinyint(1) not null default '0'",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-column-collation",
+      "title": "Add a nullable column with its own collation",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) COLLATE utf8mb4_bin NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-column-comment",
+      "title": "Add a nullable column with a comment",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD COLUMN coupon VARCHAR(255) NULL COMMENT 'shown to the customer'",
       "verdict": {
         "result": "runs",
         "algorithm": "INSTANT",
@@ -3196,6 +3830,100 @@
       ]
     },
     {
+      "id": "add-column-text",
+      "title": "Add a nullable TEXT column",
+      "session": [],
+      "statement": "ALTER TABLE orders add `body` text null",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
       "id": "add-column-text-default-expression",
       "title": "Add a TEXT NOT NULL column with an expression default",
       "session": [],
@@ -3898,6 +4626,100 @@
       ]
     },
     {
+      "id": "add-column-timestamp",
+      "title": "Add a nullable TIMESTAMP column",
+      "session": [],
+      "statement": "ALTER TABLE orders add `created_at` timestamp null",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
       "id": "add-column-with-fulltext",
       "title": "Add a column to a table that has a FULLTEXT index",
       "setup": [
@@ -4234,6 +5056,98 @@
         "SET foreign_key_checks = 0"
       ],
       "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-checks-off-missing-parent",
+      "title": "Add a foreign key to a table that does not exist, with foreign_key_checks off",
+      "session": [
+        "SET foreign_key_checks = 0"
+      ],
+      "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES nosuch (id)",
       "verdict": {
         "result": "runs",
         "algorithm": "INPLACE",
@@ -4826,12 +5740,172 @@
       ]
     },
     {
+      "id": "add-foreign-key-on-delete-and-update-cascade",
+      "title": "Add a foreign key that cascades on delete and on update, with foreign_key_checks on (the default)",
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders add constraint `orders_user_id_foreign` foreign key (`user_id`) references `users` (`id`) on delete cascade on update cascade",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
       "id": "add-foreign-key-on-delete-cascade",
       "title": "Add a foreign key that cascades on delete, with foreign_key_checks on (the default)",
       "session": [
         "SET foreign_key_checks = 1"
       ],
       "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-on-delete-restrict",
+      "title": "Add a foreign key that restricts on delete, with foreign_key_checks on (the default)",
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders add constraint `orders_user_id_foreign` foreign key (`user_id`) references `users` (`id`) on delete restrict",
       "verdict": {
         "result": "runs",
         "algorithm": "COPY",
@@ -4995,6 +6069,86 @@
         "SET foreign_key_checks = 1"
       ],
       "statement": "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE SET NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "add-foreign-key-on-update-cascade",
+      "title": "Add a foreign key that cascades on update, with foreign_key_checks on (the default)",
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders add constraint `orders_user_id_foreign` foreign key (`user_id`) references `users` (`id`) on update cascade",
       "verdict": {
         "result": "runs",
         "algorithm": "COPY",
@@ -7512,6 +8666,92 @@
       ]
     },
     {
+      "id": "add-fulltext-index-after-dropping-fulltext",
+      "title": "Add a FULLTEXT index to a table whose only FULLTEXT index was dropped",
+      "setup": [
+        "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)",
+        "ALTER TABLE orders DROP INDEX ft_orders_note"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_email (email)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Fulltext index creation requires a lock. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Fulltext index creation requires a lock. Try LOCK=SHARED."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Fulltext index creation requires a lock. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
       "id": "add-fulltext-index-asc",
       "title": "Add a FULLTEXT index with an ascending key part",
       "session": [],
@@ -7712,6 +8952,88 @@
           "result": "rejected",
           "code": 1221,
           "message": "Incorrect usage of spatial/fulltext/hash index and explicit index order"
+        }
+      ]
+    },
+    {
+      "id": "add-fulltext-index-email",
+      "title": "Add a FULLTEXT index on a VARCHAR(255) column",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_email (email)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": true,
+        "copied_rows": 0,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Fulltext index creation requires a lock. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Fulltext index creation requires a lock. Try LOCK=SHARED."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Fulltext index creation requires a lock. Try LOCK=SHARED."
         }
       ]
     },
@@ -8228,6 +9550,354 @@
       ]
     },
     {
+      "id": "add-index-desc",
+      "title": "Add a secondary index with a descending key part",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD INDEX idx_orders_amount (amount DESC)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-index-key-at-limit",
+      "title": "Add an index of 3072 bytes",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(768) NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD INDEX idx_code (code)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-index-key-over-limit",
+      "title": "Add an index of 3076 bytes",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(769) NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD INDEX idx_code (code)",
+      "verdict": {
+        "result": "fails",
+        "code": 1071,
+        "message": "Specified key was too long; max key length is 3072 bytes"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        }
+      ]
+    },
+    {
+      "id": "add-index-key-over-limit-sql-mode-not-strict",
+      "title": "Add an index of 3076 bytes, with a sql_mode that is not strict",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(769) NULL"
+      ],
+      "session": [
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+      ],
+      "statement": "ALTER TABLE orders ADD INDEX idx_code (code)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        }
+      ]
+    },
+    {
       "id": "add-index-on-blob",
       "title": "Index a BLOB column without a prefix length",
       "setup": [
@@ -8648,6 +10318,96 @@
       ]
     },
     {
+      "id": "add-index-two-columns",
+      "title": "Add a secondary index of two columns",
+      "session": [],
+      "statement": "ALTER TABLE orders add index `orders_user_id_amount_index`(`user_id`, `amount`)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
       "id": "add-nullable-column",
       "title": "Add a nullable column at the end of the table",
       "session": [],
@@ -8980,6 +10740,426 @@
           "result": "rejected",
           "code": 1062,
           "message": "Duplicate entry '<value>' for key 'orders.uq_orders_user'"
+        }
+      ]
+    },
+    {
+      "id": "add-unique-index-key-at-limit",
+      "title": "Add a unique index of 3072 bytes",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(768) NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_code (code)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-unique-index-key-over-limit",
+      "title": "Add a unique index of 3076 bytes",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(769) NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_code (code)",
+      "verdict": {
+        "result": "fails",
+        "code": 1071,
+        "message": "Specified key was too long; max key length is 3072 bytes"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        }
+      ]
+    },
+    {
+      "id": "add-unique-index-key-over-limit-sql-mode-not-strict",
+      "title": "Add a unique index of 3076 bytes, with a sql_mode that is not strict",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code VARCHAR(769) NULL"
+      ],
+      "session": [
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+      ],
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_code (code)",
+      "verdict": {
+        "result": "fails",
+        "code": 1071,
+        "message": "Specified key was too long; max key length is 3072 bytes"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        }
+      ]
+    },
+    {
+      "id": "add-unique-index-not-null",
+      "title": "Add a unique index on a NOT NULL column without duplicates",
+      "session": [],
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_amount (amount)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-unique-index-nullable-without-primary-key",
+      "title": "Add a unique index on a nullable column of a table without a primary key",
+      "setup": [
+        "ALTER TABLE orders MODIFY COLUMN id BIGINT UNSIGNED NOT NULL",
+        "ALTER TABLE orders DROP PRIMARY KEY",
+        "ALTER TABLE orders MODIFY COLUMN amount INT NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_amount (amount)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
         }
       ]
     },
@@ -9330,6 +11510,379 @@
           "result": "rejected",
           "code": 1170,
           "message": "BLOB/TEXT column 'body' used in key specification without a key length"
+        }
+      ]
+    },
+    {
+      "id": "add-unique-index-two-columns",
+      "title": "Add a unique index of two columns without duplicates",
+      "session": [],
+      "statement": "ALTER TABLE orders add unique `orders_user_id_amount_unique`(`user_id`, `amount`)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-unique-index-two-columns-without-primary-key",
+      "title": "Add a unique index on two NOT NULL columns of a table without a primary key",
+      "setup": [
+        "ALTER TABLE orders MODIFY COLUMN id BIGINT UNSIGNED NOT NULL",
+        "ALTER TABLE orders DROP PRIMARY KEY"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_user_amount (user_id, amount)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": true,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-unique-index-without-primary-key",
+      "title": "Add a unique index on a NOT NULL column of a table without a primary key",
+      "setup": [
+        "ALTER TABLE orders MODIFY COLUMN id BIGINT UNSIGNED NOT NULL",
+        "ALTER TABLE orders DROP PRIMARY KEY"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_amount (amount)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": true,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-unique-index-without-primary-key-with-unique-key",
+      "title": "Add a unique index on a NOT NULL column of a table without a primary key that has a unique key on a NOT NULL column",
+      "setup": [
+        "ALTER TABLE orders MODIFY COLUMN id BIGINT UNSIGNED NOT NULL",
+        "ALTER TABLE orders DROP PRIMARY KEY",
+        "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_id (id)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_amount (amount)",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
         }
       ]
     },
@@ -10803,6 +13356,99 @@
       ]
     },
     {
+      "id": "change-column-collation-char",
+      "title": "Change a CHAR column's collation, keeping its character set",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN code CHAR(50) NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders MODIFY COLUMN code CHAR(50) COLLATE utf8mb4_bin NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        }
+      ]
+    },
+    {
       "id": "change-column-collation-indexed",
       "title": "Change the collation of an indexed column",
       "setup": [
@@ -10880,6 +13526,99 @@
           "result": "rejected",
           "code": 1846,
           "message": "LOCK=NONE is not supported. Reason: Cannot change column type INPLACE. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "change-column-collation-text",
+      "title": "Change a TEXT column's collation, keeping its character set",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN body TEXT NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders MODIFY COLUMN body TEXT COLLATE utf8mb4_bin NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
         }
       ]
     },
@@ -13371,6 +16110,415 @@
       ]
     },
     {
+      "id": "drop-column-after-63-changes",
+      "title": "Drop a column after 63 instant column changes",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN extra_01 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_02 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_03 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_04 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_05 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_06 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_07 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_08 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_09 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_10 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_11 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_12 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_13 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_14 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_15 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_16 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_17 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_18 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_19 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_20 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_21 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_22 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_23 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_24 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_25 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_26 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_27 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_28 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_29 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_30 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_31 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_32 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_33 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_34 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_35 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_36 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_37 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_38 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_39 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_40 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_41 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_42 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_43 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_44 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_45 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_46 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_47 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_48 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_49 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_50 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_51 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_52 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_53 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_54 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_55 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_56 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_57 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_58 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_59 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_60 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_61 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_62 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_63 INT NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN note",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            63,
+            64
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            63,
+            64
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            63,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            63,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            63,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            63,
+            64
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-column-after-64-changes",
+      "title": "Drop a column after 64 instant column changes",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN extra_01 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_02 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_03 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_04 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_05 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_06 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_07 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_08 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_09 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_10 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_11 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_12 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_13 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_14 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_15 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_16 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_17 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_18 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_19 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_20 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_21 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_22 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_23 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_24 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_25 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_26 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_27 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_28 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_29 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_30 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_31 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_32 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_33 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_34 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_35 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_36 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_37 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_38 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_39 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_40 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_41 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_42 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_43 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_44 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_45 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_46 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_47 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_48 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_49 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_50 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_51 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_52 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_53 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_54 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_55 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_56 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_57 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_58 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_59 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_60 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_61 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_62 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_63 INT NULL",
+        "ALTER TABLE orders ADD COLUMN extra_64 INT NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN note",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": true,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            64,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 4092,
+          "message": "Maximum row versions reached for table kilit_lab/orders. No more columns can be added or dropped instantly. Please use COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            64,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            64,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            64,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            64,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "drop-column-after-dropping-fulltext",
+      "title": "Drop a column from a table whose only FULLTEXT index was dropped",
+      "setup": [
+        "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)",
+        "ALTER TABLE orders DROP INDEX ft_orders_note"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": true,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
       "id": "drop-column-after-dropping-its-foreign-key",
       "title": "Drop a column after dropping its foreign key",
       "setup": [
@@ -15398,6 +18546,100 @@
       ]
     },
     {
+      "id": "drop-column-int",
+      "title": "Drop an INT column",
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN amount",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
       "id": "drop-column-missing",
       "title": "Drop a column the table does not have",
       "session": [],
@@ -15659,6 +18901,103 @@
       ]
     },
     {
+      "id": "drop-column-stored-generated",
+      "title": "Drop a STORED generated column",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN amount2 INT AS (amount * 2) STORED"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN amount2",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
       "id": "drop-column-stored-generated-source",
       "title": "Drop a column a stored generated column uses",
       "setup": [
@@ -15725,6 +19064,103 @@
           "result": "rejected",
           "code": 3108,
           "message": "Column 'amount' has a generated column dependency."
+        }
+      ]
+    },
+    {
+      "id": "drop-column-virtual-generated",
+      "title": "Drop a VIRTUAL generated column",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN amount2 INT AS (amount * 2) VIRTUAL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders DROP COLUMN amount2",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
         }
       ]
     },
@@ -18140,10 +21576,435 @@
       ]
     },
     {
+      "id": "make-column-not-null-sql-mode-empty",
+      "title": "Make a column NOT NULL when no row is NULL, with an empty sql_mode",
+      "session": [
+        "SET sql_mode = ''"
+      ],
+      "statement": "ALTER TABLE orders MODIFY COLUMN email VARCHAR(255) NOT NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: cannot silently convert NULL values, as required in this SQL_MODE. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: cannot silently convert NULL values, as required in this SQL_MODE. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: cannot silently convert NULL values, as required in this SQL_MODE. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: cannot silently convert NULL values, as required in this SQL_MODE. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "make-column-not-null-sql-mode-not-strict",
+      "title": "Make a column NOT NULL when no row is NULL, with a sql_mode that is not strict",
+      "session": [
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+      ],
+      "statement": "ALTER TABLE orders MODIFY COLUMN email VARCHAR(255) NOT NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: cannot silently convert NULL values, as required in this SQL_MODE. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: cannot silently convert NULL values, as required in this SQL_MODE. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: cannot silently convert NULL values, as required in this SQL_MODE. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: cannot silently convert NULL values, as required in this SQL_MODE. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
+      "id": "make-column-not-null-with-nulls-sql-mode-not-strict",
+      "title": "Make a column NOT NULL when some rows are NULL, with a sql_mode that is not strict",
+      "session": [
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+      ],
+      "statement": "ALTER TABLE orders MODIFY COLUMN note VARCHAR(50) NOT NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: cannot silently convert NULL values, as required in this SQL_MODE. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: cannot silently convert NULL values, as required in this SQL_MODE. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: cannot silently convert NULL values, as required in this SQL_MODE. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: cannot silently convert NULL values, as required in this SQL_MODE. Try LOCK=SHARED."
+        }
+      ]
+    },
+    {
       "id": "make-column-nullable",
       "title": "Make a NOT NULL column nullable",
       "session": [],
       "statement": "ALTER TABLE orders MODIFY COLUMN amount INT NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": true,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "make-column-nullable-in-foreign-key",
+      "title": "Make a NOT NULL foreign key column nullable",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders MODIFY COLUMN user_id BIGINT UNSIGNED NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": true,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "make-column-nullable-user-id",
+      "title": "Make a NOT NULL BIGINT UNSIGNED column nullable",
+      "session": [],
+      "statement": "ALTER TABLE orders MODIFY COLUMN user_id BIGINT UNSIGNED NULL",
       "verdict": {
         "result": "runs",
         "algorithm": "INPLACE",
@@ -18896,6 +22757,84 @@
           "result": "rejected",
           "code": 1101,
           "message": "BLOB, TEXT, GEOMETRY or JSON column 'c' can't have a default value"
+        }
+      ]
+    },
+    {
+      "id": "modify-user-id-to-int-unsigned",
+      "title": "Change a BIGINT UNSIGNED column that no key uses to INT UNSIGNED",
+      "session": [],
+      "statement": "ALTER TABLE orders MODIFY COLUMN user_id INT UNSIGNED NOT NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "COPY",
+        "rebuilds_table": true,
+        "copied_rows": 1000,
+        "writes": "blocked",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Need to rebuild the table to change column type. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Cannot change column type INPLACE. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INPLACE is not supported. Reason: Cannot change column type INPLACE. Try ALGORITHM=COPY."
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "LOCK=NONE is not supported. Reason: Cannot change column type INPLACE. Try LOCK=SHARED."
         }
       ]
     },
@@ -24892,6 +28831,284 @@
       ]
     },
     {
+      "id": "parent-rename-column-id",
+      "title": "Rename the primary key column that another table's foreign key references",
+      "setup": [
+        "CREATE TABLE order_items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, order_id BIGINT UNSIGNED NOT NULL, CONSTRAINT fk_items_order FOREIGN KEY (order_id) REFERENCES orders (id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders RENAME COLUMN id TO order_id",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Columns participating in a foreign key are renamed. Try ALGORITHM=INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=COPY is not supported. Reason: Columns participating in a foreign key are renamed. Try ALGORITHM=INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "parent-rename-column-id-checks-off",
+      "title": "Rename the primary key column that another table's foreign key references, with foreign_key_checks off",
+      "setup": [
+        "CREATE TABLE order_items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, order_id BIGINT UNSIGNED NOT NULL, CONSTRAINT fk_items_order FOREIGN KEY (order_id) REFERENCES orders (id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+      ],
+      "session": [
+        "SET foreign_key_checks = 0"
+      ],
+      "statement": "ALTER TABLE orders RENAME COLUMN id TO order_id",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=INSTANT is not supported. Reason: Columns participating in a foreign key are renamed. Try ALGORITHM=INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=COPY is not supported. Reason: Columns participating in a foreign key are renamed. Try ALGORITHM=INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "parent-varchar-255-to-300",
+      "title": "Widen a VARCHAR(255) column that another table's foreign key references to VARCHAR(300)",
+      "setup": [
+        "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_email (email)",
+        "CREATE TABLE order_items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, order_email VARCHAR(255) NULL, CONSTRAINT fk_items_order_email FOREIGN KEY (order_email) REFERENCES orders (email)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders MODIFY COLUMN email VARCHAR(300) NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
       "id": "redundant-add-fulltext-index",
       "title": "Add a FULLTEXT index on a TEXT column to a REDUNDANT table",
       "setup": [
@@ -26184,6 +30401,100 @@
       ]
     },
     {
+      "id": "rename-column-id",
+      "title": "Rename the primary key column",
+      "session": [],
+      "statement": "ALTER TABLE orders RENAME COLUMN id TO order_id",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
       "id": "rename-column-in-check-alone",
       "title": "Rename the only column of a CHECK constraint",
       "setup": [
@@ -26250,6 +30561,196 @@
           "result": "rejected",
           "code": 3959,
           "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        }
+      ]
+    },
+    {
+      "id": "rename-column-in-foreign-key",
+      "title": "Rename a foreign key column",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders RENAME COLUMN user_id TO customer_id",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=COPY is not supported. Reason: Columns participating in a foreign key are renamed. Try ALGORITHM=INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rename-column-in-foreign-key-checks-off",
+      "title": "Rename a foreign key column, with foreign_key_checks off",
+      "setup": [
+        "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)"
+      ],
+      "session": [
+        "SET foreign_key_checks = 0"
+      ],
+      "statement": "ALTER TABLE orders RENAME COLUMN user_id TO customer_id",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1846,
+          "message": "ALGORITHM=COPY is not supported. Reason: Columns participating in a foreign key are renamed. Try ALGORITHM=INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
         }
       ]
     },
@@ -26464,6 +30965,103 @@
       ]
     },
     {
+      "id": "rename-column-indexed-fulltext",
+      "title": "Rename a column that has a FULLTEXT index",
+      "setup": [
+        "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders RENAME COLUMN note TO memo",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
       "id": "rename-column-indexed-in-check-alone",
       "title": "Rename a column that has an index of its own and is the only column of a CHECK constraint",
       "setup": [
@@ -26602,6 +31200,100 @@
           "result": "rejected",
           "code": 3959,
           "message": "Check constraint 'chk_amount' uses column 'amount', hence column cannot be dropped or renamed."
+        }
+      ]
+    },
+    {
+      "id": "rename-column-int",
+      "title": "Rename an INT column",
+      "session": [],
+      "statement": "ALTER TABLE orders RENAME COLUMN amount TO total",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
         }
       ]
     },
@@ -26800,6 +31492,103 @@
       ]
     },
     {
+      "id": "rename-column-stored-generated",
+      "title": "Rename a STORED generated column",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN amount2 INT AS (amount * 2) STORED"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders RENAME COLUMN amount2 TO amount3",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
       "id": "rename-column-stored-generated-source",
       "title": "Rename a column a stored generated column uses",
       "setup": [
@@ -26866,6 +31655,294 @@
           "result": "rejected",
           "code": 3108,
           "message": "Column 'amount' has a generated column dependency."
+        }
+      ]
+    },
+    {
+      "id": "rename-column-user-id",
+      "title": "Rename a BIGINT UNSIGNED column",
+      "session": [],
+      "statement": "ALTER TABLE orders RENAME COLUMN user_id TO customer_id",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rename-column-virtual-generated",
+      "title": "Rename a VIRTUAL generated column",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN amount2 INT AS (amount * 2) VIRTUAL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders RENAME COLUMN amount2 TO amount3",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rename-column-with-fulltext",
+      "title": "Rename a column of a table that has a FULLTEXT index on another column",
+      "setup": [
+        "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_email (email)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders RENAME COLUMN note TO memo",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INSTANT",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
         }
       ]
     },
@@ -27431,10 +32508,551 @@
       ]
     },
     {
+      "id": "varchar-100-to-120",
+      "title": "Widen a VARCHAR(100) column to VARCHAR(120), past 255 bytes",
+      "setup": [
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders MODIFY COLUMN user_name VARCHAR(120) NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            1,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            1,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "varchar-100-to-120-in-foreign-key",
+      "title": "Widen a VARCHAR(100) foreign key column to VARCHAR(120), past 255 bytes",
+      "setup": [
+        "ALTER TABLE users ADD UNIQUE INDEX uq_users_name (name)",
+        "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL",
+        "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)"
+      ],
+      "session": [
+        "SET foreign_key_checks = 1"
+      ],
+      "statement": "ALTER TABLE orders MODIFY COLUMN user_name VARCHAR(120) NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
       "id": "varchar-255-to-300",
       "title": "Widen a VARCHAR(255) column to VARCHAR(300), past 255 bytes before and after",
       "session": [],
       "statement": "ALTER TABLE orders MODIFY COLUMN email VARCHAR(300) NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "varchar-255-to-300-unique",
+      "title": "Widen a VARCHAR(255) column with a unique index to VARCHAR(300)",
+      "setup": [
+        "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_email (email)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders MODIFY COLUMN email VARCHAR(300) NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "varchar-255-to-768-indexed",
+      "title": "Widen an indexed VARCHAR(255) column to VARCHAR(768), a key of 3072 bytes",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_orders_email (email)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders MODIFY COLUMN email VARCHAR(768) NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "varchar-255-to-769-indexed",
+      "title": "Widen an indexed VARCHAR(255) column to VARCHAR(769), a key of 3076 bytes",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_orders_email (email)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders MODIFY COLUMN email VARCHAR(769) NULL",
+      "verdict": {
+        "result": "fails",
+        "code": 1071,
+        "message": "Specified key was too long; max key length is 3072 bytes"
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "rejected",
+          "code": 1071,
+          "message": "Specified key was too long; max key length is 3072 bytes"
+        }
+      ]
+    },
+    {
+      "id": "varchar-255-to-769-indexed-sql-mode-not-strict",
+      "title": "Widen an indexed VARCHAR(255) column to VARCHAR(769), a key of 3076 bytes, with a sql_mode that is not strict",
+      "setup": [
+        "ALTER TABLE orders ADD INDEX idx_orders_email (email)"
+      ],
+      "session": [
+        "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+      ],
+      "statement": "ALTER TABLE orders MODIFY COLUMN email VARCHAR(769) NULL",
       "verdict": {
         "result": "runs",
         "algorithm": "INPLACE",
@@ -27838,6 +33456,99 @@
       "title": "Widen an indexed VARCHAR(50) column to VARCHAR(60)",
       "setup": [
         "ALTER TABLE orders ADD INDEX idx_orders_note (note)"
+      ],
+      "session": [],
+      "statement": "ALTER TABLE orders MODIFY COLUMN note VARCHAR(60) NULL",
+      "verdict": {
+        "result": "runs",
+        "algorithm": "INPLACE",
+        "rebuilds_table": false,
+        "copied_rows": 0,
+        "writes": "allowed",
+        "consistent": true
+      },
+      "observations": [
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INSTANT",
+            "lock_none": false
+          },
+          "result": "rejected",
+          "code": 1845,
+          "message": "ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE."
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "INPLACE",
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": "COPY",
+            "lock_none": false
+          },
+          "result": "accepted",
+          "copied_rows": 1000,
+          "rebuilt": true,
+          "row_versions": [
+            0,
+            0
+          ]
+        },
+        {
+          "variant": {
+            "algorithm": null,
+            "lock_none": true
+          },
+          "result": "accepted",
+          "copied_rows": 0,
+          "rebuilt": false,
+          "row_versions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "varchar-50-to-60-indexed-fulltext",
+      "title": "Widen a VARCHAR(50) column with a FULLTEXT index to VARCHAR(60)",
+      "setup": [
+        "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)"
       ],
       "session": [],
       "statement": "ALTER TABLE orders MODIFY COLUMN note VARCHAR(60) NULL",

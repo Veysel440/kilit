@@ -1,0 +1,6 @@
+title = "Drop a column from a table whose only FULLTEXT index was dropped"
+setup = [
+    "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)",
+    "ALTER TABLE orders DROP INDEX ft_orders_note",
+]
+operation = "DROP COLUMN amount"

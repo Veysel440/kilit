@@ -1,0 +1,2 @@
+title = "Rename an INT column"
+operation = "RENAME COLUMN amount TO total"

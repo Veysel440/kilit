@@ -104,6 +104,31 @@ pub struct Table {
     /// `8`. Any value but 0 makes an InnoDB table without `ROW_FORMAT`
     /// COMPRESSED.
     pub key_block_size: Option<String>,
+    /// What kilit knows of the hidden column FTS_DOC_ID, which InnoDB adds
+    /// with a table's first FULLTEXT index and keeps when the last one is
+    /// dropped. SHOW CREATE TABLE, and so a schema dump, does not show it.
+    pub doc_id: DocId,
+}
+
+/// Whether an InnoDB table has the hidden column FTS_DOC_ID: see
+/// [`Table::doc_id`]. A table with a FULLTEXT index has it, whatever this
+/// says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DocId {
+    /// Nothing kilit read says: a table of a schema dump may have had a
+    /// FULLTEXT index that was dropped. A table the input created without
+    /// one does not have the column.
+    #[default]
+    Unseen,
+    /// The table has it: it had a FULLTEXT index, and nothing since may have
+    /// removed the column.
+    Kept,
+    /// kilit cannot tell: a statement since the last FULLTEXT index was
+    /// dropped may have rebuilt the table without the column.
+    Unclear,
+    /// The table does not have it: `ALTER TABLE ... ENGINE=InnoDB` rebuilt
+    /// it with no FULLTEXT index, which removes the column, as the lab saw.
+    Absent,
 }
 
 /// A table's `ROW_FORMAT`, as written. The lab measured DYNAMIC, the

@@ -166,10 +166,17 @@ SQL
             "add-column-current-timestamp",
             "on-delete-cascade-add-nullable-column",
             "on-delete-set-null-add-nullable-column",
-            "cascade-parent-add-nullable-column"
+            "cascade-parent-add-nullable-column",
+            "add-column-boolean-default",
+            "add-column-text",
+            "add-column-timestamp",
+            "add-column-collation",
+            "add-column-comment",
+            "add-column-after-63-changes",
+            "add-column-after-dropping-fulltext-and-rebuilding"
           ],
           "notes": [
-            "if the table has had 64 instant column changes since it was last rebuilt: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)"
+            "if the table has had 64 instant column changes since it was last rebuilt, or a FULLTEXT index that was dropped since then: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes, add-column-after-dropping-fulltext)"
           ]
         },
         {
@@ -194,7 +201,11 @@ SQL
             "on-delete-restrict-add-index",
             "on-delete-no-action-add-index",
             "cascade-parent-add-index",
-            "set-null-parent-add-index"
+            "set-null-parent-add-index",
+            "add-index-desc",
+            "add-index-two-columns",
+            "add-index-key-at-limit",
+            "add-index-key-over-limit-sql-mode-not-strict"
           ]
         }
       ]

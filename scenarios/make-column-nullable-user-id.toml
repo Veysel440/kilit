@@ -1,0 +1,2 @@
+title = "Make a NOT NULL BIGINT UNSIGNED column nullable"
+operation = "MODIFY COLUMN user_id BIGINT UNSIGNED NULL"

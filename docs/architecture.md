@@ -225,7 +225,7 @@ flowchart TD
 ```
 
 The checker places each change in a *case*: a kind of change, together with
-the lab scenarios that measured it. There are 35 cases for InnoDB, and 46 more
+the lab scenarios that measured it. There are 38 cases for InnoDB, and 49 more
 for MyISAM, row formats and `old_alter_table`. For a `MODIFY` or `CHANGE`,
 `modify.rs` compares the new definition with the column's current one,
 character set and collation included, and the one thing that changes decides

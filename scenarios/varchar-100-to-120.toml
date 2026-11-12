@@ -1,0 +1,3 @@
+title = "Widen a VARCHAR(100) column to VARCHAR(120), past 255 bytes"
+setup = ["ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL"]
+operation = "MODIFY COLUMN user_name VARCHAR(120) NULL"

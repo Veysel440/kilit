@@ -1,0 +1,7 @@
+title = "Add a nullable column to a table whose only FULLTEXT index was dropped, after the table was rebuilt"
+setup = [
+    "ALTER TABLE orders ADD FULLTEXT INDEX ft_orders_note (note)",
+    "ALTER TABLE orders DROP INDEX ft_orders_note",
+    "ALTER TABLE orders ENGINE=InnoDB",
+]
+operation = "ADD COLUMN coupon VARCHAR(255) NULL"

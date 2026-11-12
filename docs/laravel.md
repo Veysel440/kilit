@@ -204,6 +204,37 @@ kilit compares the new definition with the column's current one, from your
 what the lab measured instead. See
 [the findings](findings.md#changing-a-column-with--change).
 
+### `'strict' => false` and `NOT NULL`
+
+A `->change()` to `NOT NULL` is INPLACE and rebuilds the table in strict
+`sql_mode`, and writes continue. Without strict mode MySQL copies the table
+and writes wait; `ALGORITHM=INSTANT` and `ALGORITHM=INPLACE` fail with error
+1846. Laravel with `'strict' => false` in `config/database.php` sets
+`sql_mode` to `NO_ENGINE_SUBSTITUTION` when it connects, and `--pretend` does
+not print that, so kilit cannot see it. It keeps the strict answer and adds a
+note that names `'strict' => false`. A migration that sets the mode itself is
+seen, because `--pretend` prints the statement:
+
+```text
+2026_01_02_000000_change_orders_email
+  ⇂ SET SESSION sql_mode = ''
+  ⇂ alter table `orders` modify `email` varchar(255) not null
+```
+
+kilit then answers COPY, and writes wait. The same holds for a key over 3072
+bytes: in strict mode `string('code', 769)->index()` fails with error 1071,
+and without it MySQL cuts the key to a prefix with a warning. See
+[the findings](findings.md#index-keys-longer-than-3072-bytes).
+
+### `->instant()`
+
+Laravel 12.41 and later write `algorithm=instant` for `->instant()`. MySQL
+refuses a forced `INSTANT` for a change that is not instant (errors 1845, 1846
+and 4092), and then the migration fails. kilit answers a forced
+`ALGORITHM=INSTANT` from the lab's run of exactly that variant, where it
+measured one: for example `dropColumn()` on a table that has had 64 instant
+column changes, or on a table whose FULLTEXT index was dropped, fails.
+
 ## Windows and PowerShell
 
 Pipe in WSL, Git Bash or `cmd`, which pass Laravel's output through as it is.

@@ -1,0 +1,4 @@
+title = "Widen an indexed VARCHAR(255) column to VARCHAR(769), a key of 3076 bytes, with a sql_mode that is not strict"
+setup = ["ALTER TABLE orders ADD INDEX idx_orders_email (email)"]
+session = ["SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"]
+operation = "MODIFY COLUMN email VARCHAR(769) NULL"

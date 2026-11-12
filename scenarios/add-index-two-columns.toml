@@ -1,0 +1,2 @@
+title = "Add a secondary index of two columns"
+operation = "add index `orders_user_id_amount_index`(`user_id`, `amount`)"

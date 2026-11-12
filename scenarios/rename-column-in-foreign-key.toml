@@ -1,0 +1,6 @@
+title = "Rename a foreign key column"
+setup = [
+    "ALTER TABLE orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)",
+]
+session = ["SET foreign_key_checks = 1"]
+operation = "RENAME COLUMN user_id TO customer_id"

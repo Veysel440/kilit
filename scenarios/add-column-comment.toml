@@ -1,0 +1,2 @@
+title = "Add a nullable column with a comment"
+operation = "ADD COLUMN coupon VARCHAR(255) NULL COMMENT 'shown to the customer'"

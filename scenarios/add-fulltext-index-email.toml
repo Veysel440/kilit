@@ -1,0 +1,2 @@
+title = "Add a FULLTEXT index on a VARCHAR(255) column"
+operation = "ADD FULLTEXT INDEX ft_orders_email (email)"

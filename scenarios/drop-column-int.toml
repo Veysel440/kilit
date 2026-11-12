@@ -1,0 +1,2 @@
+title = "Drop an INT column"
+operation = "DROP COLUMN amount"

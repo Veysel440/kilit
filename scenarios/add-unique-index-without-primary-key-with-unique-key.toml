@@ -1,0 +1,7 @@
+title = "Add a unique index on a NOT NULL column of a table without a primary key that has a unique key on a NOT NULL column"
+setup = [
+    "ALTER TABLE orders MODIFY COLUMN id BIGINT UNSIGNED NOT NULL",
+    "ALTER TABLE orders DROP PRIMARY KEY",
+    "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_id (id)",
+]
+operation = "ADD UNIQUE INDEX uq_orders_amount (amount)"

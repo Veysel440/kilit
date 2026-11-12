@@ -1,0 +1,3 @@
+title = "Add a foreign key that restricts on delete, with foreign_key_checks on (the default)"
+session = ["SET foreign_key_checks = 1"]
+operation = "add constraint `orders_user_id_foreign` foreign key (`user_id`) references `users` (`id`) on delete restrict"

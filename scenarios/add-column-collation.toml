@@ -1,0 +1,2 @@
+title = "Add a nullable column with its own collation"
+operation = "ADD COLUMN coupon VARCHAR(255) COLLATE utf8mb4_bin NULL"

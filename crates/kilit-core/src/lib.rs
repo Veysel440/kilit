@@ -58,7 +58,7 @@ pub use pretend::{
 pub use results::{Observation, Outcome, Server, Variant, Verdict, Writes};
 pub use schema::{Schema, TableState};
 pub use statement::{
-    Algorithm, Alter, Check, CheckColumns, Column, DataType, Engine, ForeignKey, ForeignKeyAction,
-    Generated, Index, IndexKind, IntegerSize, Lock, Operation, Position, Rename, RowFormat,
-    Statement, StatementKind, Table, TableOptions, Variable,
+    Algorithm, Alter, Check, CheckColumns, Column, DataType, DocId, Engine, ForeignKey,
+    ForeignKeyAction, Generated, Index, IndexKind, IntegerSize, Lock, Operation, Position, Rename,
+    RowFormat, Statement, StatementKind, Table, TableOptions, Variable,
 };

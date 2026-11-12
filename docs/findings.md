@@ -1,10 +1,10 @@
 # Measured behavior
 
 Every row on this page is one kind of change that kilit-lab ran on real MySQL
-servers: 8.0.46 and 8.4.13. The lab ran each of the 339 scenarios in
+servers: 8.0.46 and 8.4.13. The lab ran each of the 400 scenarios in
 [`scenarios/`](../scenarios/) on both servers, in six variants, and kept the
-result in [`matrix/`](../matrix/). The scenarios are grouped into 85 case ids:
-36 for InnoDB, 12 for MyISAM, 29 for row formats and 8 for `old_alter_table`.
+result in [`matrix/`](../matrix/). The scenarios are grouped into 87 case ids:
+38 for InnoDB, 12 for MyISAM, 29 for row formats and 8 for `old_alter_table`.
 
 The tables are InnoDB tables of 1,000 rows (`orders`) and 100 rows (`users`).
 A table whose `CREATE TABLE` names no `ENGINE` is taken as InnoDB, the server
@@ -43,10 +43,12 @@ What the words mean:
 - `fails, error N` is the error number MySQL returns. The statement changes
   nothing.
 
-Some situations cannot be seen in a schema: the rows a table holds, or the 64
-instant column changes a table has had since it was last rebuilt. kilit prints
-them as notes under the answer, not as the answer. The rows for them are here
-because the lab measured them.
+Some situations cannot be seen in a schema: the rows a table holds, the 64
+instant column changes a table has had since it was last rebuilt, a FULLTEXT
+index that was dropped and left a hidden column behind, or the `sql_mode` a
+framework sets without a statement. kilit prints them as notes under the
+answer, not as the answer. The rows for them are here because the lab measured
+them.
 
 A row describes a table kilit knows: one in the `--schema` file or created by
 the input. On a table kilit does not know (no `--schema`, a table the dump
@@ -111,8 +113,9 @@ What kilit does when the input names a setting:
   `default_storage_engine` and `restrict_fk_on_non_standard_key`, once named,
   make `UNKNOWN` the answers they could change: expression defaults, the row
   format or engine of a new table, a foreign key's parent index.
-- `sql_mode`: a key that may be too long on a MyISAM table is `UNKNOWN`. The
-  notes that assume strict mode say so and stay. For a quoted default on a
+- `sql_mode`: a key that may be too long on a MyISAM table is `UNKNOWN`. A
+  change to `NOT NULL` and a key past 3072 bytes depend on it too, as the rows
+  below say. The notes that assume strict mode say so and stay. For a quoted default on a
   `TEXT`, `BLOB` or `JSON` column kilit reads `sql_mode` from a session `SET`
   of a quoted list: strict means a list with `STRICT_TRANS_TABLES` or
   `STRICT_ALL_TABLES` and no other mode that changes the answer; `''` and
@@ -132,6 +135,7 @@ about it for each statement.
 | Add a column¹<br>`$table->string('coupon')->nullable()` | INSTANT | continue | `add-column` |
 | ↳ when the table has a FULLTEXT index | COPY, copies every row | **wait** | `add-column`, exception: FULLTEXT index |
 | ↳ after 64 instant column changes | INPLACE, rebuilds the table | continue | `add-column`, exception: 64 changes |
+| ↳ after the table's last FULLTEXT index was dropped⁸ | INPLACE, rebuilds the table; with `ALGORITHM=INSTANT` it fails, error 1845 | continue | `add-column`, exception: dropped FULLTEXT index |
 | ↳ with `DEFAULT (UUID())`, `(RAND())`, `(UUID_SHORT())`, `(SYSDATE())` or `(USER())` | fails, error 1674 (binary log on) | – | `add-column-binlog-unsafe-default` |
 | ↳ with `DEFAULT (NOW())`, `(CURRENT_TIMESTAMP)`, `(CURDATE())`, `(CURRENT_DATE + INTERVAL 1 YEAR)` or `(JSON_ARRAY())`<br>`$table->date('due_on')->useCurrent()` | COPY, copies every row | **wait** | `add-column-expression-default` |
 | ↳ of `TEXT`, `TINYTEXT`, `MEDIUMTEXT`, `LONGTEXT`, `BLOB` (and its sizes), `JSON` or `GEOMETRY` (and `POINT`, `LINESTRING` and the like) with a quoted default<br>`$table->text('body')->default('')` | fails, error 1101 | – | `add-column-blob-literal-default` |
@@ -140,6 +144,10 @@ about it for each statement.
 | ↳ when the row of a known table would pass 65,535 bytes ([how kilit counts](#defaults-and-row-size)) | fails, error 1118 | – | `add-column`, exception: row too large |
 | Drop a column<br>`$table->dropColumn('note')` | INSTANT | continue | `drop-column` |
 | ↳ when the table has a FULLTEXT index | COPY, copies every row | **wait** | `drop-column`, exception: FULLTEXT index |
+| ↳ after 63 instant column changes | INSTANT | continue | `drop-column` |
+| ↳ after 64 instant column changes | INPLACE, rebuilds the table; with `ALGORITHM=INSTANT` it fails, error 4092 | continue | `drop-column`, exception: 64 changes |
+| ↳ after the table's last FULLTEXT index was dropped⁸ | INPLACE, rebuilds the table; with `ALGORITHM=INSTANT` it fails, error 1845 | continue | `drop-column`, exception: dropped FULLTEXT index |
+| ↳ when the column is a VIRTUAL generated column | INSTANT; with `ALGORITHM=INPLACE` it does not rebuild the table | continue | `drop-column`, exception: VIRTUAL generated column |
 | ↳ when the column is in an index, alone or with others, or has a UNIQUE index of its own, and the table has no FULLTEXT index<br>`$table->dropColumn('status')` (in `orders_status_index` in the example schema) | INPLACE, rebuilds the table | continue | `drop-column`, exception: indexed column |
 | ↳ when the column is the only column of the only FULLTEXT index, which goes with it | INPLACE, rebuilds the table | continue | `drop-column`, exception: indexed column |
 | ↳ when the column is in a foreign key<br>`$table->dropColumn('user_id')` before `$table->dropForeign(['user_id'])` | fails, error 1828 | – | `drop-column`, exception: foreign key column |
@@ -152,16 +160,22 @@ about it for each statement.
 | Rename a column<br>`$table->renameColumn('note', 'memo')` | INSTANT | continue | `rename-column` |
 | ↳ when a generated column uses it | fails, error 3108 | – | `rename-column`, exception: generated column source |
 | ↳ when a CHECK constraint uses it, with other columns or alone | fails, error 3959 | – | `rename-column`, exception: CHECK uses the column |
+| ↳ when a foreign key of another table points at it⁹<br>`$table->renameColumn('id', 'uid')` on `users` | INPLACE, no rebuild; with `ALGORITHM=INSTANT` or `ALGORITHM=COPY` it fails, error 1846 | continue | `rename-column`, exception: referenced column |
+| ↳ when it is a column of the table's own foreign key | INSTANT; with `ALGORITHM=COPY` it fails, error 1846 | continue | `rename-column`, exception: column of the table's own foreign key |
 | Set a column default<br>`ALTER COLUMN … SET DEFAULT` (raw SQL) | INSTANT | continue | `set-column-default` |
 | ↳ to a quoted literal, on a known `TEXT` or `BLOB` column, or a `JSON` column in strict mode | fails, error 1101 | – | `set-column-default`, exception: BLOB or TEXT default |
 | Add an index<br>`$table->index('amount')` | INPLACE | continue | `add-index` |
 | ↳ on `LOWER()` of a VARCHAR column (functional index)<br>`$table->rawIndex('(lower(email))', 'users_lower_email_index')` | INPLACE | **wait** | `add-functional-index` |
 | ↳ on a `TEXT`, `TINYTEXT`, `MEDIUMTEXT`, `LONGTEXT` or `BLOB` column without a prefix length<br>`$table->text('body')->index()` | fails, error 1170 | – | `add-index`, exception: BLOB or TEXT without prefix |
+| ↳ on a key of more than 3072 bytes ([how kilit counts](#index-keys-longer-than-3072-bytes))<br>`$table->string('code', 769)->index()` | fails, error 1071 | – | `key-too-long` |
 | Add a unique index<br>`$table->unique('legacy_code')` | INPLACE | continue | `add-unique-index` |
 | ↳ when values repeat | fails, error 1062 | – | `add-unique-index`, exception: duplicate values |
 | ↳ on a `TEXT`, `TINYTEXT`, `MEDIUMTEXT`, `LONGTEXT` or `BLOB` column without a prefix length<br>`$table->text('body')->unique()` | fails, error 1170 | – | `add-unique-index`, exception: BLOB or TEXT without prefix |
+| ↳ on a key of more than 3072 bytes | fails, error 1071 | – | `key-too-long` |
+| ↳ on a table with no primary key, when every column of the index is `NOT NULL` and the table has no such UNIQUE index yet<br>`$table->unique(['user_id', 'tag_id'])` on a pivot table | INPLACE, rebuilds the table, because InnoDB keeps the rows in the new index | continue | `add-unique-index`, exception: becomes the clustered key |
 | Add a FULLTEXT index<br>`$table->fullText('note')` | INPLACE, rebuilds the table | **wait** | `add-fulltext-index` |
 | ↳ when the table already has one | INPLACE | **wait** | `add-fulltext-index`, exception: FULLTEXT index |
+| ↳ after the table's last FULLTEXT index was dropped⁸ | INPLACE, no rebuild; with `ALGORITHM=INSTANT`, `ALGORITHM=INPLACE, LOCK=NONE` or `LOCK=NONE` it fails, error 1846 | **wait** | `add-fulltext-index`, exception: dropped FULLTEXT index |
 | ↳ on one `TEXT`, `MEDIUMTEXT` or `LONGTEXT` column, or on two columns | INPLACE, rebuilds the table | **wait** | `add-fulltext-index` (`add-fulltext-index-text`, `-mediumtext`, `-longtext`, `-two-columns`) |
 | ↳ on a `TEXT` column in the binary character set, which MySQL makes a BLOB<br>`TEXT CHARACTER SET binary` (raw SQL) | fails, error 1283 | – | `add-fulltext-index`, exception: binary TEXT |
 | ↳ with `ASC` or `DESC` on a key part | fails, error 1221 | – | `add-fulltext-index-with-order` |
@@ -178,11 +192,13 @@ about it for each statement.
 | ↳ when no index of the parent table starts with the parent column, the column is only second in an index, or the index covers only a shorter prefix such as `name(10)` | fails, error 1822 on 8.0.46, 6125 on 8.4.13 | – | `add-foreign-key`, exception: no parent index |
 | ↳ when the only index that starts with the parent column is a plain one, a plain DESC one, or a longer one | COPY, copies every row on 8.0.46; fails, error 6125 on 8.4.13 | **wait** on 8.0.46, – on 8.4.13 | `add-foreign-key`, exception: non-unique parent index |
 | ↳ when the two columns differ in a way not measured, the key has several columns without a matching UNIQUE index or primary key, or the parent index has a prefix as long as the column or longer, is FULLTEXT only, or part of a longer primary key, or the parent column has a foreign key of its own | UNKNOWN | – | none |
+| ↳ with `ON UPDATE CASCADE`, with both `ON DELETE CASCADE` and `ON UPDATE CASCADE`, or with `ON DELETE RESTRICT`<br>`$table->foreign('user_id')->references('id')->on('users')->cascadeOnUpdate()` | COPY, copies every row | **wait** | `add-foreign-key` |
 | ↳ with `ON DELETE CASCADE`, with `ON DELETE SET NULL` on a nullable column, or with `ON DELETE SET DEFAULT`<br>`$table->foreign('user_id')->references('id')->on('users')->cascadeOnDelete()` | COPY, copies every row | **wait** | `add-foreign-key` |
 | ↳ with `ON DELETE SET NULL` on a `NOT NULL` column, and no `ON UPDATE` clause<br>`$table->foreignId('user_id')->constrained()->nullOnDelete()` without `->nullable()` | fails, error 1830 | – | `add-foreign-key`, exception: SET NULL on a NOT NULL column |
 | ↳ with `ON UPDATE SET NULL`, or `ON DELETE SET NULL` with another `ON UPDATE` action, on a `NOT NULL` column, or with several columns | UNKNOWN: MySQL gives error 1830 by hand, but the lab has not measured it | – | none |
 | ↳ with the checks off²<br>`Schema::withoutForeignKeyConstraints(fn () => …)`, or `Schema::disableForeignKeyConstraints()` and `Schema::enableForeignKeyConstraints()` around the call | INPLACE | continue | `add-foreign-key-checks-off` |
 | ↳ with the checks off, and `ON DELETE CASCADE` or `ON DELETE SET NULL` on a nullable column | INPLACE | continue | `add-foreign-key-checks-off` |
+| ↳ with the checks off, when the parent table does not exist | INPLACE | continue | `add-foreign-key-checks-off` |
 | ↳ with the checks off, and `ON DELETE SET NULL` on a `NOT NULL` column | fails, error 1830 | – | `add-foreign-key-checks-off`, exception: SET NULL on a NOT NULL column |
 | ↳ with the checks off, when the two columns visibly differ, the parent has no fitting index, the key points at its own table or the shape is not measured | UNKNOWN | – | none |
 | Drop a foreign key<br>`$table->dropForeign(['user_id'])` | INPLACE | continue | `drop-foreign-key` |
@@ -208,7 +224,15 @@ about it for each statement.
 collation and comment, and a `TIMESTAMP` defaulting to `CURRENT_TIMESTAMP`.\
 ² Even when a row points to a missing parent: the foreign key is added, and the
 row stays as it is, unchecked. Laravel prints `SET FOREIGN_KEY_CHECKS=0;`
-before the call and `SET FOREIGN_KEY_CHECKS=1;` after it.
+before the call and `SET FOREIGN_KEY_CHECKS=1;` after it.\
+⁸ The first FULLTEXT index of an InnoDB table adds a hidden column,
+`FTS_DOC_ID`. Dropping the last FULLTEXT index leaves it, and neither `SHOW
+CREATE TABLE` nor a schema dump shows it. See [the hidden
+column](#the-hidden-fts_doc_id-column).\
+⁹ Only a column that an index serves can be referenced, and kilit checks the
+foreign keys of every table it knows. With the checks off the answer is the
+same. When a key of a table kilit does not know may point at the column, the
+answer is `UNKNOWN`.
 
 ### Tables with a foreign key action
 
@@ -256,6 +280,84 @@ FULLTEXT key part.
 
 [ddl-limits]: https://dev.mysql.com/doc/refman/8.4/en/innodb-online-ddl-limitations.html
 
+### The hidden FTS_DOC_ID column
+
+The first FULLTEXT index of an InnoDB table adds a hidden column, `FTS_DOC_ID`.
+Dropping the last FULLTEXT index leaves the column in the table, and neither
+`SHOW CREATE TABLE` nor a schema dump shows it. The lab ran a table with a
+FULLTEXT index that was then dropped (`add-column-after-dropping-fulltext`,
+`drop-column-after-dropping-fulltext`, `add-fulltext-index-after-dropping-fulltext`):
+
+- `ADD COLUMN` and `DROP COLUMN` are no longer instant. They are INPLACE and
+  rebuild the table, and a forced `ALGORITHM=INSTANT` fails with error 1845.
+- `ADD FULLTEXT` no longer rebuilds the table, because the column is there.
+  It is INPLACE, writes wait, and the forced variants fail with error 1846.
+- By hand on MySQL 8.0.46 and 8.4.13: `ALTER TABLE ... ENGINE=InnoDB` removes
+  the column again, and a later `ADD COLUMN` is instant
+  (`add-column-after-dropping-fulltext-and-rebuilding` shows it). With
+  `ALGORITHM=COPY` it removes the column too; with `ALGORITHM=INSTANT` MySQL
+  refuses it with error 1845 and nothing changes.
+
+kilit follows this on a table it knows. A table that has a FULLTEXT index,
+from the dump or from the input, is recorded as having the column, and the
+record stays after the input drops the index. A table the input creates
+without a FULLTEXT index has no such column. On a table from the dump kilit
+cannot know whether an index was dropped in the past, so it keeps the plain
+answer and adds one note, together with the one for 64 instant changes (see
+[Hidden situations](limitations.md#hidden-situations)). Any statement other
+than `ENGINE=InnoDB` that may rebuild the table leaves kilit unable to tell
+whether the column is still there, and the note comes back.
+
+### Index keys longer than 3072 bytes
+
+A key of an InnoDB table in the DYNAMIC row format may be 3072 bytes. By hand
+on MySQL 8.0.46 and 8.4.13 the lab found what counts. A string part counts its
+characters times the most bytes the character set takes (`utf8mb4` 4, `utf8mb3`
+3, `latin1` 1), or its prefix length. Other types count their storage size.
+NULL or NOT NULL changes nothing, and the 2 length bytes of a `VARCHAR` are not
+counted.
+
+| Part | Bytes |
+| --- | --- |
+| `VARCHAR(n)` or prefix `(n)` | n × most bytes per character |
+| `DATE` | 3 |
+| `INT`, `TIMESTAMP` | 4 |
+| `DATETIME`, `DECIMAL(10,2)` | 5 |
+| `DATETIME(6)`, `BIGINT` | 8 |
+| `DECIMAL(20,2)` | 9 |
+| `CHAR(10)` in `utf8mb4` | 40 |
+| `VARBINARY` prefix | its length |
+
+So a `utf8mb4` `VARCHAR(768)` fits alone, and `VARCHAR(766)` fits next to a
+`DATETIME`. One byte over fails with error 1071 in all six variants, even a
+forced `ALGORITHM=INSTANT` (`add-index-key-over-limit`,
+`add-unique-index-key-over-limit`, `varchar-255-to-769-indexed`; the pairs
+`add-index-key-at-limit`, `add-unique-index-key-at-limit` and
+`varchar-255-to-768-indexed` are accepted). The same count applies to `ADD
+INDEX`, `ADD UNIQUE`, and a `MODIFY` or `CHANGE` that makes an indexed column
+longer or gives it a wider character set. A part that kilit cannot size makes
+the answer `UNKNOWN`.
+
+With a non-strict `sql_mode` (`''` or `'NO_ENGINE_SUBSTITUTION'`), MySQL
+treats the same statements differently (`add-index-key-over-limit-sql-mode-not-strict`,
+`varchar-255-to-769-indexed-sql-mode-not-strict`,
+`add-unique-index-key-over-limit-sql-mode-not-strict`):
+
+- A plain key of one part is cut to a prefix with warning 1071, and the
+  statement runs: `ADD INDEX` on a `VARCHAR(769)` gives a key on `code(768)`;
+  the change is INPLACE and does not rebuild, and a forced `ALGORITHM=INSTANT`
+  fails with error 1845. kilit follows the cut prefix, but answers `UNKNOWN`
+  where the lab did not measure the shape, such as a prefix written longer
+  than the limit.
+- A UNIQUE key is never cut: it fails with error 1071. So does any key of two
+  or more parts, by hand.
+
+With no `SET sql_mode` in the input, kilit assumes strict mode and adds a note
+about Laravel's `'strict' => false`. When the input sets `sql_mode` in a form
+kilit cannot read, the answer is `UNKNOWN`. On a COMPACT table the limit is 767
+bytes and kilit keeps its measured `ADD INDEX` answer; a `MODIFY` there is
+`UNKNOWN`, naming error 1071, because the lab measured it by hand only.
+
 ## Changing a column with `->change()`
 
 Laravel turns `->change()` into `MODIFY`, which replaces the column's whole
@@ -270,6 +372,7 @@ the lab measured instead of answering.
 | ↳ when a value does not fit the new type | fails, error 1264 | – | `change-integer-type`, exception: value out of range |
 | Lengthen a VARCHAR, staying on one side of 255 bytes⁴<br>`$table->string('note', 63)->nullable()->change()` | INPLACE | continue | `lengthen-varchar` |
 | ↳ when the row of a known table would pass 65,535 bytes ([how kilit counts](#defaults-and-row-size)) | fails, error 1118 | – | `lengthen-varchar`, exception: row too large |
+| ↳ when an index on the column would pass 3072 bytes, or the new character set makes it pass | fails, error 1071 | – | `key-too-long` |
 | Lengthen a VARCHAR so it crosses 255 bytes⁴<br>`$table->string('note', 64)->nullable()->change()` | COPY, copies every row | **wait** | `lengthen-varchar-past-255-bytes` |
 | Shorten a VARCHAR<br>`$table->string('note', 40)->nullable()->change()` | COPY, copies every row | **wait** | `shorten-varchar` |
 | ↳ when a value is longer than the new length | fails, error 1265 | – | `shorten-varchar`, exception: value too long |
@@ -279,6 +382,8 @@ the lab measured instead of answering.
 | Change a column to `TEXT` with a quoted default, in strict mode | fails, error 1101 | – | `modify-column-blob-literal-default` |
 | Make a column nullable<br>`$table->integer('amount')->nullable()->change()` | INPLACE, rebuilds the table | continue | `make-column-nullable` |
 | Make a column NOT NULL<br>`$table->string('note', 50)->nullable(false)->change()` | INPLACE, rebuilds the table | continue | `make-column-not-null` |
+| ↳ after the input sets `sql_mode` to `''` or `'NO_ENGINE_SUBSTITUTION'`<br>`'strict' => false` in Laravel's `config/database.php`, which sets the second one | COPY, copies every row; with `ALGORITHM=INSTANT`, `ALGORITHM=INPLACE` or `LOCK=NONE` it fails, error 1846 | **wait** | `make-column-not-null-not-strict` |
+| ↳ after the same `sql_mode`, when a row holds NULL | COPY, copies every row: the statement runs although a row holds NULL | **wait** | `make-column-not-null-not-strict` |
 | ↳ when a row holds NULL | fails, error 1138 | – | `make-column-not-null`, exception: NULL in a row |
 | Give, change or drop a default<br>`$table->integer('amount')->default(0)->change()` | INSTANT | continue | `modify-column-default` |
 | Move a column<br>`$table->string('note', 50)->nullable()->after('user_id')->change()` | INPLACE, rebuilds the table | continue | `move-column` |

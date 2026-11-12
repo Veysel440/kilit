@@ -1,0 +1,6 @@
+title = "Rename the primary key column that another table's foreign key references, with foreign_key_checks off"
+setup = [
+    "CREATE TABLE order_items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, order_id BIGINT UNSIGNED NOT NULL, CONSTRAINT fk_items_order FOREIGN KEY (order_id) REFERENCES orders (id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+]
+session = ["SET foreign_key_checks = 0"]
+operation = "RENAME COLUMN id TO order_id"

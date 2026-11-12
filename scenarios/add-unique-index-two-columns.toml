@@ -1,0 +1,2 @@
+title = "Add a unique index of two columns without duplicates"
+operation = "add unique `orders_user_id_amount_unique`(`user_id`, `amount`)"

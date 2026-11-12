@@ -1,0 +1,6 @@
+# Each key length scenario indexes a column code: 768 characters of utf8mb4
+# take 3072 bytes, the most a DYNAMIC table allows; 769 take 3076.
+title = "Add an index of 3076 bytes, with a sql_mode that is not strict"
+setup = ["ALTER TABLE orders ADD COLUMN code VARCHAR(769) NULL"]
+session = ["SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"]
+operation = "ADD INDEX idx_code (code)"

@@ -1,0 +1,3 @@
+title = "Make a column NOT NULL when no row is NULL, with an empty sql_mode"
+session = ["SET sql_mode = ''"]
+operation = "MODIFY COLUMN email VARCHAR(255) NOT NULL"

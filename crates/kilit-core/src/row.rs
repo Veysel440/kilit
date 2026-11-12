@@ -505,6 +505,47 @@ fn column_bytes(
     }
 }
 
+/// The most bytes a character takes in any character set MySQL has.
+pub(crate) const MOST_BYTES_PER_CHARACTER: u64 = 4;
+
+/// The bytes `column` takes in an InnoDB key, against the most bytes a key
+/// holds, as the least and the most it can be: a CHAR or VARCHAR its length
+/// in its character set's widest characters, a BINARY or VARBINARY its
+/// length, any other type its bytes in a row. A length byte counts for
+/// none. By hand on MySQL 8.0.46 and 8.4.13, next to a VARCHAR in one key:
+/// DATE 3, TIMESTAMP 4, INT 4, DATETIME 5, DECIMAL(10,2) 5, DATETIME(6) 8,
+/// BIGINT 8, DECIMAL(20,2) 9 and CHAR(10) in utf8mb4 40, NULL or NOT NULL
+/// alike. When kilit cannot tell a CHAR's or VARCHAR's character set, a
+/// character takes 1 to 4 bytes. `None` for TEXT, BLOB, JSON and GEOMETRY,
+/// which a key takes by a prefix only, and for a type kilit cannot count.
+pub fn key_part_bytes(table: &Table, column: &Column) -> Option<(u64, u64)> {
+    match column_bytes(table, column, &mut None) {
+        Ok(Counted {
+            page: Page::Fixed(bytes) | Page::Variable(bytes) | Page::Char(bytes),
+            ..
+        }) => Some((bytes, bytes)),
+        Ok(_) => None,
+        Err(_) => {
+            let characters = match &column.data_type {
+                DataType::VarChar { length } => *length,
+                DataType::Text(written) => {
+                    let written = written.trim().to_ascii_uppercase();
+                    let (base, rest) = written.split_once('(')?;
+                    if !matches!(base.trim(), "CHAR" | "CHARACTER") {
+                        return None;
+                    }
+                    rest.strip_suffix(')')?.trim().parse().ok()?
+                }
+                _ => return None,
+            };
+            Some((
+                characters,
+                characters.saturating_mul(MOST_BYTES_PER_CHARACTER),
+            ))
+        }
+    }
+}
+
 /// The values of an ENUM or the members of a SET, as written between its
 /// parentheses: the commas outside quotes, plus one.
 fn values(arguments: Option<&str>) -> u64 {

@@ -1,0 +1,2 @@
+title = "Add a secondary index with a descending key part"
+operation = "ADD INDEX idx_orders_amount (amount DESC)"

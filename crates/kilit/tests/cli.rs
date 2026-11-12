@@ -200,7 +200,10 @@ fn indexes_on_the_table_change_the_answer() {
          \x20   measured as drop-column (8 lab scenarios)\n\
          \x20   - status is in the index orders_status_index\n",
         "    INPLACE, rebuilds the table, writes wait\n\
-         \x20   measured as add-fulltext-index (7 lab scenarios)\n\
+         \x20   measured as add-fulltext-index (8 lab scenarios)\n\
+         \x20   - if the table has had a FULLTEXT index that was dropped since it was last \
+         rebuilt: INPLACE, no rebuild, writes wait \
+         (add-fulltext-index-after-dropping-fulltext)\n\
          \x20 line 3:",
         "    INPLACE, no rebuild, writes wait\n\
          \x20   measured as add-fulltext-index (1 lab scenario)\n\
@@ -2468,7 +2471,7 @@ fn only_the_row_line_goes_from_a_new_tables_text_and_the_json_notes_are_what_the
         text.contains(
             "  line 4: alter table `children` modify `qty` smallint not null\n\
              \x20   COPY, copies every row, writes wait\n\
-             \x20   measured as change-integer-type (5 lab scenarios)\n\
+             \x20   measured as change-integer-type (6 lab scenarios)\n\
              \x20   - changes the type from INT to SMALLINT\n\
              \x20   - children is created earlier in these migrations: nothing else uses it yet, \
              so nothing waits for it\n"
@@ -2806,7 +2809,7 @@ no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE
     not checked: creates a new table; no existing rows are touched
   alter table `children` add constraint `children_parent_id_foreign` foreign key (`parent_id`) references `parents` (`id`)
     COPY, copies every row, writes wait
-    measured as add-foreign-key (19 lab scenarios)
+    measured as add-foreign-key (22 lab scenarios)
     - assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it
     - children is created earlier in these migrations: nothing else uses it yet, so nothing waits for it
 
@@ -2824,7 +2827,7 @@ no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE
     not checked: not a schema change
   alter table `children` add constraint `children_parent_id_foreign` foreign key (`parent_id`) references `parents` (`id`)
     COPY, copies every row, writes wait
-    measured as add-foreign-key (19 lab scenarios)
+    measured as add-foreign-key (22 lab scenarios)
     - assumes foreign_key_checks is ON, the MySQL default: nothing before this statement sets it
     - if a row points to a parent row that does not exist: fails with error 1452 (add-foreign-key-orphans)
     - children is created earlier in these migrations: nothing else uses it yet, so nothing waits for it
@@ -2948,8 +2951,8 @@ no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE
   read (not checked): select exists(select * from `users`) as `exists`
   alter table `users` add `nickname` varchar(255) null
     INSTANT, no rebuild, writes continue
-    measured as add-column (10 lab scenarios)
-    - if the table has had 64 instant column changes since it was last rebuilt: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)
+    measured as add-column (17 lab scenarios)
+    - if the table has had 64 instant column changes since it was last rebuilt, or a FULLTEXT index that was dropped since then: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes, add-column-after-dropping-fulltext)
   read (not checked): select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as ...
 
 2026_03_01_000002_reads_two_users_table
@@ -2959,8 +2962,8 @@ no --schema given: kilit knows no table, so it cannot judge MODIFY and CHANGE
   read (not checked): select column_name as `name`, data_type as `type_name`, column_type as `type`, collation_name as ...
   alter table `users` add `phone` varchar(255) null
     INSTANT, no rebuild, writes continue
-    measured as add-column (10 lab scenarios)
-    - if the table has had 64 instant column changes since it was last rebuilt: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes)
+    measured as add-column (17 lab scenarios)
+    - if the table has had 64 instant column changes since it was last rebuilt, or a FULLTEXT index that was dropped since then: INPLACE, rebuilds the table, writes continue (add-column-after-64-changes, add-column-after-dropping-fulltext)
 
 metadata lock on users:
   Every ALTER TABLE, DROP TABLE, RENAME TABLE and TRUNCATE TABLE first waits
@@ -7881,7 +7884,7 @@ fn demo_annotations(strict: bool) -> Vec<String> {
             &format!(
                 "{widen}\n\
                  alter table `orders` modify `amount` bigint not null\n\
-                 measured as change-integer-type (5 lab scenarios)\n\
+                 measured as change-integer-type (6 lab scenarios)\n\
                  - changes the type from INT to BIGINT\n\
                  - if a value does not fit the new type (in strict SQL mode, the default): fails \
                  with error 1264 (int-to-tinyint-out-of-range)"
@@ -7895,7 +7898,7 @@ fn demo_annotations(strict: bool) -> Vec<String> {
                 "{shop}\n\
                  alter table `orders` add constraint `orders_shop_id_foreign` foreign key \
                  (`shop_id`) references `shops` (`id`)\n\
-                 measured as add-foreign-key (19 lab scenarios)\n\
+                 measured as add-foreign-key (22 lab scenarios)\n\
                  - assumes foreign_key_checks is ON, the MySQL default: nothing before this \
                  statement sets it\n\
                  - if a row points to a parent row that does not exist: fails with error 1452 \
@@ -7922,7 +7925,10 @@ fn demo_annotations(strict: bool) -> Vec<String> {
             &format!(
                 "{search}\n\
                  alter table `orders` add fulltext `orders_note_fulltext`(`note`)\n\
-                 measured as add-fulltext-index (7 lab scenarios)"
+                 measured as add-fulltext-index (8 lab scenarios)\n\
+                 - if the table has had a FULLTEXT index that was dropped since it was last \
+                 rebuilt: INPLACE, no rebuild, writes wait \
+                 (add-fulltext-index-after-dropping-fulltext)"
             ),
         ),
         lock_notice("orders", &lock, "mysql-8.4.13"),
@@ -8252,7 +8258,11 @@ fn a_foreign_key_that_the_other_server_answers_differently_is_noted_where_writes
                 "INSTANT, no rebuild, writes continue",
                 "standard input\n\
                  line 2: ALTER TABLE orders DROP COLUMN user_name\n\
-                 measured as drop-column (7 lab scenarios)\n\
+                 measured as drop-column (10 lab scenarios)\n\
+                 - if the table has had 64 instant column changes since it was last \
+                 rebuilt, or a FULLTEXT index that was dropped since then: INPLACE, \
+                 rebuilds the table, writes continue (drop-column-after-64-changes, \
+                 drop-column-after-dropping-fulltext)\n\
                  - on mysql-8.0.46: fails with error 1828"
             ),
             lock_notice("orders", &lock, "mysql-8.4.13"),
@@ -8334,7 +8344,7 @@ fn a_schema_from_another_server_is_a_warning_before_the_statements() {
     let sql = "alter table orders modify amount bigint not null;";
     let widen = "standard input\n\
                  line 1: alter table orders modify amount bigint not null\n\
-                 measured as change-integer-type (5 lab scenarios)\n\
+                 measured as change-integer-type (6 lab scenarios)\n\
                  - changes the type from INT to BIGINT\n\
                  - if a value does not fit the new type (in strict SQL mode, the default): fails \
                  with error 1264 (int-to-tinyint-out-of-range)";
@@ -12617,4 +12627,265 @@ ALTER TABLE x2 MODIFY amount BIGINT NOT NULL;
     );
     assert_ne!(statements_of(&json, 0)[1]["impact"], "new_table", "{text}");
     assert_eq!(code, Some(1), "{text}");
+}
+
+// ---------------------------------------------------------------------------
+// The command on a change to NOT NULL under a sql_mode that is not strict, a
+// key over the length limit, renaming a referenced column, a UNIQUE index
+// that becomes the clustered key, and the hidden column of a dropped FULLTEXT
+// index: the JSON impact and the exit status, with and without --strict.
+// The answers are the lab's (make-column-not-null-sql-mode-empty,
+// add-index-key-over-limit, parent-rename-column-id,
+// add-unique-index-without-primary-key, add-column-after-dropping-fulltext).
+// ---------------------------------------------------------------------------
+
+/// Runs `check` with `args` on `input` against the file `schema`; the text,
+/// the JSON and both exit statuses (as given, and with `--strict`).
+fn answers_with_and_without_strict(
+    schema: &Path,
+    input: &str,
+) -> (String, serde_json::Value, Option<i32>, Option<i32>) {
+    let schema = schema.to_str().unwrap();
+    let (text, json, code) = text_and_json(&["--schema", schema], input);
+    let strict = kilit(&["check", "--strict", "--schema", schema], input);
+    (text, json, code, strict.status.code())
+}
+
+fn first_source_statements(json: &serde_json::Value) -> &Vec<serde_json::Value> {
+    json["sources"][0]["statements"].as_array().unwrap()
+}
+
+#[test]
+fn making_a_column_not_null_after_an_empty_sql_mode_makes_writes_wait_and_exits_with_1() {
+    let sql =
+        "SET SESSION sql_mode = '';\nalter table `orders` modify `note` varchar(50) not null;";
+    let (text, json, code, strict) =
+        answers_with_and_without_strict(&example("mysql-schema.sql"), sql);
+    let statement = &first_source_statements(&json)[1];
+    assert_eq!(statement["impact"], "writes_wait");
+    assert_eq!(statement["algorithm"], "COPY");
+    assert_eq!(statement["copies_rows"], true);
+    assert_eq!(statement["writes"], "blocked");
+    assert_eq!(statement["case"], "make-column-not-null-not-strict");
+    assert!(
+        text.contains("COPY, copies every row, writes wait"),
+        "{text}"
+    );
+    assert_eq!(json["exit_code"], 1);
+    assert_eq!((code, strict), (Some(1), Some(1)));
+}
+
+#[test]
+fn making_a_column_not_null_with_no_sql_mode_in_the_input_runs_with_a_note_and_exits_with_0() {
+    let sql = "alter table `orders` modify `note` varchar(50) not null;";
+    let (text, json, code, strict) =
+        answers_with_and_without_strict(&example("mysql-schema.sql"), sql);
+    let statement = &first_source_statements(&json)[0];
+    assert_eq!(statement["impact"], "writes_continue");
+    assert_eq!(statement["algorithm"], "INPLACE");
+    assert_eq!(statement["rebuilds_table"], true);
+    assert_eq!(statement["case"], "make-column-not-null");
+    assert!(
+        notes_of(statement)
+            .iter()
+            .any(|note| note.starts_with("assumes strict SQL mode")
+                && note.contains("make-column-not-null-sql-mode-not-strict")),
+        "{:?}",
+        notes_of(statement)
+    );
+    assert!(text.contains("    - assumes strict SQL mode"), "{text}");
+    assert_eq!((code, strict), (Some(0), Some(0)));
+}
+
+#[test]
+fn making_a_column_not_null_after_a_strict_sql_mode_list_exits_with_0_and_has_no_mode_note() {
+    let sql = "SET sql_mode = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,\
+               NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';\n\
+               alter table `orders` modify `note` varchar(50) not null;";
+    let (_, json, code, strict) =
+        answers_with_and_without_strict(&example("mysql-schema.sql"), sql);
+    let statement = &first_source_statements(&json)[1];
+    assert_eq!(statement["impact"], "writes_continue");
+    assert_eq!(statement["case"], "make-column-not-null");
+    assert!(
+        notes_of(statement)
+            .iter()
+            .all(|note| !note.starts_with("assumes strict SQL mode")),
+        "{:?}",
+        notes_of(statement)
+    );
+    assert_eq!((code, strict), (Some(0), Some(0)));
+}
+
+#[test]
+fn making_a_column_not_null_after_a_sql_mode_kilit_cannot_read_is_unknown_and_exits_with_3_when_strict()
+ {
+    let sql = "SET GLOBAL sql_mode = '';\nalter table `orders` modify `note` varchar(50) not null;";
+    let (_, json, code, strict) =
+        answers_with_and_without_strict(&example("mysql-schema.sql"), sql);
+    assert_eq!(first_source_statements(&json)[1]["impact"], "unknown");
+    assert_eq!((code, strict), (Some(0), Some(3)));
+}
+
+/// `orders` with a VARCHAR(769) column `code` in utf8mb4: 3076 bytes.
+const ORDERS_WITH_A_LONG_CODE: &str = "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `code` varchar(769) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `short_code` varchar(768) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+";
+
+#[test]
+fn an_index_over_the_key_length_limit_fails_with_1071_and_exits_with_1() {
+    let schema = write_schema("key_length_limit_orders.sql", ORDERS_WITH_A_LONG_CODE);
+    // $table->index('code'): 769 characters of utf8mb4 are 3076 bytes.
+    let sql = "alter table `orders` add index `orders_code_index`(`code`);";
+    let (text, json, code, strict) = answers_with_and_without_strict(&schema, sql);
+    let statement = &first_source_statements(&json)[0];
+    assert_eq!(statement["impact"], "fails");
+    assert_eq!(statement["error"], 1071);
+    assert_eq!(statement["case"], "key-too-long");
+    assert!(text.contains("fails with error 1071"), "{text}");
+    assert_eq!((code, strict), (Some(1), Some(1)));
+    // 768 characters are 3072 bytes, the limit: the index is added.
+    let sql = "alter table `orders` add index `orders_short_code_index`(`short_code`);";
+    let (_, json, code, strict) = answers_with_and_without_strict(&schema, sql);
+    assert_eq!(
+        first_source_statements(&json)[0]["impact"],
+        "writes_continue"
+    );
+    assert_eq!((code, strict), (Some(0), Some(0)));
+}
+
+#[test]
+fn lengthening_an_indexed_column_past_the_key_length_limit_fails_with_1071_and_exits_with_1() {
+    let schema = write_schema(
+        "key_length_limit_modify.sql",
+        "CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `email` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `orders_email_index` (`email`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+",
+    );
+    // $table->string('email', 769)->nullable()->change()
+    let sql = "alter table `orders` modify `email` varchar(769) null;";
+    let (_, json, code, strict) = answers_with_and_without_strict(&schema, sql);
+    let statement = &first_source_statements(&json)[0];
+    assert_eq!(statement["impact"], "fails");
+    assert_eq!(statement["error"], 1071);
+    assert_eq!((code, strict), (Some(1), Some(1)));
+}
+
+#[test]
+fn renaming_the_column_a_foreign_key_references_is_inplace_and_a_forced_instant_exits_with_1() {
+    // orders_user_id_foreign references users.id in the example schema.
+    let schema = example("mysql-schema.sql");
+    let sql = "alter table `users` rename column `id` to `user_key`;";
+    let (_, json, code, strict) = answers_with_and_without_strict(&schema, sql);
+    let statement = &first_source_statements(&json)[0];
+    assert_eq!(statement["impact"], "writes_continue");
+    assert_eq!(statement["algorithm"], "INPLACE");
+    assert_eq!(statement["rebuilds_table"], false);
+    assert_eq!((code, strict), (Some(0), Some(0)));
+    // ->instant(): parent-rename-column-id fails with 1846 when forced INSTANT.
+    let sql = "alter table `users` rename column `id` to `user_key`, algorithm=instant;";
+    let (_, json, code, strict) = answers_with_and_without_strict(&schema, sql);
+    let statement = &first_source_statements(&json)[0];
+    assert_eq!(statement["impact"], "fails");
+    assert_eq!(statement["error"], 1846);
+    assert_eq!((code, strict), (Some(1), Some(1)));
+}
+
+#[test]
+fn renaming_the_foreign_key_s_own_column_stays_instant_and_a_forced_copy_fails() {
+    let schema = example("mysql-schema.sql");
+    let sql = "alter table `orders` rename column `user_id` to `customer_id`;";
+    let (_, json, code, _) = answers_with_and_without_strict(&schema, sql);
+    let statement = &first_source_statements(&json)[0];
+    assert_eq!(statement["impact"], "writes_continue");
+    assert_eq!(statement["algorithm"], "INSTANT");
+    assert_eq!(code, Some(0));
+    let sql = "alter table `orders` rename column `user_id` to `customer_id`, algorithm=copy;";
+    let (_, json, code, strict) = answers_with_and_without_strict(&schema, sql);
+    let statement = &first_source_statements(&json)[0];
+    assert_eq!(statement["impact"], "fails");
+    assert_eq!(statement["error"], 1846);
+    assert_eq!((code, strict), (Some(1), Some(1)));
+}
+
+#[test]
+fn a_unique_index_on_a_table_without_a_primary_key_rebuilds_the_table_and_exits_with_0() {
+    let schema = write_schema(
+        "unique_without_primary_key.sql",
+        "CREATE TABLE `pivot` (
+  `user_id` bigint unsigned NOT NULL,
+  `role_id` bigint unsigned NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+",
+    );
+    // $table->unique(['user_id', 'role_id'])
+    let sql =
+        "alter table `pivot` add unique `pivot_user_id_role_id_unique`(`user_id`, `role_id`);";
+    let (_, json, code, strict) = answers_with_and_without_strict(&schema, sql);
+    let statement = &first_source_statements(&json)[0];
+    assert_eq!(statement["impact"], "writes_continue");
+    assert_eq!(statement["algorithm"], "INPLACE");
+    assert_eq!(statement["rebuilds_table"], true);
+    assert_eq!((code, strict), (Some(0), Some(0)));
+}
+
+#[test]
+fn a_fulltext_index_dropped_in_the_input_makes_the_next_new_column_rebuild_the_table() {
+    // $table->fullText('note') and $table->dropFullText(...) in one run, then
+    // $table->string('coupon')->nullable(): add-column-after-dropping-fulltext.
+    let sql = "alter table `orders` add fulltext `orders_note_fulltext`(`note`);
+               alter table `orders` drop index `orders_note_fulltext`;
+               alter table `orders` add `coupon` varchar(255) null;";
+    let (text, json, code, strict) =
+        answers_with_and_without_strict(&example("mysql-schema.sql"), sql);
+    let statement = &first_source_statements(&json)[2];
+    assert_eq!(statement["impact"], "writes_continue");
+    assert_eq!(statement["algorithm"], "INPLACE");
+    assert_eq!(statement["rebuilds_table"], true);
+    assert!(text.contains("hidden column FTS_DOC_ID"), "{text}");
+    // The first statement makes writes wait.
+    assert_eq!(first_source_statements(&json)[0]["impact"], "writes_wait");
+    assert_eq!((code, strict), (Some(1), Some(1)));
+}
+
+#[test]
+fn a_new_column_and_a_dropped_column_on_a_dump_table_carry_one_note_each_for_the_two_hidden_situations()
+ {
+    let sql = "alter table `orders` add `coupon` varchar(255) null;
+               alter table `orders` drop `legacy_code`;";
+    let (_, json, code, strict) =
+        answers_with_and_without_strict(&example("mysql-schema.sql"), sql);
+    for (at, scenarios) in [
+        (
+            0,
+            "(add-column-after-64-changes, add-column-after-dropping-fulltext)",
+        ),
+        (
+            1,
+            "(drop-column-after-64-changes, drop-column-after-dropping-fulltext)",
+        ),
+    ] {
+        let statement = &first_source_statements(&json)[at];
+        assert_eq!(statement["impact"], "writes_continue", "statement {at}");
+        let notes = notes_of(statement);
+        let hidden: Vec<&String> = notes
+            .iter()
+            .filter(|note| note.contains("64 instant column changes"))
+            .collect();
+        assert_eq!(hidden.len(), 1, "statement {at}: {notes:?}");
+        assert!(
+            hidden[0].contains("FULLTEXT index that was dropped"),
+            "{hidden:?}"
+        );
+        assert!(hidden[0].ends_with(scenarios), "{hidden:?}");
+    }
+    assert_eq!((code, strict), (Some(0), Some(0)));
 }

@@ -1,0 +1,7 @@
+title = "Widen a VARCHAR(255) column that another table's foreign key references to VARCHAR(300)"
+setup = [
+    "ALTER TABLE orders ADD UNIQUE INDEX uq_orders_email (email)",
+    "CREATE TABLE order_items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, order_email VARCHAR(255) NULL, CONSTRAINT fk_items_order_email FOREIGN KEY (order_email) REFERENCES orders (email)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+]
+session = ["SET foreign_key_checks = 1"]
+operation = "MODIFY COLUMN email VARCHAR(300) NULL"

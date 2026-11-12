@@ -3119,7 +3119,7 @@ fn the_findings_of_an_alter_after_reads_still_carry_the_64_changes_note() {
                 notes[alter].iter().any(|note| {
                     note.starts_with(
                         "if the table has had 64 instant column changes since it was last \
-                         rebuilt: ",
+                         rebuilt, or a FULLTEXT index that was dropped since then: ",
                     )
                 }),
                 "{form}: {:?}",
@@ -3457,7 +3457,9 @@ fn laravel_s_table_comment_leaves_the_table_known() {
             let notes = notes_by_statement(server, NOTES, &output);
             assert_eq!(notes.len(), 2);
             assert!(
-                !notes[1].iter().any(|note| note.contains("FULLTEXT")),
+                !notes[1]
+                    .iter()
+                    .any(|note| note.contains("if the table has a FULLTEXT index")),
                 "{server}: {:?}",
                 notes[1]
             );
@@ -5739,4 +5741,198 @@ fn drop_if_exists_then_create_of_a_dump_table_is_a_new_table() {
             "{form}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// A change to NOT NULL under a sql_mode that is not strict, in the output of
+// Laravel 12.72.0 and 13.42.0 (real `migrate --pretend` runs on MySQL 8.4.13
+// and 8.0.46). A migration that sets the session's sql_mode prints the SET;
+// Laravel's 'strict' => false sets it on the connection and prints nothing.
+// ---------------------------------------------------------------------------
+
+/// `php artisan schema:dump` of the Laravel app: `orders` has a nullable
+/// `email`.
+const ORDERS_SCHEMA_DUMP: &str = r#"/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */;
+/*!40103 SET TIME_ZONE='+00:00' */;
+/*!40014 SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0 */;
+/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;
+/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
+/*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;
+DROP TABLE IF EXISTS `migrations`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `migrations` (
+  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `migration` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `batch` int NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `orders`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `email` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
+
+/*!40101 SET SQL_MODE=@OLD_SQL_MODE */;
+/*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;
+/*!40014 SET UNIQUE_CHECKS=@OLD_UNIQUE_CHECKS */;
+/*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
+
+INSERT INTO `migrations` (`id`, `migration`, `batch`) VALUES (1,'2026_01_01_000000_create_orders_table',1);
+"#;
+
+// DB::statement("SET SESSION sql_mode = ''");
+// Schema::table('orders', fn ($t) => $t->string('email')->nullable(false)->change());
+// Laravel 12.72.0, `migrate --pretend` on MySQL 8.4.13 (the same bytes on 8.0.46, in
+// Laravel 13.42.0 in a terminal, and with 'strict' => false).
+const SET_SQL_MODE_THEN_NOT_NULL_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_01_02_000000_change_orders_email ......................................  \n",
+    "  \u{21c2} SET SESSION sql_mode = ''  \n",
+    "  \u{21c2} alter table `orders` modify `email` varchar(255) not null  \n",
+    "\n",
+);
+
+// The same migration on Laravel 13.42.0 where it detects an automated environment: the
+// shorter form.
+const SET_SQL_MODE_THEN_NOT_NULL_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_01_02_000000_change_orders_email .. \n",
+    " \u{21c2} SET SESSION sql_mode = '' \n",
+    " \u{21c2} alter table `orders` modify `email` varchar(255) not null \n",
+    "\n",
+);
+
+// Only the ->change(), with 'strict' => false in config/database.php: the connection
+// sets sql_mode = 'NO_ENGINE_SUBSTITUTION' and --pretend does not print it. Laravel 12.72.0.
+const NOT_NULL_ONLY_LONG: &str = concat!(
+    "\n",
+    "   INFO  Running migrations.  \n",
+    "\n",
+    "  2026_01_02_000000_change_orders_email ......................................  \n",
+    "  \u{21c2} alter table `orders` modify `email` varchar(255) not null  \n",
+    "\n",
+);
+
+// The same on Laravel 13.42.0, shorter form.
+const NOT_NULL_ONLY_SHORT: &str = concat!(
+    "\n",
+    " INFO Running migrations. \n",
+    "\n",
+    " 2026_01_02_000000_change_orders_email .. \n",
+    " \u{21c2} alter table `orders` modify `email` varchar(255) not null \n",
+    "\n",
+);
+
+const MIGRATION_CHANGING_ORDERS_EMAIL: &str = "2026_01_02_000000_change_orders_email";
+
+#[test]
+fn a_migration_that_sets_sql_mode_empty_and_makes_a_column_not_null_copies_the_table() {
+    // By hand on MySQL 8.0.46 and 8.4.13, and in the lab's
+    // make-column-not-null-sql-mode-empty: COPY, writes wait.
+    for (form, output) in [
+        ("long", SET_SQL_MODE_THEN_NOT_NULL_LONG),
+        ("short", SET_SQL_MODE_THEN_NOT_NULL_SHORT),
+    ] {
+        let (answers, impacts) = pretend_on_dump(ORDERS_SCHEMA_DUMP, output);
+        assert_eq!(answers, [NOT_CHECKED, COPY], "{form}");
+        assert_eq!(impacts, [Impact::NotChecked, Impact::WritesWait], "{form}");
+    }
+}
+
+#[test]
+fn a_change_to_not_null_alone_keeps_the_strict_answer_and_says_it_assumes_the_strict_mode() {
+    // With 'strict' => false MySQL copies the table, and the output cannot
+    // show it: the strict answer (INPLACE, rebuild, writes continue) and a
+    // note that names the lab's scenario.
+    for (form, output) in [("long", NOT_NULL_ONLY_LONG), ("short", NOT_NULL_ONLY_SHORT)] {
+        let (answers, impacts) = pretend_on_dump(ORDERS_SCHEMA_DUMP, output);
+        assert_eq!(
+            answers,
+            ["INPLACE, rebuilds the table, writes continue"],
+            "{form}"
+        );
+        assert_eq!(impacts, [Impact::WritesContinue], "{form}");
+        for server in ["mysql-8.0.46", "mysql-8.4.13"] {
+            let notes = notes_by_statement(server, ORDERS_SCHEMA_DUMP, output);
+            assert!(
+                notes[0].iter().any(|note| {
+                    note.starts_with("assumes strict SQL mode")
+                        && note.contains("make-column-not-null-sql-mode-not-strict")
+                }),
+                "{form} on {server}: {:?}",
+                notes[0]
+            );
+        }
+    }
+}
+
+#[test]
+fn the_set_in_laravel_s_output_takes_the_note_away() {
+    // The same ->change() after the SET carries no note about the mode.
+    for (form, output) in [
+        ("long", SET_SQL_MODE_THEN_NOT_NULL_LONG),
+        ("short", SET_SQL_MODE_THEN_NOT_NULL_SHORT),
+    ] {
+        let notes = notes_by_statement("mysql-8.4.13", ORDERS_SCHEMA_DUMP, output);
+        assert!(
+            notes[1]
+                .iter()
+                .all(|note| !note.starts_with("assumes strict SQL mode")),
+            "{form}: {:?}",
+            notes[1]
+        );
+    }
+}
+
+#[test]
+fn the_dump_s_own_sql_mode_lines_do_not_make_the_change_a_copy() {
+    // The dump of the app sets SQL_MODE='NO_AUTO_VALUE_ON_ZERO' around its
+    // tables: that is the dump's session, not the migration's.
+    assert!(ORDERS_SCHEMA_DUMP.contains("SET @OLD_SQL_MODE=@@SQL_MODE"));
+    let (answers, _) = pretend_on_dump(ORDERS_SCHEMA_DUMP, NOT_NULL_ONLY_LONG);
+    assert_eq!(answers, ["INPLACE, rebuilds the table, writes continue"]);
+}
+
+const USERS_AND_ORDERS_WITH_USER_KEY: &str = "CREATE TABLE `users` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+CREATE TABLE `orders` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint unsigned NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `orders_user_id_foreign` (`user_id`),
+  CONSTRAINT `orders_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+";
+
+#[test]
+fn laravel_s_forced_instant_rename_follows_the_lab_for_a_foreign_key_s_column_and_its_parent() {
+    // $table->renameColumn('user_id', 'customer_id')->instant() prints
+    // `rename column ..., algorithm=instant`. In the lab and by hand on MySQL
+    // 8.0.46 and 8.4.13: INSTANT is accepted for the key's own column
+    // (rename-column-in-foreign-key) and fails with 1846 for the column the key
+    // references (parent-rename-column-id).
+    let output = long_form(&[(
+        MIGRATION_CHANGING_ORDERS_EMAIL,
+        &[
+            "alter table `orders` rename column `user_id` to `customer_id`, algorithm=instant",
+            "alter table `users` rename column `id` to `user_key`, algorithm=instant",
+        ],
+    )]);
+    let (answers, impacts) = pretend_on_dump(USERS_AND_ORDERS_WITH_USER_KEY, &output);
+    assert_eq!(answers, [INSTANT, "fails with error 1846"]);
+    assert_eq!(impacts, [Impact::WritesContinue, Impact::Fails]);
 }

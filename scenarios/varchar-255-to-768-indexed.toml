@@ -1,0 +1,3 @@
+title = "Widen an indexed VARCHAR(255) column to VARCHAR(768), a key of 3072 bytes"
+setup = ["ALTER TABLE orders ADD INDEX idx_orders_email (email)"]
+operation = "MODIFY COLUMN email VARCHAR(768) NULL"

@@ -1,0 +1,2 @@
+title = "Rename a BIGINT UNSIGNED column"
+operation = "RENAME COLUMN user_id TO customer_id"

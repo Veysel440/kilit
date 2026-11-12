@@ -1,0 +1,8 @@
+title = "Widen a VARCHAR(100) foreign key column to VARCHAR(120), past 255 bytes"
+setup = [
+    "ALTER TABLE users ADD UNIQUE INDEX uq_users_name (name)",
+    "ALTER TABLE orders ADD COLUMN user_name VARCHAR(100) NULL",
+    "ALTER TABLE orders ADD CONSTRAINT fk_orders_user_name FOREIGN KEY (user_name) REFERENCES users (name)",
+]
+session = ["SET foreign_key_checks = 1"]
+operation = "MODIFY COLUMN user_name VARCHAR(120) NULL"

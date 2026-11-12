@@ -1,0 +1,5 @@
+# Each key length scenario indexes a column code: 768 characters of utf8mb4
+# take 3072 bytes, the most a DYNAMIC table allows; 769 take 3076.
+title = "Add an index of 3076 bytes"
+setup = ["ALTER TABLE orders ADD COLUMN code VARCHAR(769) NULL"]
+operation = "ADD INDEX idx_code (code)"
